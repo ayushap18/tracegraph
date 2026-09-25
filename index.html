@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jev Router</title>
+<style>
+  :root {
+    --bg:#f4f3ef; --panel:#ffffff; --ink:#18181b; --muted:#6b6b73; --line:#e4e2dc; --soft:#efede7; --edge:#d9d6ce;
+    --accent:#3b5bdb; --on-accent:#ffffff; --ok:#1f9d55; --bad:#d6453d; --warn:#c98a12;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#0d0e11; --panel:#15171c; --ink:#ececf0; --muted:#8d8f99; --line:#262932; --soft:#1c1f26; --edge:#2c303a;
+      --accent:#7c9bff; --on-accent:#0d0e11; --ok:#4ccf85; --bad:#ff6b61; --warn:#f0b43c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#0d0e11; --panel:#15171c; --ink:#ececf0; --muted:#8d8f99; --line:#262932; --soft:#1c1f26; --edge:#2c303a;
+    --accent:#7c9bff; --on-accent:#0d0e11; --ok:#4ccf85; --bad:#ff6b61; --warn:#f0b43c;
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 ui-sans-serif, system-ui, sans-serif; }
+  header { display:flex; align-items:center; gap:14px; padding:14px 20px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  h1 { font-size:18px; margin:0; letter-spacing:-.01em; }
+  h1 small { color:var(--muted); font-weight:400; font-size:13px; margin-left:6px; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--muted); display:inline-block; margin-right:6px; }
+  .dot.on { background:var(--ok); animation:pulse 1.6s infinite; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent)} 100%{box-shadow:0 0 0 8px transparent} }
+  #conn { color:var(--muted); font-size:13px; }
+  .kpis { margin-left:auto; display:flex; gap:22px; flex-wrap:wrap; }
+  .kpi .v { font-size:18px; font-weight:700; font-variant-numeric:tabular-nums; letter-spacing:-.02em; }
+  .kpi .l { color:var(--muted); font-size:11px; }
+
+  .wrap { padding:16px 20px 28px; display:flex; flex-direction:column; gap:16px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 16px; min-width:0; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:0 0 10px; font-weight:600;
+              display:flex; justify-content:space-between; gap:8px; }
+  .panel h2 span { text-transform:none; letter-spacing:0; font-weight:400; }
+
+  form { display:flex; gap:10px; flex-wrap:wrap; }
+  #q { flex:1 1 320px; min-width:0; font:inherit; font-size:16px; padding:11px 14px; border-radius:9px; border:1px solid var(--line);
+       background:var(--bg); color:var(--ink); outline:none; }
+  #q:focus { border-color:var(--accent); }
+  button { background:var(--accent); color:var(--on-accent); border:0; border-radius:9px; padding:10px 18px; font:inherit; font-weight:600; cursor:pointer; }
+  button.ghost { background:var(--soft); color:var(--ink); border:1px solid var(--line); }
+  button.ghost.on { background:var(--warn); color:#111; border-color:transparent; }
+  .auto { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:13px; }
+  input[type=range] { accent-color:var(--accent); width:90px; }
+  .samples { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+  .samples button { background:transparent; color:var(--muted); border:1px dashed var(--line); padding:3px 10px; font-size:12px; font-weight:500; border-radius:99px; }
+  .samples button:hover { color:var(--ink); border-color:var(--muted); }
+
+  .top { display:grid; grid-template-columns:minmax(0,1.75fr) minmax(0,1fr); gap:16px; }
+  .row { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:16px; }
+
+  #graph { width:100%; height:auto; display:block; }
+  #graph .edge { fill:none; stroke:var(--edge); transition:stroke-width .5s ease, stroke-opacity .5s ease; }
+  #graph .lbl { font:600 13px system-ui; fill:var(--ink); }
+  #graph .sub { font:11px system-ui; fill:var(--muted); font-variant-numeric:tabular-nums; }
+  #graph .pct { font:600 12px system-ui; fill:var(--muted); font-variant-numeric:tabular-nums; transition:opacity .4s; }
+  #graph .node rect, #graph .node circle { fill:var(--panel); stroke:var(--line); stroke-width:1.5; transition:stroke .3s, fill .3s; }
+  #graph .hit rect { stroke-width:3; }
+  #graph .ring { fill:none; stroke:var(--accent); stroke-width:3; stroke-dasharray:40 250; opacity:0; transform-origin:340px 260px; }
+  #graph .thinking .ring { opacity:1; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .caption { font-size:13px; color:var(--muted); min-height:20px; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .caption b { color:var(--ink); font-weight:600; }
+
+  .chip { display:inline-block; padding:1px 9px; border-radius:99px; font-size:12px; font-weight:600; color:#fff; background:var(--c, var(--muted)); }
+  #ansQ { font-size:15px; font-weight:600; margin:0 0 6px; word-wrap:break-word; }
+  #ansMeta { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:12px; color:var(--muted); margin-bottom:10px; }
+  #ansText { white-space:pre-wrap; background:var(--soft); border-radius:9px; padding:10px 12px; min-height:48px; margin:0 0 6px; word-wrap:break-word; }
+  #ansText.fail { color:var(--muted); }
+  #ansSrc { font-size:12px; color:var(--accent); word-break:break-all; }
+  .bars { margin-top:12px; }
+  .bar { display:grid; grid-template-columns:78px 1fr 40px; align-items:center; gap:8px; margin:4px 0; font-size:12px; }
+  .bar .track { height:9px; background:var(--soft); border-radius:5px; overflow:hidden; }
+  .bar .fill { height:100%; width:0; border-radius:5px; background:var(--c); transition:width .5s ease; }
+  .bar .n { text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .signals { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:12px; }
+  .sig { background:var(--soft); border-radius:8px; padding:6px 8px; }
+  .sig .v { font-weight:700; font-variant-numeric:tabular-nums; }
+  .sig .l { font-size:11px; color:var(--muted); }
+
+  canvas { width:100%; height:170px; display:block; }
+  .legend { display:flex; gap:10px; flex-wrap:wrap; font-size:11px; color:var(--muted); margin-top:6px; }
+  .legend i { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; background:var(--c); }
+
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; font-weight:600; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; padding:0 8px 6px; }
+  td { padding:7px 8px; border-top:1px solid var(--line); vertical-align:top; }
+  td.num { font-variant-numeric:tabular-nums; color:var(--muted); white-space:nowrap; }
+  td.ans { color:var(--muted); max-width:340px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  tr.new { animation:flash 1.2s ease-out; }
+  @keyframes flash { from { background:color-mix(in srgb, var(--accent) 18%, transparent); } to { background:transparent; } }
+  .src { font-size:11px; color:var(--muted); }
+
+  @media (max-width: 1000px) { .top, .row { grid-template-columns:1fr; } .kpis { margin-left:0; } }
+  @media (max-width: 640px) {
+    header, .wrap { padding-left:16px; padding-right:16px; }
+    .hide-sm { display:none; }
+    td.ans { max-width:140px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="dot" id="dot"></span>Jev Router <small>one Jev call picks the agent for any query</small></h1>
+  <span id="conn">connecting…</span>
+  <div class="kpis">
+    <div class="kpi"><div class="v" id="kQ">0</div><div class="l">queries routed</div></div>
+    <div class="kpi"><div class="v" id="kLat">–</div><div class="l">avg Jev latency</div></div>
+    <div class="kpi"><div class="v" id="kConf">–</div><div class="l">avg route confidence</div></div>
+    <div class="kpi"><div class="v" id="kCost">$0</div><div class="l">Jev cost so far</div></div>
+  </div>
+</header>
+
+<div class="wrap">
+  <section class="panel">
+    <form id="form">
+      <input id="q" placeholder="Ask anything: 18% of 2450, weather in Paris, 100 USD to INR, who was Tesla…" autocomplete="off" maxlength="500">
+      <button type="submit">Route</button>
+      <div class="auto">
+        <button type="button" class="ghost" id="auto">Autopilot off</button>
+        every <input type="range" id="interval" min="1" max="10" step="0.5" value="3"> <span id="intervalV">3</span>s
+      </div>
+    </form>
+    <div class="samples" id="samples"></div>
+  </section>
+
+  <div class="top">
+    <section class="panel">
+      <h2>Live routing graph <span id="inflight">idle</span></h2>
+      <div class="caption" id="caption">Waiting for a query…</div>
+      <svg id="graph" viewBox="0 0 1000 520" role="img" aria-label="Routing graph: query to Jev to agents to answer">
+        <g id="edges"></g><g id="nodes"></g><g id="particles"></g>
+      </svg>
+    </section>
+    <section class="panel">
+      <h2>Latest decision</h2>
+      <p id="ansQ">–</p>
+      <div id="ansMeta"></div>
+      <pre id="ansText">Ask something above, or switch on Autopilot to stream sample queries.</pre>
+      <a id="ansSrc" target="_blank" rel="noopener"></a>
+      <div class="bars" id="probBars"></div>
+      <div class="signals">
+        <div class="sig"><div class="v" id="sUrg">–</div><div class="l">urgency (0–2)</div></div>
+        <div class="sig"><div class="v" id="sClear">–</div><div class="l">clear enough</div></div>
+        <div class="sig"><div class="v" id="sUnsafe">–</div><div class="l">unsafe</div></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="row">
+    <section class="panel"><h2>Route confidence <span>last 60</span></h2><canvas id="confChart"></canvas><div class="legend" id="legend"></div></section>
+    <section class="panel"><h2>Traffic by agent</h2><div id="traffic"></div></section>
+    <section class="panel"><h2>Latency per query <span>Jev + agent, ms</span></h2><canvas id="latChart"></canvas>
+      <div class="legend"><span><i style="--c:var(--accent)"></i>Jev routing</span><span><i style="--c:var(--muted)"></i>agent work</span></div></section>
+  </div>
+
+  <section class="panel">
+    <h2>Routing log</h2>
+    <table>
+      <thead><tr><th class="hide-sm">time</th><th>query</th><th>agent</th><th>conf</th><th class="hide-sm">Jev ms</th><th class="hide-sm">answer</th></tr></thead>
+      <tbody id="log"></tbody>
+    </table>
+  </section>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SVG = 'http://www.w3.org/2000/svg';
+const svgEl = (tag, attrs = {}, parent) => { const e = document.createElementNS(SVG, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent && parent.appendChild(e); return e; };
+const COLORS = { math:'#4f7cff', weather:'#17a9bd', time:'#9466ff', currency:'#23a864', knowledge:'#d99a06', code:'#e8622f', chat:'#d4549f', clarify:'#8a8f9c', blocked:'#e0443a' };
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+let AGENTS = [], ALL = [], price = 0, autopilot = false;
+const counts = {}, records = [], pending = new Map();
+let totals = { jev: 0, conf: 0, n: 0 };
+
+// ---------- graph ----------
+const P = { query:[90,260], jev:[340,260], answer:[925,260] };
+const AX = 690, PW = 124, PH = 36;
+const edges = {}, nodes = {};
+
+function buildGraph() {
+  const ge = $('edges'), gn = $('nodes');
+  ge.innerHTML = gn.innerHTML = '';
+  ALL.forEach((a, i) => { P[a] = [AX, 36 + i * (448 / (ALL.length - 1))]; });
+  edges.qj = svgEl('path', { class:'edge', d:`M${P.query[0]+30},260 L${P.jev[0]-46},260`, 'stroke-width':3 }, ge);
+  for (const a of ALL) {
+    const [x, y] = P[a];
+    edges['j_' + a] = svgEl('path', { class:'edge', d:`M${P.jev[0]+46},260 C 480,260 540,${y} ${x-PW/2},${y}`, 'stroke-width':1.5 }, ge);
+    edges['a_' + a] = svgEl('path', { class:'edge', d:`M${x+PW/2},${y} C 820,${y} 830,260 ${P.answer[0]-30},260`, 'stroke-width':1.5 }, ge);
+    const pct = svgEl('text', { class:'pct', x:x-PW/2-8, y:y-6, 'text-anchor':'end', opacity:0 }, ge);
+    const g = svgEl('g', { class:'node' }, gn);
+    const r = svgEl('rect', { x:x-PW/2, y:y-PH/2, width:PW, height:PH, rx:10 }, g);
+    svgEl('circle', { cx:x-PW/2+15, cy:y, r:5, style:`fill:${COLORS[a]};stroke:none` }, g);
+    const t = svgEl('text', { class:'lbl', x:x-PW/2+27, y:y+4.5 }, g); t.textContent = a;
+    const n = svgEl('text', { class:'sub', x:x+PW/2-10, y:y+4, 'text-anchor':'end' }, g); n.textContent = counts[a] || 0;
+    nodes[a] = { g, r, n, pct };
+  }
+  const q = svgEl('g', { class:'node' }, gn);
+  svgEl('circle', { cx:P.query[0], cy:260, r:30 }, q);
+  svgEl('text', { class:'lbl', x:P.query[0], y:265, 'text-anchor':'middle' }, q).textContent = 'query';
+  const j = svgEl('g', { class:'node', id:'jevNode' }, gn);
+  svgEl('circle', { cx:P.jev[0], cy:260, r:46, style:'stroke:var(--accent);stroke-width:2' }, j);
+  svgEl('circle', { class:'ring', cx:P.jev[0], cy:260, r:54 }, j);
+  svgEl('text', { class:'lbl', x:P.jev[0], y:258, 'text-anchor':'middle', style:'font-size:17px' }, j).textContent = 'Jev';
+  svgEl('text', { class:'sub', x:P.jev[0], y:275, 'text-anchor':'middle' }, j).textContent = 'router';
+  const an = svgEl('g', { class:'node' }, gn);
+  svgEl('circle', { cx:P.answer[0], cy:260, r:30 }, an);
+  svgEl('text', { class:'lbl', x:P.answer[0], y:265, 'text-anchor':'middle' }, an).textContent = 'answer';
+}
+
+function showRoute(e) {
+  for (const a of ALL) {
+    const p = e.probabilities[a] ?? 0, chosen = a === e.agent;
+    const je = edges['j_' + a], ae = edges['a_' + a];
+    je.setAttribute('stroke-width', 1.5 + p * 12);
+    je.style.stroke = p > 0.02 || chosen ? COLORS[a] : '';
+    je.style.strokeOpacity = chosen ? 0.9 : Math.max(0.15, p);
+    ae.setAttribute('stroke-width', chosen ? 4 : 1.5);
+    ae.style.stroke = chosen ? COLORS[a] : '';
+    ae.style.strokeOpacity = chosen ? 0.9 : 1;
+    const nd = nodes[a];
+    nd.pct.textContent = a in e.probabilities ? Math.round(p * 100) + '%' : '';
+    nd.pct.setAttribute('opacity', p >= 0.01 ? 1 : 0);
+    nd.g.classList.toggle('hit', chosen);
+    nd.r.style.stroke = chosen ? COLORS[a] : '';
+    nd.n.textContent = counts[a] || 0;
+  }
+}
+
+// Particles travel along edge paths; each has a path, a start time, a duration and a color.
+const particles = [];
+function spawn(path, color, ms = 650, loop = false, key) {
+  const dot = svgEl('circle', { r:6, fill:color }, $('particles'));
+  const p = { path, len:path.getTotalLength(), t0:performance.now(), ms, dot, loop, key };
+  particles.push(p); return p;
+}
+function kill(key) { for (const p of particles) if (p.key === key) p.dead = true; }
+function tick(now) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    let t = (now - p.t0) / p.ms;
+    if (p.loop) t %= 1;
+    if (p.dead || t >= 1) { p.dot.remove(); particles.splice(i, 1); continue; }
+    const pt = p.path.getPointAtLength(p.len * (1 - Math.pow(1 - t, 2)));
+    p.dot.setAttribute('cx', pt.x); p.dot.setAttribute('cy', pt.y);
+    p.dot.setAttribute('opacity', t > .85 ? (1 - t) / .15 : 1);
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+function setThinking() {
+  $('jevNode').classList.toggle('thinking', pending.size > 0);
+  $('inflight').textContent = pending.size ? `${pending.size} in flight` : 'idle';
+}
+
+// ---------- panels ----------
+function buildStatic() {
+  $('probBars').innerHTML = AGENTS.map(a => `<div class="bar"><span>${a}</span><div class="track"><div class="fill" id="pb_${a}" style="--c:${COLORS[a]}"></div></div><span class="n" id="pn_${a}">–</span></div>`).join('');
+  $('traffic').innerHTML = ALL.map(a => `<div class="bar"><span>${a}</span><div class="track"><div class="fill" id="tb_${a}" style="--c:${COLORS[a]}"></div></div><span class="n" id="tn_${a}">0</span></div>`).join('');
+  $('legend').innerHTML = ALL.map(a => `<span><i style="--c:${COLORS[a]}"></i>${a}</span>`).join('');
+}
+
+function showDecision(e, text) {
+  $('ansQ').textContent = text;
+  $('ansMeta').innerHTML = `<span class="chip" style="--c:${COLORS[e.agent]}">${e.agent}</span><span>${esc(e.reason)}</span><span>· ${e.jev_ms} ms · ${esc(e.model)}</span>`;
+  $('ansText').textContent = 'Agent working…'; $('ansText').className = ''; $('ansSrc').textContent = ''; $('ansSrc').removeAttribute('href');
+  for (const a of AGENTS) {
+    const p = e.probabilities[a] ?? 0;
+    $('pb_' + a).style.width = (p * 100) + '%';
+    $('pn_' + a).textContent = Math.round(p * 100) + '%';
+  }
+  $('sUrg').textContent = e.urgency.toFixed(1);
+  $('sClear').textContent = Math.round(e.clear * 100) + '%';
+  $('sUnsafe').textContent = Math.round(e.unsafe * 100) + '%';
+}
+
+function showAnswer(e) {
+  $('ansText').textContent = e.answer;
+  $('ansText').className = e.ok ? '' : 'fail';
+  if (e.source) { $('ansSrc').textContent = e.source; $('ansSrc').href = e.source.startsWith('http') ? e.source : 'https://' + e.source; }
+}
+
+function updateTraffic() {
+  const max = Math.max(1, ...ALL.map(a => counts[a] || 0));
+  for (const a of ALL) { $('tb_' + a).style.width = ((counts[a] || 0) / max * 100) + '%'; $('tn_' + a).textContent = counts[a] || 0; }
+}
+
+function updateKpis(stats) {
+  if (stats) {
+    $('kQ').textContent = stats.queries.toLocaleString();
+    const cost = stats.input_tokens * price;
+    $('kCost').textContent = '$' + (cost < 0.01 ? cost.toFixed(5) : cost.toFixed(3));
+  }
+  if (totals.n) {
+    $('kLat').textContent = Math.round(totals.jev / totals.n) + ' ms';
+    $('kConf').textContent = Math.round(totals.conf / totals.n * 100) + '%';
+  }
+}
+
+function canvas(id) {
+  const cv = $(id), dpr = devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext('2d'); g.scale(dpr, dpr);
+  return [g, w, h];
+}
+
+function drawConf() {
+  const [g, w, h] = canvas('confChart'), data = records.slice(-60);
+  const pad = { l:30, r:6, t:8, b:8 }, iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
+  const y = v => pad.t + ih * (1 - v), x = i => pad.l + (data.length < 2 ? iw / 2 : i * iw / (data.length - 1));
+  g.font = '10px system-ui'; g.fillStyle = css('--muted'); g.strokeStyle = css('--line'); g.lineWidth = 1;
+  for (const v of [0, .5, 1]) { g.beginPath(); g.moveTo(pad.l, y(v)); g.lineTo(w - pad.r, y(v)); g.stroke(); g.fillText(v * 100 + '%', 0, y(v) + 3); }
+  g.setLineDash([4, 4]); g.strokeStyle = css('--warn'); g.beginPath(); g.moveTo(pad.l, y(.45)); g.lineTo(w - pad.r, y(.45)); g.stroke(); g.setLineDash([]);
+  if (!data.length) return;
+  g.strokeStyle = css('--edge'); g.lineWidth = 1.5; g.beginPath();
+  data.forEach((d, i) => i ? g.lineTo(x(i), y(d.confidence)) : g.moveTo(x(i), y(d.confidence))); g.stroke();
+  data.forEach((d, i) => { g.fillStyle = COLORS[d.agent]; g.beginPath(); g.arc(x(i), y(d.confidence), i === data.length - 1 ? 5 : 3.5, 0, 7); g.fill(); });
+}
+
+function drawLat() {
+  const [g, w, h] = canvas('latChart'), data = records.slice(-40);
+  if (!data.length) return;
+  const max = Math.max(...data.map(d => d.jev_ms + (d.agent_ms || 0))) * 1.1;
+  const bw = w / 40, bh = v => v / max * (h - 16);
+  g.font = '10px system-ui'; g.fillStyle = css('--muted'); g.fillText(Math.round(max / 1.1) + ' ms max', 2, 10);
+  data.forEach((d, i) => {
+    const x = i * bw + 1, jh = bh(d.jev_ms), ah = bh(d.agent_ms || 0);
+    g.fillStyle = css('--accent'); g.fillRect(x, h - jh, bw - 2, jh);
+    g.fillStyle = css('--muted'); g.globalAlpha = .55; g.fillRect(x, h - jh - ah, bw - 2, ah); g.globalAlpha = 1;
+  });
+}
+
+function addLog(r, fresh) {
+  const tr = document.createElement('tr');
+  if (fresh) tr.className = 'new';
+  const t = new Date((r.at || Date.now() / 1000) * 1000).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  tr.innerHTML = `<td class="num hide-sm">${t}</td><td>${esc(r.text)} ${r.source === 'autopilot' ? '<span class="src">auto</span>' : ''}</td>
+    <td><span class="chip" style="--c:${COLORS[r.agent]}">${r.agent}</span></td><td class="num">${Math.round(r.confidence * 100)}%</td>
+    <td class="num hide-sm">${r.jev_ms}</td><td class="ans hide-sm" title="${esc(r.answer || '')}">${esc(r.answer || '')}</td>`;
+  $('log').prepend(tr);
+  while ($('log').children.length > 25) $('log').lastChild.remove();
+}
+
+function record(r, fresh) {
+  counts[r.agent] = (counts[r.agent] || 0) + 1;
+  totals.jev += r.jev_ms; totals.conf += r.confidence; totals.n++;
+  records.push(r); if (records.length > 200) records.shift();
+  addLog(r, fresh);
+}
+
+function redraw() { updateTraffic(); drawConf(); drawLat(); updateKpis(); }
+addEventListener('resize', () => { drawConf(); drawLat(); });
+
+// ---------- live events ----------
+function onEvent(e) {
+  if (e.type === 'hello') {
+    AGENTS = Object.keys(e.agents); ALL = [...AGENTS, ...e.guards]; price = e.price;
+    for (const k in counts) delete counts[k];
+    records.length = 0; totals = { jev: 0, conf: 0, n: 0 }; $('log').innerHTML = '';
+    buildStatic();
+    for (const r of e.history) record(r, false);
+    buildGraph();
+    const last = e.history[e.history.length - 1];
+    if (last) { showRoute(last); showDecision(last, last.text); showAnswer(last); $('caption').innerHTML = `Last: <b>${esc(last.text)}</b>`; }
+    $('samples').innerHTML = e.samples.slice(0, 12).map(s => `<button type="button">${esc(s)}</button>`).join('');
+    applyState(e.state); updateKpis(e.stats); redraw();
+  } else if (e.type === 'state') applyState(e.state);
+  else if (e.type === 'query') {
+    pending.set(e.id, { text: e.text, source: e.source });
+    $('caption').innerHTML = `Routing <b>${esc(e.text)}</b>${e.source === 'autopilot' ? ' <span class="src">autopilot</span>' : ''}`;
+    spawn(edges.qj, css('--accent'), 700, true, e.id);
+    setThinking();
+  } else if (e.type === 'routed') {
+    const p = pending.get(e.id); kill(e.id);
+    if (p) Object.assign(p, e);
+    showRoute(e); showDecision(e, p ? p.text : '');
+    spawn(edges['j_' + e.agent], COLORS[e.agent], 700, true, 'a' + e.id);
+    // Faint ghost particles on the runner-up edges show the alternatives Jev weighed.
+    Object.entries(e.probabilities).filter(([a, v]) => a !== e.agent && v >= 0.08).forEach(([a]) => spawn(edges['j_' + a], COLORS[a] + '88', 900));
+    updateKpis(e.stats);
+  } else if (e.type === 'answered') {
+    const p = pending.get(e.id); pending.delete(e.id); kill('a' + e.id);
+    spawn(edges['a_' + e.agent], COLORS[e.agent], 600);
+    if (p && p.agent) {
+      showAnswer(e);
+      record({ ...p, ...e, at: Date.now() / 1000 }, true);
+      nodes[e.agent].n.textContent = counts[e.agent];
+      $('caption').innerHTML = `Answered <b>${esc(p.text)}</b> via ${e.agent}`;
+      redraw();
+    }
+    setThinking();
+  } else if (e.type === 'error') {
+    pending.delete(e.id); kill(e.id); setThinking();
+    $('conn').textContent = e.message;
+  }
+}
+
+function applyState(s) {
+  autopilot = s.autopilot;
+  $('auto').textContent = autopilot ? 'Autopilot on' : 'Autopilot off';
+  $('auto').classList.toggle('on', autopilot);
+  $('interval').value = s.interval; $('intervalV').textContent = s.interval;
+}
+
+const post = (url, body) => fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+$('form').onsubmit = ev => { ev.preventDefault(); const v = $('q').value.trim(); if (v) { post('/ask', { query: v }); $('q').value = ''; } };
+$('samples').onclick = ev => { if (ev.target.tagName === 'BUTTON') post('/ask', { query: ev.target.textContent }); };
+$('auto').onclick = () => post('/control', { autopilot: !autopilot });
+$('interval').oninput = ev => { $('intervalV').textContent = ev.target.value; };
+$('interval').onchange = ev => post('/control', { interval: +ev.target.value });
+
+const es = new EventSource('/events');
+es.onopen = () => { $('dot').classList.add('on'); $('conn').textContent = 'live'; };
+es.onmessage = m => onEvent(JSON.parse(m.data));
+es.onerror = () => { $('dot').classList.remove('on'); $('conn').textContent = 'server offline, retrying…'; pending.clear(); setThinking(); };
+</script>
+</body>
+</html>
