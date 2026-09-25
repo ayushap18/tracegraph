@@ -57,7 +57,7 @@ Every event has `type`. `qid` is an int per query; `tid` is `"<qid>.<n>"` per su
 | `done` | `qid`, `total_ms`, `stats` |
 | `error` | `qid` (nullable), `tid` (nullable), `message` |
 
-`record` (in `hello.history`, newest last, max 60): `{qid, text, source, at, plan: {planner, subtasks}, tasks: [routed ∪ answered fields per tid], merged: {answer, engine}, total_ms}`.
+`record` (in `hello.history`, ascending qid, max 60, including queries still in flight): `{qid, text, source, at, plan: {planner, subtasks} | null, tasks: [{tid, text} ∪ routed ∪ answered fields ∪ {error?} per tid], merged: {answer, engine} | null, total_ms (null while in flight), error (query-level message or null)}`. A subscriber that falls 500 events behind has its stream closed so EventSource reconnects and resyncs from `hello`.
 
 `stats`: `{queries, subtasks, errors, jev_input_tokens, claude_input_tokens, claude_output_tokens, by_agent: {agent: count}}` — `by_agent` counts subtasks and includes guards.
 
