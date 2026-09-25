@@ -29,6 +29,17 @@ export interface Run {
   total_ms: number | null
   done: boolean
   error?: string
+  marks: Marks // client receipt times (performance.now ms); empty for runs loaded from history
+}
+
+// When each stage's event reached this browser, for the pipeline waterfall.
+export interface Marks {
+  query?: number
+  plan?: number
+  routed: Record<string, number>
+  answered: Record<string, number>
+  merged?: number
+  done?: number
 }
 
 export interface Store {
@@ -47,7 +58,7 @@ export interface Store {
 }
 
 type Action =
-  | { kind: 'events'; events: ServerEvent[] }
+  | { kind: 'events'; events: Array<{ e: ServerEvent; rx: number }> }
   | { kind: 'conn'; connected: boolean }
 
 const initial: Store = {
@@ -58,6 +69,7 @@ const initial: Store = {
 
 const newRun = (qid: number, text = '', source: Source = 'you'): Run => ({
   qid, text, source, at: Date.now() / 1000, order: [], tasks: {}, mergeStream: '', total_ms: null, done: false,
+  marks: { routed: {}, answered: {} },
 })
 
 function fromRecord(r: HistoryRecord): Run {
@@ -106,7 +118,7 @@ function withTask(run: Run, tid: string, fn: (t: Task) => Task): Run {
   return { ...run, order: run.tasks[tid] ? run.order : [...run.order, tid], tasks: { ...run.tasks, [tid]: fn(cur) } }
 }
 
-function apply(s: Store, e: ServerEvent): Store {
+function apply(s: Store, e: ServerEvent, rx: number): Store {
   switch (e.type) {
     case 'hello': {
       const runs = (e.history ?? []).map(fromRecord).sort((a, b) => a.qid - b.qid).slice(-MAX_RUNS)
@@ -117,18 +129,18 @@ function apply(s: Store, e: ServerEvent): Store {
     }
     case 'state': return { ...s, state: e.state }
     case 'query':
-      return { ...s, runs: withRun(s.runs, e.qid, r => ({ ...r, text: e.text, source: e.source })) }
+      return { ...s, runs: withRun(s.runs, e.qid, r => ({ ...r, text: e.text, source: e.source, marks: { ...r.marks, query: rx } })) }
     case 'plan':
       return {
         ...s, runs: withRun(s.runs, e.qid, r => {
-          let out: Run = { ...r, plan: { planner: e.planner, multi: e.multi, ms: e.ms } }
+          let out: Run = { ...r, plan: { planner: e.planner, multi: e.multi, ms: e.ms }, marks: { ...r.marks, plan: rx } }
           for (const st of e.subtasks) out = withTask(out, st.tid, t => ({ ...t, text: st.text }))
           return out
         }),
       }
     case 'routed': {
       const { type: _t, qid: _q, tid, ...routed } = e
-      return { ...s, runs: withRun(s.runs, e.qid, r => withTask(r, tid, t => ({ ...t, routed }))) }
+      return { ...s, runs: withRun(s.runs, e.qid, r => withTask({ ...r, marks: { ...r.marks, routed: { ...r.marks.routed, [tid]: rx } } }, tid, t => ({ ...t, routed }))) }
     }
     case 'delta':
       return {
@@ -138,12 +150,12 @@ function apply(s: Store, e: ServerEvent): Store {
       }
     case 'answered': {
       const { type: _t, qid: _q, tid, ...answered } = e
-      return { ...s, runs: withRun(s.runs, e.qid, r => withTask(r, tid, t => ({ ...t, answered, stream: answered.answer }))) }
+      return { ...s, runs: withRun(s.runs, e.qid, r => withTask({ ...r, marks: { ...r.marks, answered: { ...r.marks.answered, [tid]: rx } } }, tid, t => ({ ...t, answered, stream: answered.answer }))) }
     }
     case 'merged':
-      return { ...s, runs: withRun(s.runs, e.qid, r => ({ ...r, merged: { answer: e.answer, engine: e.engine, ms: e.ms }, mergeStream: e.answer })) }
+      return { ...s, runs: withRun(s.runs, e.qid, r => ({ ...r, merged: { answer: e.answer, engine: e.engine, ms: e.ms }, mergeStream: e.answer, marks: { ...r.marks, merged: rx } })) }
     case 'done':
-      return { ...s, stats: e.stats ?? s.stats, runs: withRun(s.runs, e.qid, r => ({ ...r, done: true, total_ms: e.total_ms })) }
+      return { ...s, stats: e.stats ?? s.stats, runs: withRun(s.runs, e.qid, r => ({ ...r, done: true, total_ms: e.total_ms, marks: { ...r.marks, done: rx } })) }
     case 'error': {
       // A tid error belongs to that task (it never gets routed); only query-level errors mark the run.
       const runs = e.qid == null ? s.runs : withRun(s.runs, e.qid, r => e.tid
@@ -159,7 +171,7 @@ function reducer(s: Store, a: Action): Store {
   if (a.kind === 'conn') return { ...s, connected: a.connected }
   let out = s
   let structural = false
-  for (const e of a.events) { out = apply(out, e); if (e.type !== 'delta') structural = true }
+  for (const { e, rx } of a.events) { out = apply(out, e, rx); if (e.type !== 'delta') structural = true }
   return structural ? { ...out, rev: s.rev + 1 } : out
 }
 
@@ -175,7 +187,7 @@ export function useEventStream(url = '/events') {
   }, [])
 
   useEffect(() => {
-    let queue: ServerEvent[] = []
+    let queue: Array<{ e: ServerEvent; rx: number }> = []
     let raf = 0, timer = 0, retry = 0, backoff = 1000
     let es: EventSource | null = null
     const flush = () => {
@@ -208,7 +220,7 @@ export function useEventStream(url = '/events') {
         let e: ServerEvent
         try { e = JSON.parse(m.data) as ServerEvent } catch { return }
         if (!e || typeof e !== 'object' || !('type' in e)) return
-        queue.push(e)
+        queue.push({ e, rx: performance.now() })
         for (const fn of listeners.current) { try { fn(e) } catch (err) { console.error(err) } }
         if (e.type === 'hello') flush() // reconnect: reset immediately so later events land on fresh state
         else schedule()

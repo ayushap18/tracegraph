@@ -1,8 +1,10 @@
-import { useEffect, useState, type CSSProperties, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
 import { colorOf, type ControlState } from '../protocol'
 import type { Run, Store, Task } from '../useEventStream'
 import { post } from '../useEventStream'
 import { clock, costs, latency, money, ms, pct, rows, safeHref } from '../lib'
+import Markdown from './Markdown'
+import { Sparkline, useCountUp } from './Viz'
 
 const cvar = (c: string) => ({ '--c': c }) as CSSProperties
 
@@ -25,24 +27,41 @@ export function Bars({ probs, max = 5 }: { probs: Record<string, number>; max?: 
   )
 }
 
-export function AskBox({ samples, state }: { samples: string[]; state: ControlState }) {
+export function AskBox({ samples, state, inputRef }: { samples: string[]; state: ControlState; inputRef: RefObject<HTMLInputElement> }) {
   const [q, setQ] = useState('')
+  const past = useRef<string[]>([])
+  const cursor = useRef(-1)
   const [interval, setIntervalV] = useState(state.interval)
   const [busy, setBusy] = useState(false)
   useEffect(() => setIntervalV(state.interval), [state.interval])
   const ask = async (text: string) => {
     const v = text.trim().slice(0, 500)
     if (!v) return
+    past.current = [v, ...past.current.filter(p => p !== v)].slice(0, 30)
+    cursor.current = -1
     setBusy(true)
     await post('/ask', { query: v })
     setBusy(false)
   }
   const submit = (e: FormEvent) => { e.preventDefault(); void ask(q); setQ('') }
+  // Up/Down walk back through what you asked this session, like a shell.
+  const recall = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+    const list = past.current
+    if (!list.length) return
+    e.preventDefault()
+    cursor.current = Math.max(-1, Math.min(list.length - 1, cursor.current + (e.key === 'ArrowUp' ? 1 : -1)))
+    setQ(cursor.current < 0 ? '' : list[cursor.current])
+  }
   return (
     <section className="panel">
       <form className="ask" onSubmit={submit}>
-        <input value={q} onChange={e => setQ(e.target.value)} maxLength={500} autoComplete="off" aria-label="Query"
-          placeholder="Ask anything, or several things: weather in Paris and convert 100 EUR to INR" />
+        <div className="ask-field">
+          <span className="ask-icon" aria-hidden="true">⌕</span>
+          <input ref={inputRef} value={q} onChange={e => setQ(e.target.value)} onKeyDown={recall} maxLength={500} autoComplete="off" aria-label="Query"
+            placeholder="Ask anything, or several things: weather in Paris and convert 100 EUR to INR" />
+          <kbd className="hint">/</kbd>
+        </div>
         <button type="submit" disabled={busy || !q.trim()}>Route</button>
         <div className="auto">
           <button type="button" className={'ghost' + (state.autopilot ? ' on' : '')} aria-pressed={state.autopilot}
@@ -64,23 +83,39 @@ export function AskBox({ samples, state }: { samples: string[]; state: ControlSt
   )
 }
 
-export function Kpis({ store }: { store: Store }) {
-  const routed = rows(store.runs).map(r => r.task.routed).filter(Boolean)
-  const avg = (f: (x: NonNullable<Task['routed']>) => number) => (routed.length ? routed.reduce((s, r) => s + f(r!), 0) / routed.length : undefined)
-  const c = costs(store.stats, store.prices)
-  const jm = avg(r => r.jev_ms)
-  const items: Array<[string, string]> = [
-    [store.stats.queries.toLocaleString(), 'queries'],
-    [store.stats.subtasks.toLocaleString(), 'subtasks'],
-    [jm == null ? '–' : ms(jm), 'avg Jev latency'],
-    [pct(avg(r => r.confidence)), 'avg confidence'],
-    [money(c.jev), 'Jev cost'],
-    [store.claude ? money(c.claude) : 'off', 'Claude cost'],
-  ]
+function Kpi({ label, value, fmt, spark, color, min, note }: {
+  label: string; value: number | null; fmt: (v: number) => string; spark?: number[]; color?: string; min?: number; note?: string
+}) {
+  const v = useCountUp(value ?? 0)
   return (
-    <div className="kpis">
-      {items.map(([v, l]) => <div className="kpi" key={l}><div className="v">{v}</div><div className="l">{l}</div></div>)}
+    <div className="kpi-card">
+      <div className="kpi-l">{label}</div>
+      <div className="kpi-v">{value == null ? '–' : fmt(v)}</div>
+      {spark && spark.length > 1 ? <Sparkline values={spark} color={color} min={min} /> : <div className="kpi-note">{note ?? '\u00a0'}</div>}
     </div>
+  )
+}
+
+export function Kpis({ store }: { store: Store }) {
+  const routed = rows(store.runs).map(r => r.task.routed).filter((r): r is NonNullable<Task['routed']> => !!r)
+  const avg = (f: (x: NonNullable<Task['routed']>) => number) => (routed.length ? routed.reduce((s, r) => s + f(r), 0) / routed.length : null)
+  const c = costs(store.stats, store.prices)
+  const recent = routed.slice(-30)
+  const done = store.runs.filter(r => r.done && r.total_ms != null).slice(-30)
+  const multi = store.runs.filter(r => r.order.length > 1).length
+  const int = (v: number) => Math.round(v).toLocaleString()
+  return (
+    <section className="kpi-strip" aria-label="Key numbers">
+      <Kpi label="queries" value={store.stats.queries} fmt={int} spark={store.runs.slice(-30).map(r => r.order.length)} min={0}
+        note={`${multi} multi-agent`} />
+      <Kpi label="subtasks routed" value={store.stats.subtasks} fmt={int} note={`${store.stats.errors} errors`} />
+      <Kpi label="avg Jev latency" value={avg(r => r.jev_ms)} fmt={v => int(v) + ' ms'} spark={recent.map(r => r.jev_ms)} />
+      <Kpi label="avg confidence" value={avg(r => r.confidence)} fmt={v => Math.round(v * 100) + '%'} spark={recent.map(r => r.confidence)} color="var(--ok)" min={0} />
+      <Kpi label="end-to-end" value={done.length ? done.reduce((s, r) => s + (r.total_ms ?? 0), 0) / done.length : null} fmt={v => int(v) + ' ms'}
+        spark={done.map(r => r.total_ms ?? 0)} color="var(--warn)" min={0} />
+      <Kpi label="spend" value={c.jev + c.claude} fmt={money}
+        note={store.claude ? `Jev ${money(c.jev)} · Claude ${money(c.claude)}` : `Jev only · ${store.stats.jev_input_tokens.toLocaleString()} tokens`} />
+    </section>
   )
 }
 
@@ -102,9 +137,9 @@ function TaskCard({ task }: { task: Task }) {
         </div>
       )}
       {r && <Bars probs={r.probabilities} max={4} />}
-      {task.error && !r && <pre className="answer fail">{task.error}</pre>}
+      {task.error && !r && <div className="answer fail">{task.error}</div>}
       {(text || r) && (
-        <pre className={'answer' + (a && !a.ok ? ' fail' : '') + (!a && r ? ' streaming' : '')}>{text || 'Agent working…'}</pre>
+        <div className={'answer' + (a && !a.ok ? ' fail' : '') + (!a && r ? ' streaming' : '')}>{text ? <Markdown text={text} /> : 'Agent working…'}</div>
       )}
       {a && (
         <div className="meta">
@@ -141,7 +176,7 @@ export function LatestRun({ run, claude }: { run: Run | undefined; claude: boole
       {(multi || (run.merged && run.merged.engine !== 'single')) && (
         <div className="merged">
           <h3>Merged answer {run.merged && <span className="tag">{run.merged.engine}</span>} {run.merged?.ms != null && <span className="muted small">{run.merged.ms} ms</span>}</h3>
-          <pre className={'answer' + (!run.merged ? ' streaming' : '')}>{mergeText || 'Waiting for agents…'}</pre>
+          <div className={'answer big' + (!run.merged ? ' streaming' : '')}>{mergeText ? <Markdown text={mergeText} /> : 'Waiting for agents…'}</div>
         </div>
       )}
       {run.error && <p className="err">{run.error}</p>}
@@ -208,7 +243,7 @@ export function Inspector({ id, store, onClose }: { id: string; store: Store; on
       <h3>Subtask {tid}</h3>
       <p>{hit.task.text}</p>
       {hit.task.routed ? <><Chip agent={hit.task.routed.agent} /><Bars probs={hit.task.routed.probabilities} max={8} /></> : <p className="muted">{hit.task.error ?? 'routing…'}</p>}
-      <pre className="answer">{hit.task.answered?.answer ?? (hit.task.stream || '…')}</pre>
+      <div className="answer"><Markdown text={hit.task.answered?.answer ?? (hit.task.stream || '…')} /></div>
     </> : <p className="muted">Subtask {tid} is no longer in memory.</p>
   } else {
     const done = store.runs.filter(r => r.done)
