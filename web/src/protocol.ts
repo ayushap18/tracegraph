@@ -39,6 +39,7 @@ export interface RoutedFields {
   clear: number
   jev_ms: number
   model: string
+  examples?: boolean // learning plan: route examples were in Jev's criteria for this decision
 }
 
 export interface AnsweredFields {
@@ -89,6 +90,7 @@ export interface HelloEvent {
   claude: boolean // an LLM engine is active (kept for older clients)
   engine?: EngineInfo | null
   engines?: EngineInfo[]
+  route_examples?: boolean // learning plan: corrections are fed to Jev as examples
   state: ControlState
   stats: Stats
   history: HistoryRecord[]
@@ -145,12 +147,12 @@ export interface CompareResponse { compare_id: string; runs: Array<{ engine: str
 export interface CompareDetail { compare_id: string; query: string; runs: RunRecord[] }
 
 export type EvalStatus = 'running' | 'done' | 'cancelled' | 'error'
-export interface EvalSummary { eval_id: string; at: number; engine: string | null; status: EvalStatus; passed: number; total: number; accuracy: number; silent_wrong: number; done?: number }
+export interface EvalSummary { eval_id: string; at: number; engine: string | null; status: EvalStatus; passed: number; total: number; accuracy: number; silent_wrong: number; done?: number; examples?: boolean }
 export interface EvalCase { id: string; query: string; tags: string[]; pass: boolean; reasons: string[]; agents: string[]; answer: string; ms: number; qid: number | null; expect_agents?: string[] | null; expect_outcome?: string | null }
 export interface EvalDetail extends EvalSummary { cases: EvalCase[] }
 
 export interface EngineTestResult { ok: boolean; ms: number; text?: string; error?: string }
-export interface ControlBody { autopilot?: boolean; interval?: number; engine?: string; engine_order?: string[] }
+export interface ControlBody { autopilot?: boolean; interval?: number; engine?: string; engine_order?: string[]; route_examples?: boolean }
 export interface ControlResponse extends ControlState { engine: string | null }
 
 export const MERGE_TID = 'merge'
@@ -184,3 +186,27 @@ export function colorHex(agent: string | undefined): string {
 export const emptyStats = (): Stats => ({
   queries: 0, subtasks: 0, errors: 0, jev_input_tokens: 0, claude_input_tokens: 0, claude_output_tokens: 0, by_agent: {},
 })
+
+// ---------- routing that learns (docs/PLAN-learning.md) ----------
+export type Verdict = 'right' | 'wrong'
+/** One user judgement of one routing decision (one per run subtask). `correct` = picked when verdict is 'right'. */
+export interface Label {
+  id: string; qid: number; tid: string; text: string; picked: string; correct: string; verdict: Verdict
+  confidence: number; margin: number; note: string | null; at: number; promoted: string | null
+}
+export interface NewLabel { qid: number; tid: string; verdict: Verdict; correct?: string; note?: string }
+export type ShakyReason = 'low confidence' | 'low margin' | 'clarify' | 'agent failed' | 're-asked'
+/** A saved, unlabelled subtask whose routing looked doubtful. */
+export interface ReviewItem {
+  qid: number; tid: string; text: string; picked: string; confidence: number; margin: number
+  runner_up: string | null; probabilities: Record<string, number>; reasons: ShakyReason[]; at: number
+}
+/** Examples Jev sees for one agent when route examples are on. */
+export interface AgentExamples { agent: string; examples: string[]; not: string[] }
+export interface EvalCompareCase { id: string; query: string; a_pass: boolean | null; b_pass: boolean | null }
+export interface EvalCompareSide { eval_id: string; engine: string | null; examples: boolean; accuracy: number; passed: number; total: number; silent_wrong: number; mean_jev_tokens: number }
+export interface EvalCompare { a: EvalCompareSide; b: EvalCompareSide; cases: EvalCompareCase[] }
+export interface EngineHealth {
+  name: string; label: string; calls: number; ok: number; fallbacks_from: number; fallbacks_to: number
+  p50_ms: number | null; p95_ms: number | null; last_error: string | null; cooling_until: number | null
+}

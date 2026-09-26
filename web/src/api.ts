@@ -2,6 +2,7 @@
 import type {
   AgentInfo, AskBody, AskResponse, CompareDetail, CompareResponse, ControlBody, ControlResponse, EngineTestResult,
   EvalDetail, EvalSummary, FileInfo, NewAgent, RunRecord, SessionDetail, SessionSummary,
+  AgentExamples, EngineHealth, EvalCompare, Label, NewLabel, ReviewItem, ShakyReason, Verdict,
 } from './protocol'
 
 export class ApiError extends Error {
@@ -96,7 +97,10 @@ export const compare = (query: string, engines: string[]) => post<CompareRespons
 export const getCompare = (id: string) => get<CompareDetail>(`/api/compare/${enc(id)}`)
 
 // ---------- evals ----------
-export const runEval = (engine?: string) => post<{ eval_id: string }>('/api/evals/run', engine ? { engine } : {})
+/** examples: run with route examples on (true) or off (false); omitted = the server's current setting. */
+export const runEval = (engine?: string, examples?: boolean) =>
+  post<{ eval_id: string }>('/api/evals/run', { ...(engine ? { engine } : {}), ...(examples === undefined ? {} : { examples }) })
+export const compareEvals = (a: string, b: string) => get<EvalCompare>(`/api/evals/compare?a=${enc(a)}&b=${enc(b)}`)
 export const cancelEval = (id: string) => post<{ ok: true }>(`/api/evals/${enc(id)}/cancel`)
 export const listEvals = () => get<{ evals: EvalSummary[] }>('/api/evals')
 export const getEval = (id: string) => get<EvalDetail>(`/api/evals/${enc(id)}`)
@@ -108,6 +112,25 @@ export const control = (body: ControlBody) => post<ControlResponse>('/control', 
 export const setEngine = (name: string) => control({ engine: name })
 /** The order Auto tries engines in; engines left out keep their place after these. */
 export const setEngineOrder = (order: string[]) => control({ engine_order: order })
+
+/** Turn route examples on or off for every new run. */
+export const setRouteExamples = (on: boolean) => control({ route_examples: on })
+export const engineHealth = () => get<{ engines: EngineHealth[] }>('/api/engines/health')
+
+// ---------- labels and review (docs/PLAN-learning.md) ----------
+export const createLabel = (l: NewLabel) => post<Label>('/api/labels', l)
+export const deleteLabel = (id: string) => del<{ ok: true }>(`/api/labels/${enc(id)}`)
+export interface ListLabelsParams { agent?: string; verdict?: Verdict; qid?: number; limit?: number }
+export function listLabels(p: ListLabelsParams = {}) {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(p)) if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+  const s = qs.toString()
+  return get<{ labels: Label[] }>('/api/labels' + (s ? '?' + s : ''))
+}
+export const promoteLabel = (id: string) => post<{ case_id: string; created: boolean }>(`/api/labels/${enc(id)}/promote`)
+export const listReview = (limit = 50, reason?: ShakyReason) =>
+  get<{ items: ReviewItem[]; scanned: number }>(`/api/review?limit=${limit}` + (reason ? `&reason=${enc(reason)}` : ''))
+export const agentExamples = () => get<{ enabled: boolean; agents: AgentExamples[] }>('/api/agents/examples')
 
 /** Human-readable message for any thrown value. */
 export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e))
