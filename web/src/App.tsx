@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { StoreProvider, useStore } from './store'
 import { ThemeProvider, useTheme } from './theme'
 import { ToastProvider, useHashPath, useToast } from './ui'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { matchRoute, NAV, type Match } from './routes'
 import { setPageMeta } from './meta'
 import { BottomBar, Sidebar, SlotCtx, TopBar } from './components/Shell'
@@ -21,11 +22,13 @@ const About = lazy(() => import('./pages/About'))
 export default function App() {
   return (
     <ThemeProvider>
-      <ToastProvider>
-        <StoreProvider url="/events">
-          <AppShell />
-        </StoreProvider>
-      </ToastProvider>
+      <TooltipProvider delayDuration={400}>
+        <ToastProvider>
+          <StoreProvider url="/events">
+            <AppShell />
+          </StoreProvider>
+        </ToastProvider>
+      </TooltipProvider>
     </ThemeProvider>
   )
 }

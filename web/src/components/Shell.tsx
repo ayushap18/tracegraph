@@ -5,7 +5,7 @@ import { NAV, MOBILE_TABS, navFor, type RouteName } from '../routes'
 import { useStore } from '../store'
 import { useTheme, THEME_ICON, THEME_LABEL } from '../theme'
 import { EnginePicker } from './EnginePicker'
-import { IconButton } from '../ui'
+import { IconButton, buttonClass } from '../ui'
 
 // App chrome: a collapsible left sidebar on desktop, a bottom tab bar (+ "More" sheet) under 760px,
 // and a top bar with the page title, the ⌘K hint and a slot pages fill with contextual actions.
@@ -136,8 +136,8 @@ function MoreSheet({ items, active, onClose }: { items: typeof NAV; active: Rout
         ))}
         <div className="sheet-row">
           <EnginePicker engine={store.engine} engines={store.engines} placement="up" />
-          <button type="button" role="menuitem" className="btn btn-secondary btn-sm" onClick={cycle}>
-            <Icon name={THEME_ICON[theme]} size={14} /><span className="btn-label">Theme: {THEME_LABEL[theme]}</span>
+          <button type="button" role="menuitem" data-slot="button" className={buttonClass('secondary', 'sm')} onClick={cycle}>
+            <Icon name={THEME_ICON[theme]} size={14} />Theme: {THEME_LABEL[theme]}
           </button>
         </div>
       </div>

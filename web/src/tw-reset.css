@@ -11,3 +11,9 @@
 .tg-scope button:hover:not(:disabled), .tg-scope button:active:not(:disabled) { filter: none; transform: none; }
 .tg-scope :where(*, ::before, ::after) { border: 0 solid var(--line); }
 .tg-scope ::selection { background: color-mix(in srgb, var(--accent) 24%, transparent); }
+
+/* Components from src/components/ui and src/ui.tsx carry data-slot. While the legacy global
+   `button {}` rule still exists, neutralise it for them wherever they render (this layer
+   outranks the legacy layer; utilities then set the real look). */
+button:where([data-slot]) { background: none; color: inherit; border: 0 solid var(--line); border-radius: 0; padding: 0; font: inherit; font-weight: inherit; }
+button:where([data-slot]):hover, button:where([data-slot]):active { filter: none; transform: none; }

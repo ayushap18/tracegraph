@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import type { EngineInfo } from '../protocol'
 import { EngineIcon, Icon } from '../icons'
 import { setEngine, setEngineOrder, errorText } from '../api'
-import { useToast } from '../ui'
+import { iconButtonClass, useToast } from '../ui'
 
 // Which LLM backend writes plans, answers and merges. Subscription CLIs (Claude Code, Codex, Antigravity) run on the
 // user's own plan; the Anthropic API bills per token; "Keyless" uses only the built-in agents. "Auto" tries them in
@@ -105,9 +105,9 @@ export function EnginePicker({ engine, engines, placement = 'down', compact = fa
                     <li key={n} className={e?.available ? '' : 'off'} title={note}>
                       <EngineIcon name={n} size={14} />
                       <span className="engine-opt"><span className="engine-name">{e?.label ?? n}</span>{note && <span className="engine-meta">{note}</span>}</span>
-                      <button type="button" className="icon-btn" aria-label={`Move ${e?.label ?? n} up`} disabled={i === 0}
+                      <button type="button" data-slot="icon-button" className={iconButtonClass('ghost', 'sm', false, 'size-6')} aria-label={`Move ${e?.label ?? n} up`} disabled={i === 0}
                         onClick={() => void move(order, i, -1)}><Icon name="arrow-up" size={13} /></button>
-                      <button type="button" className="icon-btn" aria-label={`Move ${e?.label ?? n} down`} disabled={i === order.length - 1}
+                      <button type="button" data-slot="icon-button" className={iconButtonClass('ghost', 'sm', false, 'size-6')} aria-label={`Move ${e?.label ?? n} down`} disabled={i === order.length - 1}
                         onClick={() => void move(order, i, 1)}><Icon name="arrow-down" size={13} /></button>
                     </li>
                   )

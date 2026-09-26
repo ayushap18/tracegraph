@@ -3,7 +3,7 @@ import { ask, cancelRun, deleteSession, errorText, getSession, listFiles, listSe
 import type { FileInfo, SessionSummary } from '../protocol'
 import { useStore } from '../store'
 import { fromRecord, type Run } from '../useEventStream'
-import { Badge, Button, EmptyState, IconButton, Skeleton, Spinner, StatusBadge, copyText, navigate, timeAgo, useHashPath, useNow, useToast } from '../ui'
+import { Badge, Button, EmptyState, IconButton, Skeleton, Spinner, StatusBadge, buttonClass, copyText, navigate, timeAgo, useHashPath, useNow, useToast } from '../ui'
 import { AgentIcon, Icon, Logo } from '../icons'
 import { Chip } from '../components/Panels'
 import Markdown from '../components/Markdown'
@@ -386,7 +386,7 @@ export default function Chat() {
           <div className="ct-head">
             <span className="ct-title"><Icon name="graph" size={15} />Trace{selected && <span className="muted num"> · Run #{selected.qid}</span>}</span>
             <span className="ct-actions">
-              {selected && <a className="btn btn-ghost btn-sm" href={`#/runs/${selected.qid}`}><Icon name="external" size={14} /><span className="btn-label">Open</span></a>}
+              {selected && <a className={buttonClass('ghost', 'sm')} href={`#/runs/${selected.qid}`}><Icon name="external" size={14} />Open</a>}
               <IconButton icon="close" label="Hide trace panel" size="sm" onClick={toggleTrace} />
             </span>
           </div>
