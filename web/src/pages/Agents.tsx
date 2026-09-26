@@ -4,7 +4,6 @@ import { Badge, Button, EmptyState, Field, Skeleton, Toggle, useToast } from '..
 import { useStore } from '../store'
 import { AgentIcon, Icon } from '../icons'
 import { colorOf, type AgentInfo } from '../protocol'
-import './agents.css'
 
 // Every agent Jev can route to: built-ins, guards and user-defined agents, plus a form to create new ones.
 // Validation mirrors the server (PLAN-v4 §1.6) so errors show while typing, not after a round trip.

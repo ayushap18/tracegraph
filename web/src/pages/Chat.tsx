@@ -11,7 +11,6 @@ import { TraceView } from '../components/TraceView'
 import { Waterfall } from '../components/Viz'
 import { TopActions } from '../components/Shell'
 import { pct } from '../lib'
-import '../chat.css'
 
 // Chat home: sessions on the left, the conversation in the middle, the selected turn's live trace on the right.
 // Every message is a run with source "chat" and a session_id, so follow-ups reach the planner with context.

@@ -1,7 +1,4 @@
 import { MotionConfig } from 'motion/react'
-import '@fontsource-variable/geist'
-import '@fontsource-variable/geist-mono'
-import '../tw.css'
 import { Nav } from './about/Nav'
 import { Hero } from './about/Hero'
 import { Engines } from './about/Engines'

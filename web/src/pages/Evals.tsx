@@ -7,7 +7,6 @@ import type { EvalCase, EvalDetail, EvalSummary } from '../protocol'
 import { Chip } from '../components/Panels'
 import { Sparkline } from '../components/Viz'
 import { ms } from '../lib'
-import './evals.css'
 
 // Eval suite: run the cases in evals/cases.jsonl through the real pipeline, watch progress live over SSE,
 // and compare accuracy across runs. `#/evals/:id` drills into one run's cases.

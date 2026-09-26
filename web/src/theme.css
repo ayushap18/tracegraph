@@ -1,0 +1,64 @@
+/* Design tokens: the single source of truth for colour, type, space and shape.
+   Read by the legacy CSS (var(--bg) …) and by Tailwind/shadcn (mapped in index.css).
+   <html data-theme> always holds the resolved theme ("light" | "dark"); see theme.tsx
+   and the boot script in index.html. Neutrals are zinc; cobalt is the only accent. */
+
+:root {
+  /* surfaces */
+  --bg:#fafafa; --bg2:#f4f4f5; --panel:#ffffff; --soft:#f4f4f5;
+  --line:#e4e4e7; --edge:#d4d4d8;
+  /* text */
+  --ink:#18181b; --muted:#71717a;
+  /* accent + status */
+  --accent:#3b5bdb; --on-accent:#ffffff; --info:var(--accent);
+  --ok:#1f9d55; --warn:#b7791f; --bad:#d6453d;
+  /* retired: kept as an alias so older gradients render as solid cobalt until removed */
+  --accent2:var(--accent);
+  /* effects */
+  --shadow:0 1px 2px rgb(24 24 27 / .05);
+  --shadow-lg:0 1px 2px rgb(24 24 27 / .06), 0 16px 40px -12px rgb(24 24 27 / .18);
+  --dots:rgb(24 24 27 / .07);
+  --hover:rgb(24 24 27 / .04);
+  --scrim:rgb(9 9 11 / .4);
+  color-scheme: light;
+
+  /* agent colours: data, not decoration; light values tuned for white surfaces */
+  --agent-math:#4f7cff; --agent-weather:#1597a9; --agent-time:#8b5cf6; --agent-currency:#1f9d5a;
+  --agent-knowledge:#c98a06; --agent-code:#e0582a; --agent-chat:#cf4b97; --agent-research:#0e9594;
+  --agent-clarify:#80858f; --agent-blocked:#d93a30; --agent-document:#6371f0; --agent-data:#2a8f82;
+  --agent-report:#a86d24; --agent-run:#c2410c;
+  --agent-fallback-0:#7a6cf0; --agent-fallback-1:#3d9970; --agent-fallback-2:#c0587e;
+  --agent-fallback-3:#b8860b; --agent-fallback-4:#5a8fa8;
+
+  /* space, type, shape */
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px; --sp-7:48px; --sp-8:64px;
+  --fs-xs:12px; --fs-sm:13px; --fs-md:14px; --fs-lg:16px; --fs-xl:20px; --fs-2xl:24px; --fs-3xl:30px;
+  --r-sm:6px; --r-md:8px; --r-lg:12px; --r-xl:16px;
+  --font:'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono:'Geist Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* layout + motion */
+  --sidebar-w:240px; --sidebar-w-c:64px; --topbar-h:56px; --bottombar-h:62px;
+  --ease:cubic-bezier(.2,.8,.2,1);
+}
+
+:root[data-theme="dark"] {
+  --bg:#09090b; --bg2:#0f0f11; --panel:#111113; --soft:#18181b;
+  --line:#27272a; --edge:#3f3f46;
+  --ink:#fafafa; --muted:#a1a1aa;
+  --accent:#7c9bff; --on-accent:#09090b;
+  --ok:#4ccf85; --warn:#f0b43c; --bad:#ff6b61;
+  --shadow:0 1px 2px rgb(0 0 0 / .4);
+  --shadow-lg:0 1px 2px rgb(0 0 0 / .4), 0 16px 40px -12px rgb(0 0 0 / .6);
+  --dots:rgb(250 250 250 / .06);
+  --hover:rgb(250 250 250 / .05);
+  --scrim:rgb(0 0 0 / .6);
+  color-scheme: dark;
+
+  --agent-math:#7b9dff; --agent-weather:#3cc6d8; --agent-time:#ad8aff; --agent-currency:#42c882;
+  --agent-knowledge:#f0b53a; --agent-code:#ff8457; --agent-chat:#ec79b8; --agent-research:#34c7c5;
+  --agent-clarify:#a1a6b2; --agent-blocked:#ff6b61; --agent-document:#909bff; --agent-data:#4fc0b0;
+  --agent-report:#d39a4f; --agent-run:#f06a33;
+  --agent-fallback-0:#9c90ff; --agent-fallback-1:#5fbf92; --agent-fallback-2:#e07ea1;
+  --agent-fallback-3:#dcac3a; --agent-fallback-4:#7fb0c8;
+}

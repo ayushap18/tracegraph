@@ -4,7 +4,6 @@ import { Inspector } from './Panels'
 import { useTrace } from './useTrace'
 import { AgentIcon, Icon } from '../icons'
 import { Spinner } from '../ui'
-import '../chat.css'
 import type { Run, Store } from '../useEventStream'
 
 // The trace graph for one run with its own zoom toolbar and node inspector. Used by Chat and Run detail;

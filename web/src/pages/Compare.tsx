@@ -8,7 +8,6 @@ import { fromRecord, type Run } from '../useEventStream'
 import { Chip } from '../components/Panels'
 import Markdown from '../components/Markdown'
 import { ms } from '../lib'
-import './compare.css'
 
 // Side-by-side engine answers. Live runs stream from the store (by qid); anything the store no longer holds comes
 // from GET /api/compare/:id. Past comparisons in this browser live in localStorage.

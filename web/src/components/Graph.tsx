@@ -209,7 +209,7 @@ export default function Graph(props: GraphProps) {
 
   const cardEl = (c: Card): ReactNode => {
     const faded = linked ? !linked.has(c.id) : c.dim
-    const cls = ['card', 'st-' + c.status, c.id === selected ? 'sel' : '', faded ? 'faded' : '', c.id === 'none' ? 'ghost' : ''].join(' ')
+    const cls = ['node', 'st-' + c.status, c.id === selected ? 'sel' : '', faded ? 'faded' : '', c.id === 'none' ? 'ghost' : ''].join(' ')
     const big = c.h >= 70
     const iconY = big ? 10 : (c.h - 24) / 2
     return (
@@ -218,16 +218,16 @@ export default function Graph(props: GraphProps) {
         onMouseEnter={() => setHover(c.id)} onMouseLeave={() => setHover(null)}
         onClick={ev => { ev.stopPropagation(); if (c.id !== 'none') onSelect(c.id) }}
         onKeyDown={ev => { if ((ev.key === 'Enter' || ev.key === ' ') && c.id !== 'none') { ev.preventDefault(); onSelect(c.id) } }}>
-        <rect className="card-bg" width={c.w} height={c.h} rx={8} />
-        <rect className="card-accent" width={3} height={c.h - 14} x={0} y={7} rx={1.5} style={{ fill: c.color }} />
-        <rect className="card-icon" x={10} y={iconY} width={24} height={24} rx={6}
+        <rect className="node-bg" width={c.w} height={c.h} rx={8} />
+        <rect className="node-accent" width={3} height={c.h - 14} x={0} y={7} rx={1.5} style={{ fill: c.color }} />
+        <rect className="node-icon" x={10} y={iconY} width={24} height={24} rx={6}
           style={{ fill: `color-mix(in srgb, ${c.color} 15%, transparent)`, stroke: `color-mix(in srgb, ${c.color} 38%, transparent)` }} />
         {c.icon.startsWith('u:') ? <Icon name={c.icon.slice(2) as UiIconName} x={15} y={iconY + 5} size={14} strokeWidth={2} style={{ color: c.color }} />
           : c.icon.startsWith('a:') ? <AgentIcon agent={c.icon.slice(2)} x={15} y={iconY + 5} size={14} strokeWidth={2} style={{ color: c.color }} />
-          : <text className="card-glyph" x={22} y={iconY + 16} textAnchor="middle" style={{ fill: c.color }}>{c.icon}</text>}
-        <text className="card-title" x={42} y={big ? 26 : c.lines[0] ? c.h / 2 - 3 : c.h / 2 + 4}>{c.title}</text>
-        {c.lines.map((l, i) => l && <text key={i} className="card-line" x={big ? 12 : 42} y={big ? 50 + i * 16 : c.h / 2 + 12 + i * 14}>{l}</text>)}
-        {c.badge != null && <text className="card-badge" x={c.w - 22} y={c.h / 2 + 4} textAnchor="end">{c.badge}</text>}
+          : <text className="node-glyph" x={22} y={iconY + 16} textAnchor="middle" style={{ fill: c.color }}>{c.icon}</text>}
+        <text className="node-title" x={42} y={big ? 26 : c.lines[0] ? c.h / 2 - 3 : c.h / 2 + 4}>{c.title}</text>
+        {c.lines.map((l, i) => l && <text key={i} className="node-line" x={big ? 12 : 42} y={big ? 50 + i * 16 : c.h / 2 + 12 + i * 14}>{l}</text>)}
+        {c.badge != null && <text className="node-badge" x={c.w - 22} y={c.h / 2 + 4} textAnchor="end">{c.badge}</text>}
         <circle className="st-dot" cx={c.w - 11} cy={big ? 15 : c.h / 2} r={3.5} />
         <title>{[c.title, ...c.lines.filter(Boolean)].join('\n')}</title>
       </g>
@@ -262,7 +262,7 @@ export default function Graph(props: GraphProps) {
               )
             })}
           </g>
-          <g className="cards">{L.cards.map(cardEl)}</g>
+          <g className="nodes">{L.cards.map(cardEl)}</g>
         </g>
       </svg>
     </div>

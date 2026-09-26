@@ -150,18 +150,29 @@ export interface ControlResponse extends ControlState { engine: string | null }
 export const MERGE_TID = 'merge'
 export const MIN_CONFIDENCE = 0.45
 
+// Agent colours are theme tokens (--agent-<name> in theme.css, lighter in dark mode).
+// colorOf() returns a CSS value, usable in style props, SVG fill/stroke and color-mix();
+// the hex after the comma is only a fallback. Use colorHex() when JS needs the real value.
 export const COLORS: Record<string, string> = {
-  math: '#4f7cff', weather: '#17a9bd', time: '#9466ff', currency: '#23a864', knowledge: '#d99a06',
-  code: '#e8622f', chat: '#d4549f', research: '#0ea5a4', clarify: '#8a8f9c', blocked: '#e0443a',
-  document: '#6d7cf5', data: '#2f9e8f', report: '#b0762a', run: '#c2410c',
+  math: '#4f7cff', weather: '#1597a9', time: '#8b5cf6', currency: '#1f9d5a', knowledge: '#c98a06',
+  code: '#e0582a', chat: '#cf4b97', research: '#0e9594', clarify: '#80858f', blocked: '#d93a30',
+  document: '#6371f0', data: '#2a8f82', report: '#a86d24', run: '#c2410c',
 }
 const FALLBACK = ['#7a6cf0', '#3d9970', '#c0587e', '#b8860b', '#5a8fa8']
 export function colorOf(agent: string | undefined): string {
-  if (!agent) return '#8a8f9c'
-  if (COLORS[agent]) return COLORS[agent]
+  if (!agent) return 'var(--agent-clarify, #80858f)'
+  if (COLORS[agent]) return `var(--agent-${agent}, ${COLORS[agent]})`
   let h = 0
   for (const c of agent) h = (h * 31 + c.charCodeAt(0)) >>> 0
-  return FALLBACK[h % FALLBACK.length]
+  const i = h % FALLBACK.length
+  return `var(--agent-fallback-${i}, ${FALLBACK[i]})`
+}
+/** The resolved colour for the current theme, for code that has to compute with it. */
+export function colorHex(agent: string | undefined): string {
+  const v = colorOf(agent)
+  const m = /var\((--[\w-]+), ([^)]+)\)/.exec(v)
+  if (!m || typeof document === 'undefined') return v
+  return getComputedStyle(document.documentElement).getPropertyValue(m[1]).trim() || m[2]
 }
 
 export const emptyStats = (): Stats => ({

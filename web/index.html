@@ -2,6 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <!-- Resolve the theme before first paint (same rules as src/theme.tsx) so there is no flash. -->
+  <script>
+    (function () {
+      var t = 'auto';
+      try { t = localStorage.getItem('jr-theme') || 'auto'; } catch (e) {}
+      if (t !== 'light' && t !== 'dark') t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>TraceGraph</title>
   <meta name="description" content="TraceGraph is an open-source workspace that plans multi-part questions, routes each step to the right agent with Jev, and shows every run as a live trace.">
@@ -16,11 +25,8 @@
   <meta name="twitter:title" content="TraceGraph: every question has a path">
   <meta name="twitter:description" content="Plan multi-part questions, route each step to the right agent with Jev, and watch every run as a live trace. Open source.">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <meta name="theme-color" content="#f3f2ee" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0b0c0f" media="(prefers-color-scheme: dark)">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400..800&display=swap">
+  <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#09090b" media="(prefers-color-scheme: dark)">
 </head>
 <body>
   <div id="root"></div>

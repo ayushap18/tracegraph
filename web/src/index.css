@@ -1,18 +1,29 @@
-/* Tailwind v4 + shadcn/ui tokens, scoped to the marketing surfaces (About).
-   No preflight: the workspace keeps its hand-written CSS untouched. Utilities are
-   emitted unlayered so they beat the app's element rules (e.g. `button {}`), and
-   they are only generated for the files listed in @source below. */
-@layer theme;
+/* The one stylesheet entry. Layer order is explicit so utilities always beat the
+   legacy hand-written CSS, whatever its selector specificity:
+     theme      Tailwind's theme variables
+     legacy     the pre-Tailwind workspace CSS, shrinking page by page
+     reset      a mini preflight scoped to .tg-scope (migrated regions only)
+     utilities  Tailwind utilities, generated only for the sources listed below
+   Tokens (theme.css) are unlayered custom properties shared by both worlds. */
+@layer theme, base, legacy, reset, components, utilities;
 @import "tailwindcss/theme.css" layer(theme);
-@import "./tw-reset.css"; /* must precede utilities: same specificity, earlier source order loses */
-@import "tailwindcss/utilities.css" source(none);
+@import "./theme.css";
+@import "./styles.css" layer(legacy);
+@import "./chat.css" layer(legacy);
+@import "./pages/agents.css" layer(legacy);
+@import "./pages/compare.css" layer(legacy);
+@import "./pages/evals.css" layer(legacy);
+@import "./tw-reset.css" layer(reset);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
 
+/* Utilities are generated only for migrated code, so legacy class names such as
+   .hidden, .grid or .table never pick up a Tailwind meaning by accident. */
 @source "./pages/About.tsx";
 @source "./pages/about";
 @source "./components/ui";
 
-/* shadcn semantic tokens mapped onto the app's own theme variables, so the About
-   page follows the System / Light / Dark switch with no extra dark-mode rules. */
+/* shadcn semantic tokens mapped onto the app's own theme variables, so every
+   surface follows the System / Light / Dark switch with no extra dark-mode rules. */
 @theme inline {
   --color-background: var(--bg);
   --color-foreground: var(--ink);
@@ -79,8 +90,5 @@
   --animate-accordion-up: accordion-up 0.2s var(--ease-out-expo);
 }
 
-/* `dark:` follows the app's theme switch (data-theme), falling back to the OS setting on "System". */
-@custom-variant dark {
-  &:where([data-theme="dark"], [data-theme="dark"] *) { @slot; }
-  @media (prefers-color-scheme: dark) { &:where(:root:not([data-theme="light"]) *) { @slot; } }
-}
+/* `dark:` follows <html data-theme>, which always holds the resolved theme. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
