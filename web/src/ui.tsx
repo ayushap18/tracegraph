@@ -1,5 +1,5 @@
 import {
-  createContext, useContext, useEffect, useId, useMemo, useRef, useState,
+  createContext, forwardRef, useContext, useEffect, useId, useMemo, useRef, useState,
   type ButtonHTMLAttributes, type ChangeEvent, type CSSProperties, type InputHTMLAttributes, type KeyboardEvent, type ReactNode,
 } from 'react'
 import { toast as sonner } from 'sonner'
@@ -79,16 +79,18 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   loading?: boolean
 }
 
-export function Button({ variant = 'primary', size = 'md', icon, iconRight, loading, className, children, disabled, type = 'button', ...rest }: ButtonProps) {
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  { variant = 'primary', size = 'md', icon, iconRight, loading, className, children, disabled, type = 'button', ...rest }, ref,
+) {
   const is = size === 'sm' ? 14 : 16
   return (
-    <button type={type} data-slot="button" className={buttonClass(variant, size, className)} disabled={disabled || loading} aria-busy={loading || undefined} {...rest}>
+    <button ref={ref} type={type} data-slot="button" className={buttonClass(variant, size, className)} disabled={disabled || loading} aria-busy={loading || undefined} {...rest}>
       {loading ? <Spinner size={is} /> : icon && <Icon name={icon} size={is} strokeWidth={2} />}
       {children != null && children !== false && <span className="btn-label truncate">{children}</span>}
       {iconRight && <Icon name={iconRight} size={is} strokeWidth={2} />}
     </button>
   )
-}
+})
 
 export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'children'> {
   icon: UiIconName
@@ -106,12 +108,14 @@ export function iconButtonClass(variant: IconButtonProps['variant'] = 'ghost', s
     active && 'bg-subtle text-foreground', className)
 }
 
-export function IconButton({ icon, label, size = 'md', variant = 'ghost', active, className, type = 'button', title, ...rest }: IconButtonProps) {
+export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
+  { icon, label, size = 'md', variant = 'ghost', active, className, type = 'button', title, ...rest }, ref,
+) {
   const is = size === 'sm' ? 15 : size === 'lg' ? 18 : 16
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <button type={type} data-slot="icon-button" className={iconButtonClass(variant, size, active, className)} aria-label={label}
+        <button ref={ref} type={type} data-slot="icon-button" className={iconButtonClass(variant, size, active, className)} aria-label={label}
           aria-pressed={active === undefined ? undefined : active} {...rest}>
           <Icon name={icon} size={is} strokeWidth={1.9} />
         </button>
@@ -119,7 +123,7 @@ export function IconButton({ icon, label, size = 'md', variant = 'ghost', active
       <TooltipContent>{title ?? label}</TooltipContent>
     </Tooltip>
   )
-}
+})
 
 // ---------- surfaces ----------
 

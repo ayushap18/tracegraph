@@ -30,8 +30,8 @@ const LAYOUT_MIN_W = 760 // below this the graph lays out at this width and scal
 const PAD = 16, HEAD = 34, AGENT_H = 40, AGENT_GAP = 10, SUB_H = 48, SUB_GAP = 12
 
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, Math.max(1, n - 1)).trimEnd() + '…' : s)
-const pct = (v: number | null | undefined) => (v == null ? '–' : Math.round(v * 100) + '%')
-const msf = (v: number | null | undefined) => (v == null ? '–' : v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
+const pct = (v: number | null | undefined) => (v == null ? '-' : Math.round(v * 100) + '%')
+const msf = (v: number | null | undefined) => (v == null ? '-' : v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
 const curve = (x1: number, y1: number, x2: number, y2: number) => {
   const dx = Math.max(24, (x2 - x1) * 0.5)
   return `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`
@@ -78,7 +78,7 @@ function layout(width: number, p: GraphProps) {
   const qStatus: Status = !run ? 'idle' : run.plan ? 'done' : run.done ? 'error' : 'running'
   add({
     id: 'query', x: colX(0), y: midY - 38, w: colW[0], h: 76, color: 'var(--accent)', icon: ICONS.query, title: run ? `Query #${run.qid}` : 'Query',
-    lines: run ? [clip(run.text || '…', chars(0) + 5), run.plan ? `${run.plan.planner} plan · ${order.length} subtask${order.length === 1 ? '' : 's'}${run.plan.ms != null ? ' · ' + msf(run.plan.ms) : ''}` : run.done ? 'planning stopped' : 'planning…']
+    lines: run ? [clip(run.text || '…', chars(0) + 5), run.plan ? `${run.plan.planner} plan · ${order.length} subtask${order.length === 1 ? '' : 's'}${run.plan.ms != null ? ', ' + msf(run.plan.ms) : ''}` : run.done ? 'planning stopped' : 'planning…']
       : ['waiting for a query', ''],
     status: qStatus,
   })
@@ -161,7 +161,7 @@ function layout(width: number, p: GraphProps) {
     })
     if (s) edge('a:' + a, 'answer', { state: s === 'running' ? 'idle' : run?.done ? 'done' : 'running', color: colorOf(a), width: 1.5 })
   }
-  const heads = ['query', 'subtasks', 'route', 'agents', 'response']
+  const heads = ['Query', 'Subtasks', 'Route', 'Agents', 'Response']
   const headers = heads.map((t, i) => [t, colX(i) + colW[i] / 2] as [string, number])
   return { W, H, cards, edges, headers }
 }

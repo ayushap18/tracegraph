@@ -82,7 +82,7 @@ export function LatencyChart({ data }: { data: LatencyPoint[] }) {
       .selectAll('rect').data(s => s).join('rect')
       .attr('x', d => x(d.data.key) ?? 0).attr('width', x.bandwidth())
       .attr('y', d => y(d[1])).attr('height', d => Math.max(0, y(d[0]) - y(d[1])))
-      .append('title').text(d => `${d.data.label}: Jev ${Math.round(d.data.jev)} · agent ${Math.round(d.data.agent)} · merge ${Math.round(d.data.merge)} ms`)
+      .append('title').text(d => `${d.data.label}: Jev ${Math.round(d.data.jev)}, agent ${Math.round(d.data.agent)}, merge ${Math.round(d.data.merge)} ms`)
   })
   return <div ref={wrapRef} className="chart"><svg ref={svgRef} width={width} height={H} role="img" aria-label="Latency per query, stacked Jev, agent and merge" /></div>
 }

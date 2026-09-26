@@ -78,7 +78,7 @@ export function Sidebar({ route, collapsed, onToggle }: { route: RouteName; coll
   const running = store.runs.some(r => !r.done)
   return (
     <aside aria-label="Main" className={cn(
-      'tg-scope sticky top-0 hidden h-dvh flex-col border-r border-border bg-background md:flex',
+      'sticky top-0 hidden h-dvh flex-col border-r border-border bg-background md:flex',
       collapsed ? 'items-center px-2' : 'px-3',
     )}>
       <div className={cn('flex h-14 w-full shrink-0 items-center gap-2', collapsed ? 'justify-center' : 'justify-between pl-1')}>
@@ -116,7 +116,7 @@ export function TopBar({ route, onPalette, onSlot }: { route: RouteName; onPalet
   const nav = navFor(route)
   const title = route === 'run' ? 'Run detail' : nav.title
   return (
-    <header className="tg-scope sticky top-0 z-20 flex h-[var(--topbar-h)] shrink-0 items-center gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:px-6">
+    <header className="sticky top-0 z-20 flex h-[var(--topbar-h)] shrink-0 items-center gap-3 border-b border-border bg-background/85 px-4 backdrop-blur-md md:px-6">
       <a href="#/" aria-label="TraceGraph home" className="shrink-0 md:hidden"><Logo size={24} /></a>
       <div className="min-w-0 flex-[0_1_auto]">
         <h1 className="m-0 truncate text-[15px] leading-tight font-semibold tracking-[-0.01em] text-foreground">{title}</h1>
@@ -150,7 +150,7 @@ export function BottomBar({ route }: { route: RouteName }) {
   const item = 'flex flex-1 flex-col items-center justify-center gap-1 text-[11px] font-medium outline-none transition-colors focus-visible:text-foreground'
   return (
     <>
-      <nav aria-label="Main" className="tg-scope fixed inset-x-0 bottom-0 z-40 flex h-[calc(var(--bottombar-h)+env(safe-area-inset-bottom,0px))] border-t border-border bg-background/90 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-md md:hidden">
+      <nav aria-label="Main" className="fixed inset-x-0 bottom-0 z-40 flex h-[calc(var(--bottombar-h)+env(safe-area-inset-bottom,0px))] border-t border-border bg-background/90 pb-[env(safe-area-inset-bottom,0px)] backdrop-blur-md md:hidden">
         {MOBILE_TABS.map(name => {
           const n = navFor(name)
           const on = active === name

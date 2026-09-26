@@ -1,2 +1,93 @@
 /* SVG styling for the trace graph, charts and small visualisations (Graph, Viz, Charts).
    Kept as CSS on purpose: SVG presentation is clearer here than as utilities. Tokens only. */
+
+/* ---------- trace graph ---------- */
+.dag-wrap {
+  width: 100%;
+  padding: 4px 8px 0;
+  background-image: radial-gradient(var(--dots) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+svg.dag { display: block; max-width: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+svg.dag:active { cursor: grabbing; }
+.dag .col-head { font: 500 11px var(--font); fill: var(--muted); text-transform: none; letter-spacing: normal; }
+
+.dag .wire { fill: none; stroke: var(--edge); transition: stroke-width .4s ease, opacity .2s; }
+.dag .arrow { fill: var(--edge); transition: opacity .2s; }
+.dag .edge.e-idle:not(.colored) .wire { stroke-dasharray: 3 4; opacity: .7; }
+.dag .edge.e-idle:not(.colored) .arrow { opacity: .7; }
+.dag .edge.e-idle.colored .wire, .dag .edge.e-idle.colored .arrow { opacity: .45; }
+.dag .edge.e-running .wire { stroke-dasharray: 5 5; animation: tg-march .6s linear infinite; }
+.dag .edge.dep .wire { stroke-dasharray: 4 3; }
+.dag .edge.faded { opacity: .12; }
+.dag .packet { pointer-events: none; }
+.dag .plabel rect { fill: var(--panel); stroke: var(--line); stroke-width: 1; }
+.dag .plabel text { font: 600 10px var(--font); fill: var(--ink); font-variant-numeric: tabular-nums; }
+
+.dag .node { cursor: pointer; outline: none; transition: opacity .2s; }
+.dag .node svg { pointer-events: none; }
+.dag .node-bg { fill: var(--panel); stroke: var(--line); stroke-width: 1; filter: none; transition: stroke .15s; }
+.dag .node:hover .node-bg { stroke: var(--edge); }
+.dag .node.st-running .node-bg { stroke: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.dag .node.sel .node-bg, .dag .node:focus-visible .node-bg { stroke: var(--accent); stroke-width: 1.5; }
+.dag .node.faded { opacity: .38; }
+.dag .node.ghost { cursor: default; }
+.dag .node.ghost .node-bg { fill: none; stroke-dasharray: 4 4; }
+.dag .node-accent { opacity: .9; }
+.dag .node-glyph { font: 600 12px var(--mono); pointer-events: none; }
+.dag .node-title { font: 600 12.5px var(--font); fill: var(--ink); pointer-events: none; }
+.dag .node-line { font: 11px var(--font); fill: var(--muted); font-variant-numeric: tabular-nums; pointer-events: none; }
+.dag .node-badge { font: 500 11px var(--font); fill: var(--muted); font-variant-numeric: tabular-nums; pointer-events: none; }
+.dag .st-dot { fill: var(--edge); }
+.dag .st-running .st-dot { fill: var(--accent); animation: tg-blinkdot 1s ease-in-out infinite; }
+.dag .st-done .st-dot { fill: var(--ok); }
+.dag .st-warn .st-dot { fill: var(--warn); }
+.dag .st-error .st-dot { fill: var(--bad); }
+
+/* ---------- sparkline ---------- */
+.spark { width: 100%; height: 26px; }
+.spark svg { display: block; max-width: none; overflow: visible; }
+
+/* ---------- d3 charts (confidence, latency, traffic bars) ---------- */
+.chart { width: 100%; }
+.chart svg { display: block; max-width: none; overflow: visible; }
+.chart .axis text, .waterfall .axis text { font: 11px var(--font); fill: var(--muted); font-variant-numeric: tabular-nums; }
+.chart .grid, .waterfall .grid { stroke: var(--line); }
+.chart .axis-lbl { font: 12px var(--font); fill: var(--ink); }
+.chart .axis-lbl.num { fill: var(--muted); font-variant-numeric: tabular-nums; }
+.chart .threshold { stroke: var(--warn); stroke-dasharray: 4 4; }
+.chart .trend { fill: none; stroke: var(--edge); stroke-width: 1.5; }
+.chart .track { fill: var(--soft); }
+
+/* ---------- pipeline waterfall ---------- */
+.waterfall { width: 100%; }
+.waterfall svg { display: block; max-width: none; overflow: visible; }
+.wf-lbl { font: 12px var(--font); fill: var(--ink); }
+.wf-ms { font: 11px var(--font); fill: var(--muted); font-variant-numeric: tabular-nums; }
+.wf-ms.inside { fill: var(--on-accent); font-weight: 600; }
+.wf-row rect { transition: width .08s linear; }
+.wf-row.open rect { animation: tg-shimmer 1s ease-in-out infinite alternate; }
+.wf-now { stroke: var(--bad); stroke-width: 1.5; stroke-dasharray: 3 3; }
+
+/* ---------- routing heatmap ---------- */
+.heatmap { width: 100%; }
+.heatmap svg { display: block; max-width: none; }
+.hm-lbl { font: 11px var(--font); fill: var(--muted); }
+.hm-col { cursor: pointer; }
+.hm-col rect { transition: opacity .4s; }
+.hm-col:hover rect { stroke: var(--ink); stroke-width: 1; }
+
+/* ---------- traffic donut ---------- */
+.donut svg { flex: none; width: min(184px, 44%); height: auto; }
+.donut .slice { cursor: pointer; transition: opacity .2s; }
+.donut .slice:hover { opacity: .8; }
+.donut-v { font: 600 26px var(--font); fill: var(--ink); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.donut-l { font: 11px var(--font); fill: var(--muted); }
+
+@keyframes tg-march { to { stroke-dashoffset: -10; } }
+@keyframes tg-blinkdot { 50% { opacity: .3; } }
+@keyframes tg-shimmer { to { opacity: .45; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .dag .edge.e-running .wire, .dag .st-running .st-dot, .wf-row.open rect { animation: none; }
+}

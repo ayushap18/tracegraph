@@ -9,13 +9,13 @@ import { Faq } from './about/Faq'
 import { Closing } from './about/Closing'
 
 // The About / landing page. Built on Tailwind v4 + shadcn/ui (src/components/ui) + Motion,
-// scoped under .tg-scope so none of it leaks into the workspace. Copy lives in about/content.ts.
+// scoped under .so none of it leaks into the workspace. Copy lives in about/content.ts.
 //
 //   Nav · Hero (product shot) · Engines · Features bento · Pipeline (scroll story) · Quick start · FAQ · Closing
 export default function About() {
   return (
     <MotionConfig reducedMotion="user">
-      <div className="tg-scope min-h-[100dvh] bg-background text-foreground antialiased">
+      <div className="min-h-[100dvh] bg-background text-foreground antialiased">
         <Nav />
         <Hero />
         <Engines />

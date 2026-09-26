@@ -101,7 +101,7 @@ export function Palette({ open, onClose, onToggleSidebar }: { open: boolean; onC
         <DialogPrimitive.Content aria-label="Command palette" onKeyDown={onKey}
           onOpenAutoFocus={e => { e.preventDefault(); input.current?.focus() }}
           className={cn(
-            'tg-scope fixed top-[12vh] left-1/2 z-50 flex max-h-[min(560px,76vh)] w-[min(640px,calc(100vw-24px))] -translate-x-1/2 flex-col overflow-hidden',
+            'fixed top-[12vh] left-1/2 z-50 flex max-h-[min(560px,76vh)] w-[min(640px,calc(100vw-24px))] -translate-x-1/2 flex-col overflow-hidden',
             'rounded-xl border border-border bg-surface text-foreground shadow-lg outline-none',
             'data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-[0.98]',
           )}>

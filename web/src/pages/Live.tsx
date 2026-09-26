@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { post } from '../useEventStream'
 import type { ControlState } from '../protocol'
-import { inFlight, latency } from '../lib'
+import { CHART_H, inFlight, latency } from '../lib'
 import { colorOf, MIN_CONFIDENCE } from '../protocol'
 import Graph from '../components/Graph'
 import { ConfidenceChart, LatencyChart, LATENCY_COLORS, type ConfPoint, type LatencyPoint } from '../components/Charts'
-import { AskBox, ChartPanel, Inspector, Kpis, LatestRun, RoutingLog } from '../components/Panels'
+import { AskBox, Inspector, Kpis, LatestRun, RoutingLog } from '../components/Panels'
+import { ChartCard, PageBody } from '../components/app'
 import { Donut, Heatmap, Waterfall } from '../components/Viz'
-import { Icon } from '../icons'
+import { Icon, type UiIconName } from '../icons'
 import { useStore } from '../store'
 import { useTrace } from '../components/useTrace'
-import { Badge } from '../ui'
-import { TopActions } from '../components/Shell'
+import { Badge, Button, Card, EmptyState, IconButton, Kbd } from '../ui'
+import { cn } from '@/lib/utils'
+import { MOD_KEY, TopActions } from '../components/Shell'
 
 // The original real-time dashboard (v2/v3), now one page of the app: KPIs, ask box, trace graph, latest run,
 // pipeline timeline, analytics and the routing log. Single-key shortcuts work here only.
@@ -61,7 +63,7 @@ export default function Live() {
       routedCount,
     }
   }, [conf, lat, traffic, allRows])
-  const secs = (v: number | null) => (v == null ? '–' : v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
+  const secs = (v: number | null) => (v == null ? '-' : v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
 
   const toggleFull = () => {
     const el = graphPanel.current
@@ -101,76 +103,116 @@ export default function Live() {
   }, [])
 
   const flying = inFlight(runs).length
+  const runState = shown ? (shown.done ? 'finished' : 'running') : ''
 
   return (
     <>
       <TopActions>
         {state.autopilot && <Badge tone="warn" icon="play">autopilot · {state.interval}s</Badge>}
         {flying > 0 && <Badge tone="info" dot>{flying} in flight</Badge>}
-        <span className="keys" aria-hidden="true"><kbd>/</kbd> ask <kbd>a</kbd> autopilot <kbd>←</kbd><kbd>→</kbd> runs <kbd>f</kbd> fullscreen</span>
+        <span className="hidden items-center gap-3 text-xs text-muted-foreground xl:flex" aria-hidden="true">
+          <span className="inline-flex items-center gap-1.5"><Kbd>/</Kbd>ask</span>
+          <span className="inline-flex items-center gap-1.5"><Kbd>a</Kbd>autopilot</span>
+          <span className="inline-flex items-center gap-1.5"><Kbd>←</Kbd><Kbd>→</Kbd>runs</span>
+          <span className="inline-flex items-center gap-1.5"><Kbd>f</Kbd>fullscreen</span>
+        </span>
       </TopActions>
-      <div className="wrap live-page">
+      <PageBody width="wide">
         <Kpis store={store} />
         <AskBox samples={store.samples} state={state} inputRef={askRef} />
-        <section ref={graphPanel} className={'panel graph-panel' + (full ? ' full' : '')}>
-          <div className="graph-bar">
-            <div className="graph-title">
-              <h2><span className="h-title"><Icon name="graph" size={14} strokeWidth={2} />Trace graph</span></h2>
-              <div className="run-nav" role="group" aria-label="Browse runs">
-                <button type="button" className="mini" onClick={() => step(-1)} disabled={!runs.length || shownIdx === 0} title="Previous run (←)" aria-label="Previous run"><Icon name="prev" size={15} strokeWidth={2} /></button>
-                <span className="run-id num">{shown ? `Run #${shown.qid}` : 'No runs'}{shown && <span className="muted"> · {shown.done ? 'finished' : 'running'}</span>}</span>
-                <button type="button" className="mini" onClick={() => step(1)} disabled={following} title="Next run (→)" aria-label="Next run"><Icon name="next" size={15} strokeWidth={2} /></button>
-                <button type="button" className={'mini live' + (following ? ' on' : '')} onClick={() => setViewQid(null)} title="Follow the newest run (l)">
-                  <Icon name="live" size={13} strokeWidth={2} />Live
-                </button>
+        <section ref={graphPanel} aria-label="Trace graph"
+          className={cn('relative min-w-0 overflow-hidden rounded-lg border border-border bg-surface [&:fullscreen]:overflow-auto [&:fullscreen]:rounded-none',
+            full && 'fixed inset-0 z-50 overflow-auto rounded-none')}>
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-border px-3 py-2.5 sm:px-4">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
+              <h2 className="m-0 flex items-center gap-2 text-sm font-semibold text-foreground">
+                <Icon name="graph" size={15} strokeWidth={1.9} className="text-muted-foreground" />Trace graph
+              </h2>
+              <div className="flex items-center gap-1" role="group" aria-label="Browse runs">
+                <IconButton icon="prev" size="sm" label="Previous run" title="Previous run (←)" onClick={() => step(-1)} disabled={!runs.length || shownIdx === 0} />
+                <span className="min-w-[9rem] px-1 text-center text-[13px] tabular-nums text-foreground">
+                  {shown ? `Run #${shown.qid}` : 'No runs'}{shown && <span className="text-muted-foreground">, {runState}</span>}
+                </span>
+                <IconButton icon="next" size="sm" label="Next run" title="Next run (→)" onClick={() => step(1)} disabled={following} />
+                <Button variant="ghost" size="sm" icon="live" onClick={() => setViewQid(null)} title="Follow the newest run (l)" aria-pressed={following}
+                  className={cn('ml-1', following && 'bg-ok/10 text-ok hover:bg-ok/15 hover:text-ok')}>
+                  Live
+                </Button>
               </div>
             </div>
-            <div className="graph-tools">
-              <span className="st-legend" aria-hidden="true">
-                <span><i className="st-running" />running</span><span><i className="st-done" />done</span><span><i className="st-warn" />no answer</span><span><i className="st-error" />failed</span>
+            <div className="flex items-center gap-3">
+              <span className="hidden items-center gap-3 text-xs text-muted-foreground md:flex" aria-hidden="true">
+                <span className="inline-flex items-center gap-1.5"><i className="size-1.5 rounded-full bg-primary" />Running</span>
+                <span className="inline-flex items-center gap-1.5"><i className="size-1.5 rounded-full bg-ok" />Done</span>
+                <span className="inline-flex items-center gap-1.5"><i className="size-1.5 rounded-full bg-warn" />No answer</span>
+                <span className="inline-flex items-center gap-1.5"><i className="size-1.5 rounded-full bg-destructive" />Failed</span>
               </span>
-              <div className="btn-group" role="group" aria-label="Zoom">
-                <button type="button" className="mini" onClick={() => setZoomBy(z => ({ n: z.n + 1, k: 1 / 1.25 }))} aria-label="Zoom out" title="Zoom out"><Icon name="zoom-out" size={15} /></button>
-                <button type="button" className="mini" onClick={() => setResetKey(k => k + 1)} title="Fit to view (r)" aria-label="Fit to view"><Icon name="fit" size={15} /></button>
-                <button type="button" className="mini" onClick={() => setZoomBy(z => ({ n: z.n + 1, k: 1.25 }))} aria-label="Zoom in" title="Zoom in"><Icon name="zoom-in" size={15} /></button>
+              <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5" role="group" aria-label="Zoom">
+                <IconButton icon="zoom-out" size="sm" label="Zoom out" className="size-6 rounded-sm" onClick={() => setZoomBy(z => ({ n: z.n + 1, k: 1 / 1.25 }))} />
+                <IconButton icon="fit" size="sm" label="Fit to view" title="Fit to view (r)" className="size-6 rounded-sm" onClick={() => setResetKey(k => k + 1)} />
+                <IconButton icon="zoom-in" size="sm" label="Zoom in" className="size-6 rounded-sm" onClick={() => setZoomBy(z => ({ n: z.n + 1, k: 1.25 }))} />
               </div>
-              <button type="button" className="mini" onClick={toggleFull} title={full ? 'Exit fullscreen (f)' : 'Fullscreen (f)'} aria-label={full ? 'Exit fullscreen' : 'Fullscreen'}><Icon name={full ? 'minimize' : 'maximize'} size={15} /></button>
+              <IconButton icon={full ? 'minimize' : 'maximize'} size="sm" label={full ? 'Exit fullscreen' : 'Fullscreen'} title={full ? 'Exit fullscreen (f)' : 'Fullscreen (f)'} onClick={toggleFull} />
             </div>
           </div>
           <Graph run={shown} agents={allAgents} agentStats={agentStats} jev={jevInfo} selected={selected} onSelect={setSelected} resetKey={resetKey} zoomBy={zoomBy} />
           {selected && <Inspector id={selected} store={store} onClose={() => setSelected(null)} />}
-          <p className="graph-hint muted small">Hover a node to trace its connections · click for details · drag to pan · ⌘/Ctrl + scroll to zoom · ← → browse runs</p>
+          <p className="m-0 border-t border-border px-4 py-2.5 text-xs text-muted-foreground">
+            Hover a node to trace its connections, click for details, drag to pan, {MOD_KEY} + scroll to zoom, ← → to browse runs
+          </p>
         </section>
-        <div className="grid-even">
+        <div className="grid min-w-0 items-start gap-6 lg:grid-cols-2">
           <LatestRun run={shown} engine={store.engine} />
-          <section className="panel">
-            <h2><span className="h-title"><Icon name="timeline" size={14} strokeWidth={2} />Pipeline timeline</span> <span>{shown ? `#${shown.qid} · ${shown.done ? 'finished' : 'running'}` : ''}</span></h2>
+          <Card title="Pipeline timeline" icon="timeline"
+            actions={shown ? <span className="text-xs tabular-nums text-muted-foreground">#{shown.qid}, {runState}</span> : undefined}>
             <Waterfall run={shown} />
-          </section>
+          </Card>
         </div>
-        <div className="grid-2 chart-row">
-          <ChartPanel icon="heatmap" title="Routing heatmap" stat={`${summary.routedCount} subtasks`} note="Jev's probability for each agent, per subtask"
-            legend={<><span className="scale"><span>0%</span><i className="ramp" /><span>100%</span></span><span>older → newer · click a column</span></>}>
-            <Heatmap rows={allRows} agents={heatAgents} onPick={tid => setSelected('t:' + tid)} />
-          </ChartPanel>
-          <ChartPanel icon="traffic" title="Traffic by agent" stat={summary.top ? `${summary.top.agent} ${Math.round((summary.top.count / Math.max(1, summary.total)) * 100)}%` : '–'}
-            note="busiest agent" legend={<span>click a slice or row to inspect</span>}>
-            <Donut data={traffic} onPick={a => setSelected('a:' + a)} />
-          </ChartPanel>
-        </div>
-        <div className="grid-even chart-row">
-          <ChartPanel icon="confidence" title="Route confidence" stat={summary.avgConf == null ? '–' : `${Math.round(summary.avgConf * 100)}% avg`}
-            note={summary.low ? `${summary.low} below threshold` : 'none below threshold'}
-            legend={<><span><i style={{ background: colorOf('weather') }} />subtask, colored by agent</span><span><i className="dash" />{Math.round(MIN_CONFIDENCE * 100)}% clarify threshold</span><span>last 60</span></>}>
-            <ConfidenceChart data={conf} />
-          </ChartPanel>
-          <ChartPanel icon="latency" title="Latency per query" stat={`${secs(summary.p50)} median`} note={`p95 ${secs(summary.p95)}`}
-            legend={<>{Object.entries(LATENCY_COLORS).map(([k, c]) => <span key={k}><i style={{ background: c }} />{k}</span>)}<span>last 40 queries</span></>}>
-            <LatencyChart data={lat} />
-          </ChartPanel>
+        <div className="grid min-w-0 gap-6 lg:grid-cols-2">
+          <ChartCard height={CHART_H + 12} icon="heatmap" title="Routing heatmap" stat={`${summary.routedCount} subtasks`} statNote="Jev's probability for each agent, per subtask"
+            footer={<>
+              <span className="inline-flex items-center gap-1.5 tabular-nums">0%<i className="h-2 w-16 rounded-sm bg-linear-to-r from-subtle to-primary" />100%</span>
+              <span>Older to newer, click a column</span>
+            </>}>
+            {summary.routedCount
+              ? <Heatmap rows={allRows} agents={heatAgents} onPick={tid => setSelected('t:' + tid)} />
+              : <ChartEmpty icon="heatmap" title="No routed subtasks yet" text="Each column appears here as Jev routes a subtask." />}
+          </ChartCard>
+          <ChartCard height={CHART_H + 12} icon="traffic" title="Traffic by agent" stat={summary.top ? `${summary.top.agent} ${Math.round((summary.top.count / Math.max(1, summary.total)) * 100)}%` : '-'}
+            statNote="Busiest agent" footer={<span>Click a slice or row to inspect</span>}>
+            {summary.total
+              ? <Donut data={traffic} onPick={a => setSelected('a:' + a)} />
+              : <ChartEmpty icon="traffic" title="No traffic yet" text="Subtasks per agent show up once queries are routed." />}
+          </ChartCard>
+          <ChartCard height={CHART_H + 12} icon="confidence" title="Route confidence" stat={summary.avgConf == null ? '-' : `${Math.round(summary.avgConf * 100)}% avg`}
+            statNote={summary.low ? `${summary.low} below threshold` : 'None below threshold'}
+            footer={<>
+              <span className="inline-flex items-center gap-1.5"><i className="size-2 rounded-full" style={{ background: colorOf('weather') }} />Subtask, colored by agent</span>
+              <span className="inline-flex items-center gap-1.5"><i className="w-4 border-t-2 border-dashed border-warn" />{Math.round(MIN_CONFIDENCE * 100)}% clarify threshold</span>
+              <span>Last 60</span>
+            </>}>
+            {conf.length
+              ? <ConfidenceChart data={conf} />
+              : <ChartEmpty icon="confidence" title="No routed subtasks yet" text="Confidence for each routed subtask is plotted here." />}
+          </ChartCard>
+          <ChartCard height={CHART_H + 12} icon="latency" title="Latency per query" stat={`${secs(summary.p50)} median`} statNote={`p95 ${secs(summary.p95)}`}
+            footer={<>
+              {Object.entries(LATENCY_COLORS).map(([k, c]) => (
+                <span key={k} className="inline-flex items-center gap-1.5"><i className="size-2 rounded-full" style={{ background: c }} />{k === 'jev' ? 'Jev' : k.charAt(0).toUpperCase() + k.slice(1)}</span>
+              ))}
+              <span>Last 40 queries</span>
+            </>}>
+            {lat.length
+              ? <LatencyChart data={lat} />
+              : <ChartEmpty icon="latency" title="No finished queries yet" text="Jev, agent and merge time for each finished query stack up here." />}
+          </ChartCard>
         </div>
         <RoutingLog runs={runs} />
-      </div>
+      </PageBody>
     </>
   )
+}
+
+function ChartEmpty({ icon, title, text }: { icon: UiIconName; title: string; text: string }) {
+  return <div className="grid h-full place-items-center"><EmptyState compact icon={icon} title={title} text={text} /></div>
 }

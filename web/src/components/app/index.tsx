@@ -7,13 +7,13 @@ import { colorOf } from '../../protocol'
 // pages only describe content: one page container, one section header, one stat strip,
 // one chart card, one way to show an agent, an engine or a status.
 
-/** Page container: gutter, max width and vertical rhythm. `tg-scope` opts the page into the reset. */
+/** Page container: gutter, max width and vertical rhythm. */
 export function PageBody({ children, width = 'default', className }: {
   children: ReactNode; width?: 'default' | 'wide' | 'narrow'; className?: string
 }) {
   return (
     <div className={cn(
-      'tg-scope mx-auto flex w-full min-w-0 flex-col gap-6 px-4 pt-4 pb-10 sm:px-6 sm:pt-6',
+      'mx-auto flex w-full min-w-0 flex-col gap-6 px-4 pt-4 pb-10 sm:px-6 sm:pt-6',
       width === 'wide' ? 'max-w-[1600px]' : width === 'narrow' ? 'max-w-[960px]' : 'max-w-[1280px]',
       className,
     )}>
@@ -58,15 +58,17 @@ export function StatStrip({ children, className, cols = 4 }: { children: ReactNo
   )
 }
 
-export function Stat({ label, icon, value, note, tone, chart, title }: {
+export function Stat({ label, icon, value, note, tone, chart, title, size = 'lg' }: {
   label: ReactNode; icon?: UiIconName; value: ReactNode; note?: ReactNode; tone?: 'ok' | 'warn' | 'bad'; chart?: ReactNode; title?: string
+  /** 'lg' for numbers; 'md' for text values such as an engine name. */
+  size?: 'lg' | 'md'
 }) {
   return (
     <div className="flex min-w-0 flex-col gap-1 bg-surface px-4 py-3.5" title={title}>
       <span className="flex items-center gap-1.5 truncate text-[13px] text-muted-foreground">
         {icon && <Icon name={icon} size={14} strokeWidth={1.9} />}{label}
       </span>
-      <span className={cn('truncate text-2xl font-semibold tracking-[-0.02em] tabular-nums text-foreground',
+      <span className={cn('truncate font-semibold tracking-[-0.02em] tabular-nums text-foreground', size === 'md' ? 'text-lg leading-8' : 'text-2xl',
         tone === 'ok' && 'text-ok', tone === 'warn' && 'text-warn', tone === 'bad' && 'text-destructive')}>{value}</span>
       {chart != null ? <div className="h-7">{chart}</div> : note != null && <span className="truncate text-xs text-muted-foreground">{note}</span>}
       {chart != null && note != null && <span className="truncate text-xs text-muted-foreground">{note}</span>}

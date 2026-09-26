@@ -1,19 +1,33 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { cancelEval, errorText as errText, getEval, listEvals, runEval } from '../api'
-import { Badge, Button, EmptyState, ProgressBar, Skeleton, navigate, useToast } from '../ui'
+import { Badge, Button, Card, EmptyState, ProgressBar, Skeleton, StatusBadge, navigate, useToast } from '../ui'
 import { useStore } from '../store'
 import { EngineIcon, Icon } from '../icons'
 import type { EvalCase, EvalDetail, EvalSummary } from '../protocol'
-import { Chip } from '../components/Panels'
+import { AgentBadge, BackLink, EngineBadge, PageBody, Stat, StatStrip } from '../components/app'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { cn } from '@/lib/utils'
 import { Sparkline } from '../components/Viz'
 import { ms } from '../lib'
 
 // Eval suite: run the cases in evals/cases.jsonl through the real pipeline, watch progress live over SSE,
 // and compare accuracy across runs. `#/evals/:id` drills into one run's cases.
 
-const pctOf = (v: number | null | undefined) => (v == null || Number.isNaN(v) ? '–' : `${Math.round(v * 100)}%`)
+const pctOf = (v: number | null | undefined) => (v == null || Number.isNaN(v) ? 'n/a' : `${Math.round(v * 100)}%`)
 const when = (at: number) => new Date(at * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-const STATUS_TONE: Record<string, string> = { running: 'info', done: 'ok', cancelled: 'warn', error: 'bad' }
+const accTone = (v: number): 'ok' | 'warn' | 'bad' => (v >= 0.9 ? 'ok' : v >= 0.7 ? 'warn' : 'bad')
+
+const HEAD = 'h-9 px-3 text-xs font-medium text-muted-foreground first:pl-4 last:pr-4 sm:first:pl-5 sm:last:pr-5'
+const CELL = 'px-3 py-2.5 first:pl-4 last:pr-4 sm:first:pl-5 sm:last:pr-5'
+const LINK_ICON = 'inline-grid size-7 place-items-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-subtle hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/35'
+const CHIP = cn(
+  'h-8 rounded-md border border-border bg-surface px-2.5 text-[13px] font-medium text-muted-foreground shadow-none transition-colors',
+  'hover:bg-subtle hover:text-foreground focus-visible:ring-ring/35',
+  'data-[state=on]:border-primary/40 data-[state=on]:bg-primary/10 data-[state=on]:text-foreground',
+)
+const None = () => <span className="text-muted-foreground">none</span>
 
 export default function Evals({ params }: { params: Record<string, string> }) {
   return params.id ? <EvalDetailPage key={params.id} id={params.id} /> : <EvalList />
@@ -87,105 +101,139 @@ function EvalList() {
   const best = trend.length ? Math.max(...trend) : null
 
   return (
-    <div className="ev-page">
-      <section className="panel ev-run" aria-label="Run an eval">
-        <div className="ev-run-row">
-          <div className="ev-run-text">
-            <h2 className="ev-title"><Icon name="evals" size={16} /> Evals</h2>
-            <p className="muted small">Runs every case in <code>evals/cases.jsonl</code> through the real pipeline and scores agents, outcomes and answers.</p>
-          </div>
-          <div className="ev-run-ctl">
+    <PageBody>
+      <section aria-label="Run an eval" className="flex min-w-0 flex-col gap-4 rounded-lg border border-border bg-surface p-4 sm:p-5">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between md:gap-6">
+          <p className="m-0 max-w-[70ch] text-[13px] leading-relaxed text-muted-foreground">
+            Runs every case in <code className="rounded-sm bg-subtle px-1 font-mono text-[12px] text-foreground">evals/cases.jsonl</code> through the real pipeline and scores agents, outcomes and answers.
+          </p>
+          <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
             <label className="sr-only" htmlFor="ev-engine">Engine</label>
-            <select id="ev-engine" className="ev-select" value={engine} onChange={e => setEngine(e.target.value)} disabled={!!progress}>
-              <option value="none">Keyless (no engine)</option>
-              {store.engines.filter(e => e.name !== 'none').map(e => (
-                <option key={e.name} value={e.name} disabled={!e.available}>{e.label}{e.available ? '' : ' (unavailable)'}</option>
-              ))}
-            </select>
+            <Select value={engine} onValueChange={setEngine} disabled={!!progress}>
+              <SelectTrigger id="ev-engine" className="h-9 w-full bg-background sm:w-52">
+                <SelectValue placeholder="Engine" />
+              </SelectTrigger>
+              <SelectContent position="popper" align="end">
+                <SelectItem value="none">Keyless (no engine)</SelectItem>
+                {store.engines.filter(e => e.name !== 'none').map(e => (
+                  <SelectItem key={e.name} value={e.name} disabled={!e.available}>{e.label}{e.available ? '' : ' (unavailable)'}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             {progress
               ? <Button variant="danger" icon="stop" onClick={() => void stop()}>Cancel</Button>
               : <Button icon="play" onClick={() => void start()} disabled={starting}>{starting ? 'Starting…' : 'Run eval'}</Button>}
           </div>
         </div>
         {progress && (
-          <div className="ev-progress" aria-live="polite">
-            <div className="ev-progress-meta small">
-              <span>Running <a href={`#/evals/${progress.eval_id}`}>{progress.eval_id}</a></span>
-              <span className="num">{progress.total ? `${progress.done}/${progress.total} cases · ${progress.passed} passed` : 'starting…'}</span>
+          <div aria-live="polite" className="flex flex-col gap-2 rounded-md bg-subtle px-3 py-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[13px]">
+              <span className="min-w-0 truncate text-muted-foreground">
+                Running <a href={`#/evals/${progress.eval_id}`} className="font-mono text-xs font-medium text-primary underline-offset-2 hover:underline">{progress.eval_id}</a>
+              </span>
+              <span className="tabular-nums text-foreground">{progress.total ? `${progress.done}/${progress.total} cases, ${progress.passed} passed` : 'starting…'}</span>
             </div>
             <ProgressBar value={progress.total ? progress.done / progress.total : 0} label="Eval progress" />
           </div>
         )}
       </section>
 
-      <section className="ev-kpis" aria-label="Accuracy summary">
-        <div className="kpi-card">
-          <div className="kpi-l">Latest accuracy</div>
-          <div className="kpi-v num">{latest ? pctOf(latest.accuracy) : '–'}</div>
-          <div className="kpi-note">{delta == null ? 'no previous run' : `${delta >= 0 ? '+' : ''}${Math.round(delta * 100)} pts vs previous`}</div>
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-l">Trend</div>
-          <div className="kpi-v num">{best == null ? '–' : pctOf(best)}</div>
-          {trend.length > 1 ? <Sparkline values={trend} min={0} /> : <div className="kpi-note">best accuracy</div>}
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-l">Silent wrong</div>
-          <div className={'kpi-v num' + (latest?.silent_wrong ? ' ev-bad' : '')}>{latest ? latest.silent_wrong : '–'}</div>
-          <div className="kpi-note">failed cases that looked ok</div>
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-l">Runs</div>
-          <div className="kpi-v num">{evals ? evals.length : '–'}</div>
-          <div className="kpi-note">{latest ? `last ${when(latest.at)}` : 'none yet'}</div>
-        </div>
+      <section aria-label="Accuracy summary">
+        <StatStrip cols={4}>
+          <Stat label="Latest accuracy" value={latest ? pctOf(latest.accuracy) : 'n/a'} tone={latest ? accTone(latest.accuracy) : undefined}
+            note={delta == null ? 'no previous run' : `${delta >= 0 ? '+' : ''}${Math.round(delta * 100)} pts vs previous`} />
+          <Stat label="Trend" value={best == null ? 'n/a' : pctOf(best)}
+            chart={trend.length > 1 ? <Sparkline values={trend} min={0} height={28} /> : undefined}
+            note={trend.length > 1 ? undefined : 'best accuracy'} />
+          <Stat label="Silent wrong" value={latest ? latest.silent_wrong : 'n/a'} tone={latest?.silent_wrong ? 'bad' : undefined}
+            note="failed cases that looked ok" />
+          <Stat label="Runs" value={evals ? evals.length : 'n/a'} note={latest ? `last ${when(latest.at)}` : 'none yet'} />
+        </StatStrip>
       </section>
 
-      <section className="panel" aria-label="Eval history">
-        <h2><span className="h-title"><Icon name="history" size={14} /> History</span></h2>
-        {evals == null && !error ? <div className="ev-skel"><Skeleton height={28} /><Skeleton height={28} /><Skeleton height={28} /></div>
+      <Card flush title="History" icon="history" aria-label="Eval history">
+        {evals == null && !error
+          ? <div className="flex flex-col gap-3 p-4 sm:p-5" aria-busy="true">{[0, 1, 2, 3].map(i => <Skeleton key={i} height={28} radius={6} />)}</div>
           : error && !evals ? <EmptyState icon="evals" title="Could not load evals" text={error}
-              action={<Button variant="ghost" onClick={() => void load()}>Retry</Button>} />
+              action={<Button variant="secondary" onClick={() => void load()}>Retry</Button>} />
           : sorted.length === 0 ? <EmptyState icon="evals" title="No evals yet" text="Run the suite to get a baseline accuracy." />
           : (
-            <div className="table-wrap ev-table-wrap">
-              <table className="ev-table">
-                <thead>
-                  <tr><th>When</th><th>Engine</th><th>Status</th><th className="r">Passed</th><th className="r">Accuracy</th><th className="r">Silent wrong</th><th><span className="sr-only">Open</span></th></tr>
-                </thead>
-                <tbody>
-                  {sorted.map(e => (
-                    <tr key={e.eval_id} className="ev-row" onClick={() => navigate(`/evals/${e.eval_id}`)}>
-                      <td data-l="When" className="num">{when(e.at)}</td>
-                      <td data-l="Engine"><span className="ev-engine"><EngineIcon name={e.engine ?? 'none'} size={14} /> {e.engine ?? 'keyless'}</span></td>
-                      <td data-l="Status"><Badge tone={STATUS_TONE[e.status] ?? 'muted'}>{e.status}</Badge></td>
-                      <td data-l="Passed" className="num r">{e.passed}/{e.total}</td>
-                      <td data-l="Accuracy" className="num r"><AccBar v={e.accuracy} /></td>
-                      <td data-l="Silent wrong" className={'num r' + (e.silent_wrong ? ' ev-bad' : '')}>{e.silent_wrong}</td>
-                      <td className="r"><a href={`#/evals/${e.eval_id}`} onClick={ev => ev.stopPropagation()} aria-label={`Open eval ${e.eval_id}`}>
-                        <Icon name="next" size={15} /></a></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <>
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="border-border hover:bg-transparent">
+                      <TableHead className={HEAD}>When</TableHead>
+                      <TableHead className={HEAD}>Engine</TableHead>
+                      <TableHead className={HEAD}>Status</TableHead>
+                      <TableHead className={cn(HEAD, 'text-right')}>Passed</TableHead>
+                      <TableHead className={cn(HEAD, 'text-right')}>Accuracy</TableHead>
+                      <TableHead className={cn(HEAD, 'text-right')}>Silent wrong</TableHead>
+                      <TableHead className={cn(HEAD, 'w-10')}><span className="sr-only">Open</span></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {sorted.map(e => (
+                      <TableRow key={e.eval_id} className="cursor-pointer border-border hover:bg-subtle" onClick={() => navigate(`/evals/${e.eval_id}`)}>
+                        <TableCell className={cn(CELL, 'tabular-nums text-foreground')}>{when(e.at)}</TableCell>
+                        <TableCell className={CELL}><EngineBadge name={e.engine ?? 'none'} label={e.engine ?? 'keyless'} /></TableCell>
+                        <TableCell className={CELL}><StatusBadge status={e.status} /></TableCell>
+                        <TableCell className={cn(CELL, 'text-right tabular-nums')}>{e.passed}/{e.total}</TableCell>
+                        <TableCell className={cn(CELL, 'text-right')}><AccBar v={e.accuracy} /></TableCell>
+                        <TableCell className={cn(CELL, 'text-right tabular-nums', e.silent_wrong ? 'font-medium text-destructive' : 'text-muted-foreground')}>{e.silent_wrong}</TableCell>
+                        <TableCell className={cn(CELL, 'text-right')}>
+                          <a href={`#/evals/${e.eval_id}`} onClick={ev => ev.stopPropagation()} aria-label={`Open eval ${e.eval_id}`} className={LINK_ICON}>
+                            <Icon name="next" size={15} />
+                          </a>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <ul className="m-0 flex list-none flex-col divide-y divide-border p-0 md:hidden">
+                {sorted.map(e => (
+                  <li key={e.eval_id}>
+                    <a href={`#/evals/${e.eval_id}`} aria-label={`Open eval ${e.eval_id}`}
+                      className="flex flex-col gap-2 px-4 py-3 outline-none transition-colors hover:bg-subtle focus-visible:bg-subtle">
+                      <span className="flex items-center justify-between gap-3">
+                        <EngineBadge name={e.engine ?? 'none'} label={e.engine ?? 'keyless'} />
+                        <StatusBadge status={e.status} />
+                      </span>
+                      <span className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[13px]">
+                        <span className="tabular-nums text-muted-foreground">{when(e.at)}</span>
+                        <AccBar v={e.accuracy} />
+                      </span>
+                      <span className="flex items-center gap-4 text-xs text-muted-foreground">
+                        <span className="tabular-nums">{e.passed}/{e.total} passed</span>
+                        <span className={cn('tabular-nums', e.silent_wrong > 0 && 'font-medium text-destructive')}>{e.silent_wrong} silent wrong</span>
+                      </span>
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
-      </section>
-    </div>
+      </Card>
+    </PageBody>
   )
 }
 
+const BAR_TONE = { ok: 'bg-ok', warn: 'bg-warn', bad: 'bg-destructive' }
+
 function AccBar({ v }: { v: number }) {
-  const tone = v >= 0.9 ? 'ok' : v >= 0.7 ? 'warn' : 'bad'
   return (
-    <span className="ev-acc">
-      <span className="ev-acc-track" aria-hidden="true"><span className={'ev-acc-fill ' + tone} style={{ width: `${Math.max(0, Math.min(1, v)) * 100}%` }} /></span>
-      {pctOf(v)}
+    <span className="inline-flex items-center justify-end gap-2 tabular-nums text-foreground">
+      <span className="flex h-1.5 w-12 justify-start" aria-hidden="true">
+        <span className={cn('h-full rounded-full', BAR_TONE[accTone(v)])} style={{ width: `${Math.max(0, Math.min(1, v)) * 100}%` }} />
+      </span>
+      <span className="w-10 text-right">{pctOf(v)}</span>
     </span>
   )
 }
 
 type PassFilter = 'all' | 'pass' | 'fail'
+const ANY_TAG = '__any'
 
 function EvalDetailPage({ id }: { id: string }) {
   const { subscribe } = useStore()
@@ -218,113 +266,191 @@ function EvalDetailPage({ id }: { id: string }) {
 
   if (!data) {
     return (
-      <div className="ev-page">
-        <a className="ev-back small" href="#/evals"><Icon name="prev" size={14} /> All evals</a>
+      <PageBody>
+        <BackLink href="#/evals">All evals</BackLink>
         {error
-          ? <div className="panel"><EmptyState icon="evals" title="Eval not found" text={error}
-              action={<Button variant="ghost" onClick={() => navigate('/evals')}>Back to evals</Button>} /></div>
-          : <div className="panel ev-skel" aria-busy="true"><Skeleton height={60} /><Skeleton height={28} /><Skeleton height={28} /><Skeleton height={28} /></div>}
-      </div>
+          ? <Card><EmptyState icon="evals" title="Eval not found" text={error}
+              action={<Button variant="secondary" onClick={() => navigate('/evals')}>Back to evals</Button>} /></Card>
+          : (
+            <div className="flex flex-col gap-6" aria-busy="true">
+              <Skeleton height={92} radius={12} />
+              <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-4 sm:p-5">
+                <Skeleton height={32} width={260} radius={8} />
+                {[0, 1, 2, 3].map(i => <Skeleton key={i} height={28} radius={6} />)}
+              </div>
+            </div>
+          )}
+      </PageBody>
     )
   }
 
-  return (
-    <div className="ev-page">
-      <a className="ev-back small" href="#/evals"><Icon name="prev" size={14} /> All evals</a>
-      <section className="ev-kpis" aria-label="Eval summary">
-        <div className="kpi-card">
-          <div className="kpi-l">Accuracy</div>
-          <div className="kpi-v num">{pctOf(data.accuracy)}</div>
-          <div className="kpi-note">{data.passed}/{data.total} passed</div>
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-l">Engine</div>
-          <div className="kpi-v ev-engine-v"><EngineIcon name={data.engine ?? 'none'} size={18} /> {data.engine ?? 'keyless'}</div>
-          <div className="kpi-note">{when(data.at)}</div>
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-l">Status</div>
-          <div className="kpi-v"><Badge tone={STATUS_TONE[data.status] ?? 'muted'}>{data.status}</Badge></div>
-          <div className="kpi-note">{cases.length} of {data.total} cases recorded</div>
-        </div>
-        <div className="kpi-card">
-          <div className="kpi-l">Silent wrong</div>
-          <div className={'kpi-v num' + (data.silent_wrong ? ' ev-bad' : '')}>{data.silent_wrong}</div>
-          <div className="kpi-note">failed, yet every answer said ok</div>
-        </div>
-      </section>
-      {data.status === 'running' && <ProgressBar value={data.total ? cases.length / data.total : 0} label="Eval progress" />}
+  const toggles = (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border px-4 py-3 sm:px-5">
+      <ToggleGroup type="single" value={filter} onValueChange={v => { if (v) setFilter(v as PassFilter) }} spacing={1} aria-label="Filter by result" className="flex-wrap">
+        {(['all', 'pass', 'fail'] as PassFilter[]).map(f => (
+          <ToggleGroupItem key={f} value={f} className={CHIP}>
+            {f === 'all' ? 'All' : f === 'pass' ? 'Passed' : 'Failed'}
+            <span className="tabular-nums text-muted-foreground">{f === 'all' ? cases.length : f === 'pass' ? cases.length - failCount : failCount}</span>
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
+      {tags.length > 0 && (
+        <ToggleGroup type="single" value={tag ?? ANY_TAG} onValueChange={v => setTag(!v || v === ANY_TAG ? null : v)} spacing={1} aria-label="Filter by tag" className="flex-wrap">
+          <ToggleGroupItem value={ANY_TAG} className={CHIP}>any tag</ToggleGroupItem>
+          {tags.map(t => <ToggleGroupItem key={t} value={t} className={cn(CHIP, 'font-mono text-xs')}>#{t}</ToggleGroupItem>)}
+        </ToggleGroup>
+      )}
+    </div>
+  )
 
-      <section className="panel" aria-label="Cases">
-        <div className="ev-filters">
-          <div className="ev-chips" role="group" aria-label="Filter by result">
-            {(['all', 'pass', 'fail'] as PassFilter[]).map(f => (
-              <button key={f} type="button" className={'ev-chip' + (filter === f ? ' on' : '')} aria-pressed={filter === f} onClick={() => setFilter(f)}>
-                {f === 'all' ? `All ${cases.length}` : f === 'pass' ? `Pass ${cases.length - failCount}` : `Fail ${failCount}`}
-              </button>
-            ))}
-          </div>
-          {tags.length > 0 && (
-            <div className="ev-chips" role="group" aria-label="Filter by tag">
-              <button type="button" className={'ev-chip tag-chip' + (!tag ? ' on' : '')} aria-pressed={!tag} onClick={() => setTag(null)}>any tag</button>
-              {tags.map(t => (
-                <button key={t} type="button" className={'ev-chip tag-chip' + (tag === t ? ' on' : '')} aria-pressed={tag === t}
-                  onClick={() => setTag(tag === t ? null : t)}>#{t}</button>
-              ))}
-            </div>
-          )}
-        </div>
+  return (
+    <PageBody>
+      <BackLink href="#/evals">All evals</BackLink>
+      <section aria-label="Eval summary" className="flex flex-col gap-3">
+        <StatStrip cols={4}>
+          <Stat label="Accuracy" value={pctOf(data.accuracy)} tone={data.status === 'done' ? accTone(data.accuracy) : undefined} note={`${data.passed}/${data.total} passed`} />
+          <Stat label="Engine" value={<span className="inline-flex items-center gap-2 text-lg"><EngineIcon name={data.engine ?? 'none'} size={18} />{data.engine ?? 'keyless'}</span>}
+            note={when(data.at)} />
+          <Stat label="Status" value={<span className="inline-flex h-8 items-center"><StatusBadge status={data.status} /></span>} note={`${cases.length} of ${data.total} cases recorded`} />
+          <Stat label="Silent wrong" value={data.silent_wrong} tone={data.silent_wrong ? 'bad' : undefined} note="failed, yet every answer said ok" />
+        </StatStrip>
+        {data.status === 'running' && <ProgressBar value={data.total ? cases.length / data.total : 0} label="Eval progress" />}
+      </section>
+
+      <Card flush title="Cases" icon="evals" aria-label="Cases">
+        {toggles}
         {shown.length === 0
           ? <EmptyState icon="search" title="No matching cases" text={cases.length ? 'Try another filter.' : 'No cases have finished yet.'} />
           : (
-            <div className="table-wrap ev-table-wrap tall">
-              <table className="ev-table ev-cases">
-                <thead>
-                  <tr><th>Result</th><th>Query</th><th>Agents (expected / got)</th><th>Reasons</th><th>Answer</th><th className="r">Time</th><th><span className="sr-only">Run</span></th></tr>
-                </thead>
-                <tbody>
-                  {shown.map(c => <CaseRow key={c.id} c={c} open={open === c.id} onToggle={() => setOpen(open === c.id ? null : c.id)} />)}
-                </tbody>
-              </table>
-            </div>
+            <>
+              <div className="hidden md:block">
+                <Table className="table-fixed">
+                  <TableHeader>
+                    <TableRow className="border-border hover:bg-transparent">
+                      <TableHead className={cn(HEAD, 'w-20')}>Result</TableHead>
+                      <TableHead className={cn(HEAD, 'w-[24%]')}>Query</TableHead>
+                      <TableHead className={cn(HEAD, 'w-[18%]')}>Agents (expected / got)</TableHead>
+                      <TableHead className={cn(HEAD, 'w-[20%]')}>Reasons</TableHead>
+                      <TableHead className={HEAD}>Answer</TableHead>
+                      <TableHead className={cn(HEAD, 'w-20 text-right')}>Time</TableHead>
+                      <TableHead className={cn(HEAD, 'w-12')}><span className="sr-only">Run</span></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {shown.map(c => <CaseRow key={c.id} c={c} open={open === c.id} onToggle={() => setOpen(open === c.id ? null : c.id)} />)}
+                  </TableBody>
+                </Table>
+              </div>
+              <ul className="m-0 flex list-none flex-col divide-y divide-border p-0 md:hidden">
+                {shown.map(c => <CaseCard key={c.id} c={c} open={open === c.id} onToggle={() => setOpen(open === c.id ? null : c.id)} />)}
+              </ul>
+            </>
           )}
-      </section>
+      </Card>
+    </PageBody>
+  )
+}
+
+// Pieces shared by the table row (md+) and the stacked card (phones).
+
+function ResultBadge({ pass }: { pass: boolean }) {
+  return <Badge tone={pass ? 'ok' : 'bad'} icon={pass ? 'success' : 'error'}>{pass ? 'pass' : 'fail'}</Badge>
+}
+
+function Tags({ tags }: { tags: string[] | undefined }) {
+  if (!tags?.length) return null
+  return (
+    <span className="flex flex-wrap gap-1">
+      {tags.map(t => <span key={t} className="rounded-sm bg-subtle px-1 font-mono text-[11px] text-muted-foreground">#{t}</span>)}
+    </span>
+  )
+}
+
+function CaseAgents({ c }: { c: EvalCase }) {
+  // The API may echo the case's expectations; show them when present.
+  const expected = (c as EvalCase & { expect_agents?: string[] }).expect_agents ?? []
+  return (
+    <div className="flex flex-col gap-1.5">
+      {expected.length > 0 && (
+        <span className="flex flex-wrap items-center gap-1">
+          <span className="w-14 shrink-0 text-xs text-muted-foreground">expected</span>
+          {expected.map(a => <AgentBadge key={a} agent={a} />)}
+        </span>
+      )}
+      <span className="flex flex-wrap items-center gap-1">
+        {expected.length > 0 && <span className="w-14 shrink-0 text-xs text-muted-foreground">got</span>}
+        {c.agents?.length ? c.agents.map((a, i) => <AgentBadge key={i} agent={a} />) : <None />}
+      </span>
     </div>
   )
 }
 
+function CaseReasons({ reasons }: { reasons: string[] | undefined }) {
+  return reasons?.length
+    ? <ul className="m-0 flex list-disc flex-col gap-0.5 pl-4 text-[13px] leading-snug text-foreground marker:text-muted-foreground">{reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
+    : <None />
+}
+
+function CaseAnswer({ answer, open, onToggle }: { answer: string; open: boolean; onToggle: () => void }) {
+  if (answer.length > 160) {
+    return (
+      <button type="button" data-slot="button" aria-expanded={open} onClick={onToggle}
+        className="cursor-pointer rounded-sm bg-transparent p-0 text-left text-[13px] leading-snug text-foreground outline-none [overflow-wrap:anywhere] focus-visible:ring-[3px] focus-visible:ring-ring/35">
+        {open ? answer : answer.slice(0, 160) + '…'}
+        <span className="ml-1 font-medium text-primary">{open ? 'less' : 'more'}</span>
+      </button>
+    )
+  }
+  return <span className="text-[13px] leading-snug text-foreground [overflow-wrap:anywhere]">{answer || <None />}</span>
+}
+
+function RunLink({ qid }: { qid: number | null }) {
+  if (qid == null) return null
+  return <a href={`#/runs/${qid}`} aria-label={`Open run ${qid}`} title={`Run #${qid}`} className={LINK_ICON}><Icon name="external" size={14} /></a>
+}
+
 function CaseRow({ c, open, onToggle }: { c: EvalCase; open: boolean; onToggle: () => void }) {
-  // The API may echo the case's expectations; show them when present.
-  const expected = (c as EvalCase & { expect_agents?: string[] }).expect_agents ?? []
-  const answer = c.answer ?? ''
   return (
-    <tr className={c.pass ? 'pass' : 'fail'}>
-      <td data-l="Result"><Badge tone={c.pass ? 'ok' : 'bad'}>{c.pass ? 'pass' : 'fail'}</Badge></td>
-      <td data-l="Query" className="ev-query">
-        <span>{c.query}</span>
-        {c.tags?.length > 0 && <span className="ev-tags">{c.tags.map(t => <span key={t} className="tag">#{t}</span>)}</span>}
-      </td>
-      <td data-l="Agents">
-        <div className="ev-agents">
-          {expected.length > 0 && <span className="ev-exp"><span className="muted small">expected</span>{expected.map(a => <Chip key={a} agent={a} />)}</span>}
-          <span className="ev-got">{expected.length > 0 && <span className="muted small">got</span>}
-            {c.agents?.length ? c.agents.map((a, i) => <Chip key={i} agent={a} />) : <span className="muted">–</span>}</span>
+    <TableRow className={cn('border-border align-top', c.pass ? 'hover:bg-subtle/60' : 'bg-destructive/[0.04] hover:bg-destructive/[0.07]')}>
+      <TableCell className={cn(CELL, 'align-top')}><ResultBadge pass={c.pass} /></TableCell>
+      <TableCell className={cn(CELL, 'align-top whitespace-normal')}>
+        <div className="flex flex-col gap-1">
+          <span className="text-[13px] font-medium leading-snug text-foreground [overflow-wrap:anywhere]">{c.query}</span>
+          <Tags tags={c.tags} />
         </div>
-      </td>
-      <td data-l="Reasons" className="ev-reasons">
-        {c.reasons?.length ? <ul>{c.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul> : <span className="muted">–</span>}
-      </td>
-      <td data-l="Answer" className="ev-answer">
-        {answer.length > 160
-          ? <button type="button" className="ev-more" aria-expanded={open} onClick={onToggle}>
-              {open ? answer : answer.slice(0, 160) + '…'}
-            </button>
-          : <span>{answer || <span className="muted">–</span>}</span>}
-      </td>
-      <td data-l="Time" className="num r">{ms(c.ms)}</td>
-      <td className="r">{c.qid != null
-        ? <a href={`#/runs/${c.qid}`} aria-label={`Open run ${c.qid}`} title={`Run #${c.qid}`}><Icon name="external" size={14} /></a>
-        : null}</td>
-    </tr>
+      </TableCell>
+      <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseAgents c={c} /></TableCell>
+      <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseReasons reasons={c.reasons} /></TableCell>
+      <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseAnswer answer={c.answer ?? ''} open={open} onToggle={onToggle} /></TableCell>
+      <TableCell className={cn(CELL, 'align-top text-right text-[13px] tabular-nums text-muted-foreground')}>{ms(c.ms)}</TableCell>
+      <TableCell className={cn(CELL, 'align-top text-right')}><RunLink qid={c.qid} /></TableCell>
+    </TableRow>
+  )
+}
+
+function CaseCard({ c, open, onToggle }: { c: EvalCase; open: boolean; onToggle: () => void }) {
+  return (
+    <li className={cn('flex flex-col gap-3 px-4 py-3', !c.pass && 'bg-destructive/[0.04]')}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 flex-col gap-1">
+          <span className="text-sm font-medium leading-snug text-foreground [overflow-wrap:anywhere]">{c.query}</span>
+          <Tags tags={c.tags} />
+        </div>
+        <span className="flex shrink-0 items-center gap-1">
+          <ResultBadge pass={c.pass} />
+          <RunLink qid={c.qid} />
+        </span>
+      </div>
+      <dl className="m-0 grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-[13px]">
+        <dt className="text-xs text-muted-foreground">Agents</dt>
+        <dd className="m-0 min-w-0"><CaseAgents c={c} /></dd>
+        <dt className="text-xs text-muted-foreground">Reasons</dt>
+        <dd className="m-0 min-w-0"><CaseReasons reasons={c.reasons} /></dd>
+        <dt className="text-xs text-muted-foreground">Answer</dt>
+        <dd className="m-0 min-w-0"><CaseAnswer answer={c.answer ?? ''} open={open} onToggle={onToggle} /></dd>
+        <dt className="text-xs text-muted-foreground">Time</dt>
+        <dd className="m-0 tabular-nums text-muted-foreground">{ms(c.ms)}</dd>
+      </dl>
+    </li>
   )
 }

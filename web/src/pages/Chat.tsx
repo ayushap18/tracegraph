@@ -3,7 +3,7 @@ import { ask, cancelRun, deleteSession, errorText, getSession, listFiles, listSe
 import type { FileInfo, SessionSummary } from '../protocol'
 import { useStore } from '../store'
 import { fromRecord, type Run } from '../useEventStream'
-import { Badge, Button, EmptyState, IconButton, Skeleton, Spinner, StatusBadge, buttonClass, copyText, navigate, timeAgo, useHashPath, useNow, useToast } from '../ui'
+import { Badge, Button, EmptyState, IconButton, Kbd, Skeleton, Spinner, StatusBadge, buttonClass, copyText, navigate, timeAgo, useHashPath, useNow, useToast } from '../ui'
 import { AgentIcon, Icon, Logo } from '../icons'
 import { Chip } from '../components/Panels'
 import Markdown from '../components/Markdown'
@@ -11,6 +11,9 @@ import { TraceView } from '../components/TraceView'
 import { Waterfall } from '../components/Viz'
 import { TopActions } from '../components/Shell'
 import { pct } from '../lib'
+import { AgentBadge } from '../components/app'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { cn } from '@/lib/utils'
 
 // Chat home: sessions on the left, the conversation in the middle, the selected turn's live trace on the right.
 // Every message is a run with source "chat" and a session_id, so follow-ups reach the planner with context.
@@ -264,69 +267,88 @@ export default function Chat() {
   const title = sessionId ? (sessions?.find(s => s.id === sessionId)?.title || detail?.title || turns[0]?.text || 'Chat') : 'New chat'
   const empty = !sessionId && !sending
 
+  const showTrace = traceOpen && !empty
+
   return (
-    <div className={'chat' + (traceOpen && !empty ? ' with-trace' : '') + (drawer ? ' drawer-open' : '')}>
+    <div className={cn('relative grid h-full min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden bg-background',
+      'lg:grid-cols-[260px_minmax(0,1fr)]', showTrace && 'xl:grid-cols-[260px_minmax(0,1fr)_380px]')}>
       <TopActions>
-        <IconButton icon="history" label="Show chats" className="chat-drawer-btn" onClick={() => setDrawer(d => !d)} active={drawer} />
+        <IconButton icon="history" label="Show chats" className="lg:hidden" onClick={() => setDrawer(d => !d)} active={drawer} />
         <Button variant="secondary" size="sm" icon="new" onClick={() => navigate('/?new=1')}>New chat</Button>
-{!empty && (<IconButton icon="graph" label={traceOpen ? 'Hide trace panel' : 'Show trace panel'} active={traceOpen} onClick={toggleTrace} className="chat-trace-btn" />)}
+        {!empty && (<IconButton icon="graph" label={traceOpen ? 'Hide trace panel' : 'Show trace panel'} active={traceOpen} onClick={toggleTrace} />)}
       </TopActions>
 
-      {/* sessions */}
-      <aside className="chat-sessions" aria-label="Chats">
-        <div className="cs-head">
-          <span className="cs-title">Chats</span>
-          <Button size="sm" variant="primary" icon="plus" onClick={() => { setDrawer(false); navigate('/?new=1') }}>New</Button>
+      {/* sessions: a column from lg, a left drawer below it */}
+      <aside aria-label="Chats" className={cn('flex min-h-0 min-w-0 flex-col border-r border-border bg-background',
+        'max-lg:absolute max-lg:inset-y-0 max-lg:left-0 max-lg:z-30 max-lg:w-[min(300px,86vw)] max-lg:shadow-lg', !drawer && 'max-lg:hidden')}>
+        <div className="flex shrink-0 items-center justify-between gap-2 px-4 pb-2 pt-4">
+          <h2 className="text-sm font-semibold">Chats</h2>
+          <Button size="sm" variant="secondary" icon="plus" onClick={() => { setDrawer(false); navigate('/?new=1') }}>New</Button>
         </div>
-        <div className="cs-list">
-          {sessions == null ? Array.from({ length: 5 }, (_, i) => <div key={i} className="cs-skel"><Skeleton height={13} width="80%" /><Skeleton height={10} width="45%" /></div>)
+        {sessErr && sessions != null && sessions.length > 0 && (
+          <div role="status" className="mx-2 mb-2 flex items-start gap-2 rounded-md border border-warn/25 bg-warn/10 px-2.5 py-2 text-xs text-foreground">
+            <Icon name="alert" size={13} className="mt-0.5 shrink-0 text-warn" />
+            <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">Could not refresh chats: {sessErr}</span>
+            <button type="button" data-slot="button" className="shrink-0 rounded-sm font-medium text-primary hover:underline focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35" onClick={loadSessions}>Retry</button>
+          </div>
+        )}
+        <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-3">
+          {sessions == null ? Array.from({ length: 5 }, (_, i) => <div key={i} className="flex flex-col gap-1.5 px-2.5 py-2.5"><Skeleton height={13} width="80%" /><Skeleton height={10} width="45%" /></div>)
             : sessions.length === 0 ? <EmptyState compact icon="chat" title="No chats yet" text={sessErr ? `Could not load chats: ${sessErr}` : 'Your conversations will show up here.'} />
-            : sessions.map(s => (
-              <div key={s.id} className={'cs-item' + (s.id === sessionId ? ' on' : '')}>
-                {confirmDel === s.id ? (
-                  <div className="cs-confirm" role="group" aria-label={`Delete ${s.title}?`}>
-                    <span>Delete this chat?</span>
-                    <Button size="sm" variant="danger" onClick={() => void remove(s.id)} autoFocus>Delete</Button>
-                    <Button size="sm" variant="ghost" onClick={() => setConfirmDel(null)}>Cancel</Button>
-                  </div>
-                ) : (
-                  <>
-                    <a href={'#/?s=' + encodeURIComponent(s.id)} className="cs-link" aria-current={s.id === sessionId ? 'page' : undefined} onClick={() => setDrawer(false)}>
-                      <span className="cs-name">{s.title || 'Untitled chat'}</span>
-                      <span className="cs-meta">{s.turns} turn{s.turns === 1 ? '' : 's'} · {timeAgo(s.updated, now)}</span>
-                    </a>
-                    <IconButton icon="trash" label={`Delete chat: ${s.title}`} size="sm" className="cs-del" onClick={() => setConfirmDel(s.id)} />
-                  </>
-                )}
-              </div>
-            ))}
+            : sessions.map(s => {
+              const on = s.id === sessionId
+              return (
+                <div key={s.id} className={cn('group relative flex items-center rounded-md transition-colors', on ? 'bg-subtle' : 'hover:bg-subtle/60 focus-within:bg-subtle/60')}>
+                  {confirmDel === s.id ? (
+                    <div className="flex w-full flex-wrap items-center gap-1.5 px-2.5 py-2 text-[13px]" role="group" aria-label={`Delete ${s.title}?`}>
+                      <span className="basis-full font-medium">Delete this chat?</span>
+                      <Button size="sm" variant="danger" onClick={() => void remove(s.id)} autoFocus>Delete</Button>
+                      <Button size="sm" variant="ghost" onClick={() => setConfirmDel(null)}>Cancel</Button>
+                    </div>
+                  ) : (
+                    <>
+                      <a href={'#/?s=' + encodeURIComponent(s.id)} aria-current={on ? 'page' : undefined} onClick={() => setDrawer(false)}
+                        className="flex min-w-0 flex-1 flex-col gap-0.5 rounded-md px-2.5 py-2 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35">
+                        <span className="truncate text-[13.5px] font-medium text-foreground">{s.title || 'Untitled chat'}</span>
+                        <span className="truncate text-xs tabular-nums text-muted-foreground">{s.turns} turn{s.turns === 1 ? '' : 's'} · {timeAgo(s.updated, now)}</span>
+                      </a>
+                      <IconButton icon="trash" label={`Delete chat: ${s.title}`} size="sm" onClick={() => setConfirmDel(s.id)}
+                        className="mr-1 shrink-0 hover:text-destructive sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100" />
+                    </>
+                  )}
+                </div>
+              )
+            })}
         </div>
       </aside>
-      {drawer && <div className="chat-scrim" onClick={() => setDrawer(false)} aria-hidden="true" />}
+      {drawer && <div className="absolute inset-0 z-[25] bg-scrim lg:hidden" onClick={() => setDrawer(false)} aria-hidden="true" />}
 
       {/* conversation */}
-      <section className={'chat-main' + (dragging ? ' dragging' : '')} aria-label="Conversation"
+      <section className="relative flex min-h-0 min-w-0 flex-col" aria-label="Conversation"
         onDragOver={e => { if (filesEnabled && e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragging(true) } }}
         onDragLeave={e => { if (e.currentTarget === e.target) setDragging(false) }} onDrop={onDrop}>
-        <div className="chat-thread" ref={thread} onScroll={onScroll}>
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden scroll-smooth motion-reduce:scroll-auto" ref={thread} onScroll={onScroll}>
           {empty ? (
-            <div className="chat-hero">
-              <div className="hero-logo"><Logo size={44} /></div>
-              <h2>What can I help with?</h2>
-              <p className="muted">Ask one thing or several at once. TraceGraph plans the steps, routes each to the right agent and merges the answers. Follow-ups keep the context.</p>
-              <div className="sample-grid">
+            <div className="mx-auto flex min-h-full w-full max-w-[640px] flex-col items-center justify-center px-4 py-10 text-center">
+              <div className="grid size-12 place-items-center rounded-xl border border-border bg-surface"><Logo size={28} /></div>
+              <h2 className="mt-5 text-2xl font-semibold tracking-tight text-balance">What can I help with?</h2>
+              <p className="mt-2 max-w-[56ch] text-sm leading-relaxed text-muted-foreground text-pretty">Ask one thing or several at once. TraceGraph plans the steps, routes each to the right agent and merges the answers. Follow-ups keep the context.</p>
+              <div className="mt-8 grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
                 {pickSamples(store.samples.length ? store.samples : ['What time is it in Tokyo?']).map(({ text, kind }) => (
-                  <button type="button" key={text} className="sample-card" onClick={() => void send(text, null)}>
-                    {kind === 'multi' ? <Icon name="planner" size={16} /> : <AgentIcon agent={kind} size={16} />}
-                    <span>{text}</span>
+                  <button type="button" data-slot="button" key={text} onClick={() => void send(text, null)}
+                    className="flex items-start gap-2.5 rounded-lg border border-border bg-surface p-3 text-left text-[13px] leading-snug text-foreground transition-colors hover:border-edge hover:bg-subtle/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35">
+                    <span className="grid size-6 shrink-0 place-items-center rounded-md bg-subtle">
+                      {kind === 'multi' ? <Icon name="planner" size={14} className="text-primary" /> : <AgentIcon agent={kind} size={14} tinted />}
+                    </span>
+                    <span className="min-w-0 pt-0.5 [overflow-wrap:anywhere]">{text}</span>
                   </button>
                 ))}
               </div>
             </div>
           ) : (
-            <div className="turns">
+            <div className="mx-auto flex w-full max-w-[760px] flex-col gap-8 px-4 py-6 sm:px-6 sm:py-8">
               <h2 className="sr-only">{title}</h2>
-              {detailLoading && !turns.length && <div className="turn-skel"><Skeleton height={36} width="45%" style={{ marginLeft: 'auto' }} /><Skeleton lines={3} /></div>}
+              {detailLoading && !turns.length && <div className="flex flex-col gap-4"><Skeleton height={36} width="45%" className="ml-auto" /><Skeleton lines={3} /></div>}
               {detailErr && !turns.length && !sending && <EmptyState icon="alert" title="Could not load this chat" text={detailErr} action={<Button variant="secondary" onClick={() => navigate('/?new=1')}>Start a new chat</Button>} />}
               {!detailLoading && !detailErr && sessionId && !turns.length && !sending && <EmptyState icon="chat" title="This chat is empty" text="Ask something below to start." />}
               {turns.map(run => (
@@ -334,67 +356,91 @@ export default function Chat() {
                   onShowTrace={() => { setSelQid(run.qid); if (!traceOpen) toggleTrace() }} />
               ))}
               {sending && (
-                <div className="turn">
-                  <div className="bubble-user"><p>{sending.text}</p>{sending.files.length > 0 && <FileRow names={sending.files} />}</div>
-                  <div className="bubble-bot pending"><BotHead /><div className="thinking"><Spinner size={14} /> Sending…</div></div>
+                <div className="flex flex-col gap-4">
+                  <UserMessage text={sending.text} files={sending.files} />
+                  <div className="border-l-2 border-transparent pl-4">
+                    <BotHead />
+                    <div className="mt-3 flex items-center gap-2.5 text-sm text-muted-foreground"><Spinner size={14} /> Sending…</div>
+                  </div>
                 </div>
               )}
             </div>
           )}
         </div>
 
-        <div className="composer-wrap">
-          {dragging && <div className="drop-hint"><Icon name="upload" size={18} /> Drop files to attach</div>}
-          <form className="composer" onSubmit={e => { e.preventDefault(); if (!running && !uploading && !sending) void send(text, sessionId) }}>
-            {files.length > 0 && (
-              <ul className="file-chips" aria-label="Attached files">
-                {files.map(f => (
-                  <li key={f.key} className={'file-chip ' + f.status} title={f.error ?? f.name}>
-                    {f.status === 'uploading' ? <Spinner size={13} /> : <Icon name={f.status === 'error' ? 'alert' : f.name.endsWith('.csv') ? 'file-csv' : f.name.endsWith('.json') ? 'file-json' : 'file-text'} size={14} />}
-                    <span className="fc-name">{f.name}</span>
-                    <span className="fc-meta">{f.status === 'error' ? 'failed' : f.info?.rows != null ? `${f.info.rows} rows` : fmtSize(f.size)}</span>
-                    <button type="button" className="fc-x" aria-label={`Remove ${f.name}`} onClick={() => setFiles(fs => fs.filter(x => x.key !== f.key))}><Icon name="close" size={12} /></button>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="composer-row">
-              <input ref={fileInput} type="file" accept={ACCEPT} multiple hidden onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }} />
-              <IconButton icon="paperclip" label={filesEnabled ? 'Attach files (.txt .md .csv .json .pdf, up to 10 MB)' : 'File attachments are not enabled on this server'}
-                disabled={!filesEnabled} onClick={() => fileInput.current?.click()} className="composer-attach" />
-              <textarea ref={ta} value={text} rows={1} maxLength={500} onChange={e => setText(e.target.value)} onKeyDown={onComposerKey}
-                placeholder={sessionId && turns.length ? 'Ask a follow-up…' : 'Ask anything, or several things at once…'} aria-label="Message" />
-              {running ? (
-                <Button variant="danger" icon="stop" onClick={() => void stop()} className="composer-send" aria-label="Stop the running answer">Stop</Button>
-              ) : (
-                <Button type="submit" icon="send" disabled={!text.trim() || uploading || !!sending} className="composer-send" aria-label="Send">
-                  <span className="hide-xs">Send</span>
-                </Button>
+        {dragging && <div className="pointer-events-none absolute inset-2 z-10 rounded-lg border-2 border-dashed border-primary bg-primary/5" aria-hidden="true" />}
+
+        <div className="shrink-0 px-3 pb-3 pt-2 sm:px-6 sm:pb-4">
+          <div className="relative mx-auto w-full max-w-[760px]">
+            {dragging && <div className="pointer-events-none absolute -top-11 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-md bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground shadow-md"><Icon name="upload" size={16} /> Drop files to attach</div>}
+            <form onSubmit={e => { e.preventDefault(); if (!running && !uploading && !sending) void send(text, sessionId) }}
+              className={cn('rounded-xl border bg-surface p-2 shadow-sm transition-colors focus-within:border-edge',
+                dragging ? 'border-dashed border-primary focus-within:border-primary' : 'border-border')}>
+              {files.length > 0 && (
+                <ul className="mb-2 flex flex-wrap gap-1.5 px-0.5 pt-0.5" aria-label="Attached files">
+                  {files.map(f => (
+                    <li key={f.key} title={f.error ?? f.name}
+                      className={cn('inline-flex h-7 min-w-0 max-w-full items-center gap-1.5 rounded-md border bg-subtle/60 pl-2 pr-0.5 text-[13px]',
+                        f.status === 'error' ? 'border-destructive/30' : 'border-border')}>
+                      {f.status === 'uploading' ? <Spinner size={13} className="shrink-0 text-muted-foreground" />
+                        : <Icon name={f.status === 'error' ? 'alert' : f.name.endsWith('.csv') ? 'file-csv' : f.name.endsWith('.json') ? 'file-json' : 'file-text'} size={14}
+                          className={cn('shrink-0', f.status === 'error' ? 'text-destructive' : 'text-primary')} />}
+                      <span className="min-w-0 max-w-[200px] truncate font-medium">{f.name}</span>
+                      <span className={cn('whitespace-nowrap text-xs tabular-nums', f.status === 'error' ? 'text-destructive' : 'text-muted-foreground')}>
+                        {f.status === 'error' ? 'failed' : f.status === 'uploading' ? 'uploading' : f.info?.rows != null ? `${f.info.rows} rows` : fmtSize(f.size)}
+                      </span>
+                      <button type="button" data-slot="button" aria-label={`Remove ${f.name}`} onClick={() => setFiles(fs => fs.filter(x => x.key !== f.key))}
+                        className="grid size-6 shrink-0 place-items-center rounded-sm text-muted-foreground transition-colors hover:bg-subtle hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35">
+                        <Icon name="close" size={12} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
               )}
-            </div>
-          </form>
-          <p className="composer-hint">
-            <span><kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line</span>
-            <span className="muted">{store.engine ? `Engine: ${store.engine.label}` : 'Keyless mode'}{text.length > 400 ? ` · ${text.length}/500` : ''}</span>
-          </p>
+              <div className="flex items-end gap-1.5">
+                <input ref={fileInput} type="file" accept={ACCEPT} multiple hidden onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }} />
+                <IconButton icon="paperclip" label={filesEnabled ? 'Attach files (.txt .md .csv .json .pdf, up to 10 MB)' : 'File attachments are not enabled on this server'}
+                  disabled={!filesEnabled} onClick={() => fileInput.current?.click()} className="mb-0.5 shrink-0" />
+                <textarea ref={ta} value={text} rows={1} maxLength={500} onChange={e => setText(e.target.value)} onKeyDown={onComposerKey}
+                  placeholder={sessionId && turns.length ? 'Ask a follow-up…' : 'Ask anything, or several things at once…'} aria-label="Message"
+                  className="max-h-[220px] min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-2 font-sans text-[15px] leading-normal text-foreground outline-none placeholder:text-muted-foreground focus-visible:outline-none" />
+                {running ? (
+                  <Button variant="secondary" icon="stop" onClick={() => void stop()} className="mb-0.5 shrink-0" aria-label="Stop the running answer">Stop</Button>
+                ) : (
+                  <IconButton type="submit" variant="primary" icon="send" label="Send" disabled={!text.trim() || uploading || !!sending} className="mb-0.5 shrink-0" />
+                )}
+              </div>
+            </form>
+            <p className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1 text-xs text-muted-foreground">
+              <span className="inline-flex items-center gap-1 max-sm:hidden"><Kbd>Enter</Kbd> send, <Kbd>Shift</Kbd>+<Kbd>Enter</Kbd> new line</span>
+              <span className="min-w-0 truncate">
+                {store.engine ? `Engine: ${store.engine.label}` : 'Keyless mode'}
+                {text.length > 400 && <span className="tabular-nums max-sm:hidden"> · {text.length}/500</span>}
+              </span>
+            </p>
+          </div>
         </div>
       </section>
 
-      {/* trace */}
-      {traceOpen && !empty && (
-        <aside className="chat-trace" aria-label="Trace of the selected turn">
-          <div className="ct-head">
-            <span className="ct-title"><Icon name="graph" size={15} />Trace{selected && <span className="muted num"> · Run #{selected.qid}</span>}</span>
-            <span className="ct-actions">
+      {/* trace: a column from xl, an overlay over the thread below it */}
+      {showTrace && (
+        <aside aria-label="Trace of the selected turn" className={cn('flex min-h-0 min-w-0 flex-col border-l border-border bg-surface',
+          'max-xl:absolute max-xl:inset-y-0 max-xl:right-0 max-xl:z-20 max-xl:shadow-lg max-sm:w-full sm:max-xl:w-[420px]')}>
+          <div className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border pl-4 pr-2">
+            <span className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+              <Icon name="graph" size={15} className="shrink-0 text-muted-foreground" />Trace
+              {selected && <span className="truncate font-mono text-xs font-normal tabular-nums text-muted-foreground">Run #{selected.qid}</span>}
+            </span>
+            <span className="flex shrink-0 items-center gap-0.5">
               {selected && <a className={buttonClass('ghost', 'sm')} href={`#/runs/${selected.qid}`}><Icon name="external" size={14} />Open</a>}
               <IconButton icon="close" label="Hide trace panel" size="sm" onClick={toggleTrace} />
             </span>
           </div>
           {selected ? (
-            <div className="ct-body">
+            <div className="min-h-0 flex-1 overflow-y-auto">
               <TraceView run={selected} store={store} compact legend={false} />
-              <div className="ct-section">
-                <h3 className="ct-sub"><Icon name="timeline" size={13} />Timeline</h3>
+              <div className="border-t border-border px-4 py-4">
+                <h3 className="mb-3 flex items-center gap-1.5 text-[13px] font-semibold"><Icon name="timeline" size={14} className="text-muted-foreground" />Timeline</h3>
                 <Waterfall run={selected} />
               </div>
             </div>
@@ -409,17 +455,35 @@ export default function Chat() {
 
 function BotHead({ run }: { run?: Run }) {
   return (
-    <div className="bot-head">
-      <span className="bot-avatar"><Logo size={20} /></span>
-      <span className="bot-name">TraceGraph</span>
-      {run?.engine && <Badge tone="neutral" icon="engine">{run.engine}</Badge>}
+    <div className="flex min-w-0 items-center gap-2">
+      <Logo size={18} />
+      <span className="text-[13px] font-semibold">TraceGraph</span>
+      {run?.engine && <Badge tone="neutral" icon="engine" className="min-w-0">{run.engine}</Badge>}
     </div>
   )
 }
 
-function FileRow({ names }: { names: string[] }) {
-  return <div className="bubble-files">{names.map((n, i) => <span key={i} className="bubble-file"><Icon name="paperclip" size={12} />{n}</span>)}</div>
+function UserMessage({ text, files }: { text: string; files: string[] }) {
+  return (
+    <div className="flex flex-col items-end gap-1.5">
+      <div className="max-w-[85%] rounded-2xl rounded-br-md bg-subtle px-4 py-2.5 text-[15px] leading-relaxed text-foreground">
+        <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</p>
+      </div>
+      {files.length > 0 && (
+        <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
+          {files.map((n, i) => (
+            <span key={i} className="inline-flex h-6 min-w-0 max-w-full items-center gap-1 rounded-md border border-border bg-surface px-2 text-xs text-muted-foreground">
+              <Icon name="paperclip" size={12} className="shrink-0" /><span className="truncate">{n}</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
+
+const STEP_TONE: Record<string, string> = { done: 'text-ok', running: 'text-primary', warn: 'text-warn', error: 'text-warn', wait: 'text-muted-foreground' }
+const STREAM_CURSOR = "[&>.md>:last-child]:after:ml-px [&>.md>:last-child]:after:text-primary [&>.md>:last-child]:after:content-['▍'] [&>.md>:last-child]:after:animate-[blink_1s_steps(2)_infinite]"
 
 function Turn({ run, selected, onShowTrace, fileName }: { run: Run; selected: boolean; onShowTrace: () => void; fileName: (id: string) => string }) {
   const toast = useToast()
@@ -431,53 +495,66 @@ function Turn({ run, selected, onShowTrace, fileName }: { run: Run; selected: bo
   const phase = !run.plan ? 'Planning…' : tasks.some(t => !t.routed && !t.error) ? `Routing ${tasks.length} step${tasks.length === 1 ? '' : 's'}…`
     : tasks.some(t => !t.answered && !t.error) ? 'Agents working…' : multi ? 'Merging answers…' : 'Finishing…'
   const copy = async () => { (await copyText(answer)) ? toast.success('Answer copied') : toast.error('Could not copy') }
+  // Steps start open while the run works and fold once it is done, like the old <details open={!run.done}>.
+  const [stepsOpen, setStepsOpen] = useState(!run.done)
+  useEffect(() => { setStepsOpen(!run.done) }, [run.done])
+  const quiet = run.status === 'cancelled' || run.status === 'timeout'
 
   return (
-    <div className={'turn' + (selected ? ' selected' : '')}>
-      <div className="bubble-user">
-        <p>{run.text || '…'}</p>
-        {run.files.length > 0 && <FileRow names={run.files.map(fileName)} />}
-      </div>
-      <div className={'bubble-bot' + (finalFail ? ' failed' : '')}>
+    <div className="flex flex-col gap-4">
+      <UserMessage text={run.text || '…'} files={run.files.map(fileName)} />
+      <div className={cn('min-w-0 border-l-2 pl-4 transition-colors', selected ? 'border-primary' : 'border-transparent')}>
         <BotHead run={run} />
         {multi && (
-          <details className="steps" open={!run.done}>
-            <summary><Icon name="subtasks" size={13} />{tasks.length} steps{run.plan ? ` · ${run.plan.planner} plan` : ''}</summary>
-            <ol>
-              {tasks.map(t => {
-                const st = t.error ? 'error' : t.answered ? (t.answered.ok ? 'done' : 'warn') : t.routed ? 'running' : 'wait'
-                return (
-                  <li key={t.tid} className={'step st-' + st}>
-                    <span className="step-ico" aria-hidden="true">{st === 'running' ? <Spinner size={12} /> : st === 'done' ? <Icon name="check" size={13} /> : st === 'wait' ? <Icon name="clock" size={12} /> : <Icon name="alert" size={13} />}</span>
-                    <span className="step-text">{t.text}{t.depends_on.length > 0 && <span className="muted small"> · after {t.depends_on.join(', ')}</span>}</span>
-                    {t.routed && <Chip agent={t.routed.agent} />}
-                  </li>
-                )
-              })}
-            </ol>
-          </details>
+          <Collapsible open={stepsOpen} onOpenChange={setStepsOpen} className="mt-3">
+            <CollapsibleTrigger data-slot="button"
+              className="group/steps -mx-1 inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35">
+              <Icon name="subtasks" size={14} />{tasks.length} steps{run.plan ? `, ${run.plan.planner} plan` : ''}
+              <Icon name="chevron-down" size={14} className="group-data-[state=open]/steps:rotate-180" />
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <ol className="mt-2 flex flex-col gap-1.5 border-l border-border pl-3">
+                {tasks.map(t => {
+                  const st = t.error ? 'error' : t.answered ? (t.answered.ok ? 'done' : 'warn') : t.routed ? 'running' : 'wait'
+                  return (
+                    <li key={t.tid} className="flex min-h-6 items-center gap-2 text-[13px] max-sm:flex-wrap">
+                      <span className={cn('inline-flex w-4 shrink-0 justify-center', STEP_TONE[st])} aria-hidden="true">{st === 'running' ? <Spinner size={12} /> : st === 'done' ? <Icon name="check" size={13} /> : st === 'wait' ? <Icon name="clock" size={12} /> : <Icon name="alert" size={13} />}</span>
+                      <span className={cn('min-w-0 flex-1 [overflow-wrap:anywhere]', st === 'wait' ? 'text-muted-foreground' : 'text-foreground')}>
+                        {t.text}{t.depends_on.length > 0 && <span className="text-xs text-muted-foreground"> (after {t.depends_on.join(', ')})</span>}
+                      </span>
+                      {t.routed && <span className="max-sm:ml-6"><Chip agent={t.routed.agent} /></span>}
+                    </li>
+                  )
+                })}
+              </ol>
+            </CollapsibleContent>
+          </Collapsible>
         )}
         {answer ? (
-          <div className={'bot-answer' + (streaming ? ' streaming' : '')}><Markdown text={answer} /></div>
+          <div className={cn('mt-3 text-[15px] leading-relaxed text-foreground [overflow-wrap:anywhere]', streaming && STREAM_CURSOR)}><Markdown text={answer} /></div>
         ) : !run.done ? (
-          <div className="thinking" role="status"><Spinner size={14} /><span>{phase}<small>{!run.plan ? 'Breaking your request into clear steps.' : 'Your answer will appear here as it is ready.'}</small></span></div>
-        ) : !finalFail ? <p className="muted">No answer.</p> : null}
-        {run.error && <p className="bot-error"><Icon name="alert" size={14} />{run.error}</p>}
-        {finalFail && !run.error && <p className="bot-error"><Icon name={run.status === 'cancelled' ? 'cancelled' : 'timeout'} size={14} />
+          <div className="mt-3 flex items-start gap-2.5 py-1 text-sm text-foreground" role="status">
+            <Spinner size={14} className="mt-0.5 shrink-0 text-muted-foreground" />
+            <span>{phase}<small className="mt-1 block text-xs text-muted-foreground">{!run.plan ? 'Breaking your request into clear steps.' : 'Your answer will appear here as it is ready.'}</small></span>
+          </div>
+        ) : !finalFail ? <p className="mt-3 text-sm text-muted-foreground">No answer.</p> : null}
+        {run.error && <p className={cn('mt-3 flex items-start gap-2 rounded-md border p-3 text-sm text-foreground', quiet ? 'border-warn/25 bg-warn/10' : 'border-destructive/25 bg-destructive/10')}>
+          <Icon name="alert" size={15} className={cn('mt-0.5 shrink-0', quiet ? 'text-warn' : 'text-destructive')} /><span className="min-w-0 [overflow-wrap:anywhere]">{run.error}</span></p>}
+        {finalFail && !run.error && <p className={cn('mt-3 flex items-start gap-2 rounded-md border p-3 text-sm text-foreground', quiet ? 'border-warn/25 bg-warn/10' : 'border-destructive/25 bg-destructive/10')}>
+          <Icon name={run.status === 'cancelled' ? 'cancelled' : 'timeout'} size={15} className={cn('mt-0.5 shrink-0', quiet ? 'text-warn' : 'text-destructive')} />
           {run.status === 'cancelled' ? 'Stopped before it finished.' : run.status === 'timeout' ? 'Timed out.' : 'Something went wrong.'}</p>}
-        <div className="bot-foot">
-          <span className="bot-agents">
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="flex min-w-0 flex-wrap gap-1.5">
             {tasks.filter(t => t.routed).map(t => (
-              <span key={t.tid} className="agent-conf" title={`${t.routed!.agent}: ${pct(t.routed!.confidence)} confidence`}>
-                <AgentIcon agent={t.routed!.agent} size={12} tinted />{t.routed!.agent}<span className="num muted">{pct(t.routed!.confidence)}</span>
-              </span>
+              <AgentBadge key={t.tid} agent={t.routed!.agent} pct={pct(t.routed!.confidence)} title={`${t.routed!.agent}: ${pct(t.routed!.confidence)} confidence`} />
             ))}
           </span>
-          <span className="bot-meta">
+          <span className="ml-auto flex flex-wrap items-center gap-1">
             {run.done && run.status !== 'done' && <StatusBadge status={run.status} />}
-            {run.total_ms != null && <span className="num muted" title="Total time"><Icon name="latency" size={12} /> {secs(run.total_ms)}</span>}
+            {run.total_ms != null && <span className="mx-1 inline-flex items-center gap-1 text-xs tabular-nums text-muted-foreground" title="Total time"><Icon name="latency" size={12} />{secs(run.total_ms)}</span>}
             {answer && run.done && <IconButton icon="copy" label="Copy answer" size="sm" onClick={() => void copy()} />}
-            <button type="button" className="trace-link" onClick={onShowTrace} aria-pressed={selected}><Icon name="graph" size={13} />{selected ? 'Trace open' : 'View trace'}<Icon name="arrow-right" size={12} /></button>
+            <Button variant="ghost" size="sm" icon="graph" iconRight="arrow-right" onClick={onShowTrace} aria-pressed={selected}
+              className="aria-pressed:bg-primary/10 aria-pressed:text-primary">{selected ? 'Trace open' : 'View trace'}</Button>
           </span>
         </div>
       </div>

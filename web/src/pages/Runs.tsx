@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { listRuns, errorText, ApiError } from '../api'
 import type { RunRecord } from '../protocol'
 import { useStore } from '../store'
 import { fromRecord, type Run } from '../useEventStream'
-import { Button, Card, EmptyState, Skeleton, StatusBadge, navigate, timeAgo, useNow } from '../ui'
-import { EngineIcon, Icon } from '../icons'
-import { Chip } from '../components/Panels'
+import { Badge, Button, EmptyState, buttonClass, Skeleton, navigate, timeAgo, useNow } from '../ui'
+import { Icon } from '../icons'
+import { AgentBadge, EngineBadge, PageBody, StatusDot } from '../components/app'
 import { TopActions } from '../components/Shell'
+import { Select as UiSelect, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { cn } from '@/lib/utils'
 
 // Every run, newest first: search, filter by source, status and engine, and page back with "Load more".
 // The first page merges in live runs from the store so statuses update as they finish.
@@ -15,7 +19,19 @@ const PAGE = 50
 const SOURCES = ['you', 'chat', 'compare', 'eval', 'autopilot']
 const STATUSES = ['running', 'done', 'cancelled', 'timeout', 'error']
 
-const secs = (v: number | null) => (v == null ? '–' : v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
+const secs = (v: number | null) => (v == null ? '-' : v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
+
+// Column visibility, shared by the header, the rows and the skeleton so they always line up.
+const COL = {
+  id: 'w-14 pl-4 sm:pl-5 text-right font-mono text-xs tabular-nums text-muted-foreground',
+  query: 'w-full min-w-[14rem] whitespace-normal',
+  source: 'hidden md:table-cell',
+  status: 'hidden md:table-cell',
+  engine: 'hidden lg:table-cell',
+  agents: 'hidden xl:table-cell',
+  time: 'hidden md:table-cell text-right tabular-nums',
+  when: 'hidden lg:table-cell pr-4 sm:pr-5 text-right tabular-nums',
+}
 
 export default function Runs() {
   const { store } = useStore()
@@ -99,27 +115,54 @@ export default function Runs() {
   }, [store.engines, rows])
 
   const filtered = !!(debounced || source || status || engine)
+  const activeSelects = [source, status, engine].filter(Boolean).length
   const clear = () => { setQ(''); setSource(''); setStatus(''); setEngine(''); search.current?.focus() }
 
-  return (
-    <div className="wrap runs-page">
-      <TopActions><span className="muted small num">{rows.length} shown</span></TopActions>
-      <div className="filters" role="search">
-        <label className="search-field">
-          <Icon name="search" size={16} />
-          <input ref={search} value={q} onChange={e => setQ(e.target.value)} placeholder="Search queries or #id" aria-label="Search runs" type="search" />
-        </label>
-        <Select label="Source" value={source} onChange={setSource} options={SOURCES} />
-        <Select label="Status" value={status} onChange={setStatus} options={STATUSES} />
-        <Select label="Engine" value={engine} onChange={setEngine} options={[...new Set(['none', ...engines])]} />
-        {filtered && <Button variant="ghost" size="sm" icon="close" onClick={clear}>Clear</Button>}
-      </div>
-      {fallback && <p className="notice"><Icon name="info" size={14} />This server does not list stored runs yet, so only the runs in memory are shown.</p>}
+  const selects = (full?: boolean) => (
+    <>
+      <FilterSelect label="Source" value={source} onChange={setSource} options={SOURCES} full={full} />
+      <FilterSelect label="Status" value={status} onChange={setStatus} options={STATUSES} full={full} />
+      <FilterSelect label="Engine" value={engine} onChange={setEngine} options={[...new Set(['none', ...engines])]} full={full} />
+    </>
+  )
 
-      {error && rows.length > 0 && <p className="notice" role="alert"><Icon name="alert" size={14} />{error}</p>}
-      <Card flush className="runs-card">
+  return (
+    <PageBody>
+      <TopActions><span className="text-xs tabular-nums text-muted-foreground">{rows.length} shown</span></TopActions>
+
+      <div className="flex flex-col gap-3">
+        <div className="flex min-w-0 flex-wrap items-center gap-2" role="search">
+          <label className="relative min-w-0 flex-1 basis-56 md:max-w-sm">
+            <Icon name="search" size={16} className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground" />
+            <input ref={search} value={q} onChange={e => setQ(e.target.value)} placeholder="Search queries or #id" aria-label="Search runs" type="search"
+              data-slot="input"
+              className="h-9 w-full min-w-0 rounded-md border border-input bg-surface pr-3 pl-9 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/35" />
+          </label>
+
+          <div className="hidden items-center gap-2 md:flex">{selects()}</div>
+
+          <Popover>
+            <PopoverTrigger data-slot="button" className={buttonClass('secondary', 'md', 'md:hidden')}
+              aria-label={activeSelects ? `Filters, ${activeSelects} active` : 'Filters'}>
+              <Icon name="filter" size={16} strokeWidth={2} />
+              <span>Filters</span>
+              {activeSelects > 0 && <span className="grid size-5 place-items-center rounded-sm bg-primary/10 text-xs font-medium tabular-nums text-primary">{activeSelects}</span>}
+            </PopoverTrigger>
+            <PopoverContent align="end" className="flex w-64 flex-col gap-2 p-3">
+              {selects(true)}
+            </PopoverContent>
+          </Popover>
+
+          {filtered && <Button variant="ghost" size="sm" icon="close" onClick={clear}>Clear</Button>}
+        </div>
+
+        {fallback && <Notice icon="info">This server does not list stored runs yet, so only the runs in memory are shown.</Notice>}
+        {error && rows.length > 0 && <Notice icon="alert" tone="bad" role="alert">{error}</Notice>}
+      </div>
+
+      <section className="min-w-0 overflow-clip rounded-lg border border-border bg-surface md:[&_[data-slot=table-container]]:overflow-visible">
         {loading && !rows.length ? (
-          <div className="table-skel">{Array.from({ length: 8 }, (_, i) => <Skeleton key={i} height={18} />)}</div>
+          <RunsSkeleton />
         ) : error && !rows.length ? (
           <EmptyState icon="alert" title="Could not load runs" text={error} action={<Button variant="secondary" icon="refresh" onClick={() => setNonce(n => n + 1)}>Retry</Button>} />
         ) : !rows.length ? (
@@ -127,55 +170,131 @@ export default function Runs() {
             ? <EmptyState icon="filter" title="No runs match" text="Try a different search or clear the filters." action={<Button variant="secondary" onClick={clear}>Clear filters</Button>} />
             : <EmptyState icon="runs" title="No runs yet" text="Ask something in Chat or on the Live page and it will show up here." action={<Button icon="chat" onClick={() => navigate('/')}>Open chat</Button>} />
         ) : (
-          <div className="table-wrap runs-table">
-            <table>
-              <thead>
-                <tr>
-                  <th className="col-id">#</th><th>Query</th><th className="hide-sm">Source</th><th>Status</th>
-                  <th className="hide-md">Engine</th><th className="hide-sm">Agents</th><th className="num-h hide-xs">Time</th><th className="num-h hide-md">When</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map(r => {
-                  const agents = [...new Set(r.order.map(t => r.tasks[t]?.routed?.agent).filter((a): a is string => !!a))]
-                  return (
-                    <tr key={r.qid} className="row-link" onClick={e => { if (!(e.target as HTMLElement).closest('a')) navigate('/runs/' + r.qid) }}>
-                      <td className="num col-id">{r.qid}</td>
-                      <td className="col-q">
-                        <a href={`#/runs/${r.qid}`} className="q-link">{r.text}</a>
-                        {r.files.length > 0 && <span className="muted small" title={`${r.files.length} file(s)`}> <Icon name="paperclip" size={12} />{r.files.length}</span>}
-                        <span className="show-sm muted small"> · {r.source} · {timeAgo(r.at, now)}</span>
-                      </td>
-                      <td className="hide-sm"><span className="src-tag">{r.source}</span></td>
-                      <td><StatusBadge status={r.done ? r.status : 'running'} /></td>
-                      <td className="hide-md">{r.engine ? <span className="eng"><EngineIcon name={r.engine} size={13} />{r.engine}</span> : <span className="muted">keyless</span>}</td>
-                      <td className="hide-sm"><span className="chips">{agents.slice(0, 3).map(a => <Chip key={a} agent={a} />)}{agents.length > 3 && <span className="muted small">+{agents.length - 3}</span>}</span></td>
-                      <td className="num hide-xs">{r.done ? secs(r.total_ms) : '…'}</td>
-                      <td className="num hide-md" title={new Date(r.at * 1000).toLocaleString()}>{timeAgo(r.at, now)}</td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+          <Table>
+            <RunsHead />
+            <TableBody>
+              {rows.map(r => {
+                const agents = [...new Set(r.order.map(t => r.tasks[t]?.routed?.agent).filter((a): a is string => !!a))]
+                const st = r.done ? r.status : 'running'
+                const when = timeAgo(r.at, now)
+                return (
+                  <TableRow key={r.qid} className="cursor-pointer border-border hover:bg-subtle/60 focus-within:bg-subtle/60"
+                    onClick={e => { if (!(e.target as HTMLElement).closest('a')) navigate('/runs/' + r.qid) }}>
+                    <TableCell className={cn(COL.id, 'py-3 align-top md:align-middle')}>{r.qid}</TableCell>
+                    <TableCell className={cn(COL.query, 'py-3')}>
+                      <div className="flex min-w-0 items-start gap-2">
+                        <a href={`#/runs/${r.qid}`}
+                          className="line-clamp-2 min-w-0 rounded-sm font-medium text-foreground outline-none hover:underline hover:underline-offset-2 focus-visible:ring-[3px] focus-visible:ring-ring/35">
+                          {r.text}
+                        </a>
+                        {r.files.length > 0 && (
+                          <span className="inline-flex shrink-0 items-center gap-0.5 pt-0.5 text-xs tabular-nums text-muted-foreground" title={`${r.files.length} file(s)`}>
+                            <Icon name="paperclip" size={12} />{r.files.length}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground lg:hidden">
+                        <span className="md:hidden">{r.source}</span>
+                        <StatusDot status={st} className="text-xs md:hidden" />
+                        <span className="tabular-nums md:hidden">{r.done ? secs(r.total_ms) : '…'}</span>
+                        <span className="tabular-nums" title={new Date(r.at * 1000).toLocaleString()}>{when}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell className={COL.source}><Badge tone="neutral">{r.source}</Badge></TableCell>
+                    <TableCell className={COL.status}><StatusDot status={st} /></TableCell>
+                    <TableCell className={COL.engine}><EngineBadge name={r.engine} /></TableCell>
+                    <TableCell className={COL.agents}>
+                      <span className="flex items-center gap-1">
+                        {agents.slice(0, 3).map(a => <AgentBadge key={a} agent={a} />)}
+                        {agents.length > 3 && <span className="text-xs tabular-nums text-muted-foreground">+{agents.length - 3}</span>}
+                        {!agents.length && <span className="text-[13px] text-muted-foreground">-</span>}
+                      </span>
+                    </TableCell>
+                    <TableCell className={cn(COL.time, 'text-[13px] text-muted-foreground')}>{r.done ? secs(r.total_ms) : '…'}</TableCell>
+                    <TableCell className={cn(COL.when, 'text-[13px] text-muted-foreground')} title={new Date(r.at * 1000).toLocaleString()}>{when}</TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
         )}
         {more && !fallback && !loading && (
-          <div className="load-more"><Button variant="secondary" loading={loadingMore} onClick={() => void loadMore()} icon="chevron-down">Load more</Button></div>
+          <div className="flex justify-center border-t border-border p-3">
+            <Button variant="secondary" size="sm" loading={loadingMore} onClick={() => void loadMore()} icon="chevron-down">Load more</Button>
+          </div>
         )}
-      </Card>
+      </section>
+    </PageBody>
+  )
+}
+
+function RunsHead() {
+  const th = 'md:sticky md:top-[var(--topbar-h)] z-10 h-10 bg-surface text-xs font-medium text-muted-foreground'
+  return (
+    <TableHeader>
+      <TableRow className="border-border hover:bg-transparent">
+        <TableHead className={cn(th, COL.id)}>#</TableHead>
+        <TableHead className={cn(th, COL.query)}>Query</TableHead>
+        <TableHead className={cn(th, COL.source)}>Source</TableHead>
+        <TableHead className={cn(th, COL.status)}>Status</TableHead>
+        <TableHead className={cn(th, COL.engine)}>Engine</TableHead>
+        <TableHead className={cn(th, COL.agents)}>Agents</TableHead>
+        <TableHead className={cn(th, COL.time)}>Time</TableHead>
+        <TableHead className={cn(th, COL.when)}>When</TableHead>
+      </TableRow>
+    </TableHeader>
+  )
+}
+
+function RunsSkeleton() {
+  return (
+    <div aria-busy="true" aria-label="Loading runs">
+      <Table>
+        <RunsHead />
+        <TableBody>
+          {Array.from({ length: 8 }, (_, i) => (
+            <TableRow key={i} className="border-border hover:bg-transparent">
+              <TableCell className={cn(COL.id, 'py-3')}><Skeleton width="70%" height={12} className="ml-auto" /></TableCell>
+              <TableCell className={cn(COL.query, 'py-3')}>
+                <Skeleton width={`${55 + ((i * 17) % 35)}%`} height={14} />
+                <Skeleton width="40%" height={10} className="mt-2 lg:hidden" />
+              </TableCell>
+              <TableCell className={COL.source}><Skeleton width={48} height={18} /></TableCell>
+              <TableCell className={COL.status}><Skeleton width={56} height={12} /></TableCell>
+              <TableCell className={COL.engine}><Skeleton width={64} height={12} /></TableCell>
+              <TableCell className={COL.agents}><Skeleton width={120} height={22} /></TableCell>
+              <TableCell className={COL.time}><Skeleton width={40} height={12} className="ml-auto" /></TableCell>
+              <TableCell className={COL.when}><Skeleton width={48} height={12} className="ml-auto" /></TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
     </div>
   )
 }
 
-function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: string[] }) {
+function Notice({ icon, tone, role, children }: { icon: 'info' | 'alert'; tone?: 'bad'; role?: string; children: ReactNode }) {
   return (
-    <label className={'select' + (value ? ' on' : '')}>
-      <span className="sr-only">{label}</span>
-      <select value={value} onChange={e => onChange(e.target.value)} aria-label={label}>
-        <option value="">{label}: all</option>
-        {options.map(o => <option key={o} value={o}>{label}: {o === 'none' ? 'keyless' : o}</option>)}
-      </select>
-      <Icon name="chevron-down" size={14} />
-    </label>
+    <p role={role} className="m-0 flex items-start gap-2 rounded-md border border-border bg-subtle px-3 py-2 text-[13px] text-muted-foreground">
+      <Icon name={icon} size={14} className={cn('mt-0.5 shrink-0', tone === 'bad' ? 'text-destructive' : 'text-muted-foreground')} />
+      <span className="min-w-0">{children}</span>
+    </p>
+  )
+}
+
+// Radix Select cannot hold an empty value, so "all" stands in for the empty filter.
+function FilterSelect({ label, value, onChange, options, full }: { label: string; value: string; onChange: (v: string) => void; options: string[]; full?: boolean }) {
+  return (
+    <UiSelect value={value || 'all'} onValueChange={v => onChange(v === 'all' ? '' : v)}>
+      <SelectTrigger size="sm" aria-label={label}
+        className={cn('min-w-0 bg-surface text-[13px] shadow-none dark:bg-surface', full ? 'w-full' : 'w-auto', value && 'border-primary/40 bg-primary/5 dark:bg-primary/10')}>
+        <span className="text-muted-foreground">{label}:</span>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent position="popper" align="start">
+        <SelectItem value="all">all</SelectItem>
+        {options.map(o => <SelectItem key={o} value={o}>{o === 'none' ? 'keyless' : o}</SelectItem>)}
+      </SelectContent>
+    </UiSelect>
   )
 }

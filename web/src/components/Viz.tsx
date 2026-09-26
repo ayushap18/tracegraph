@@ -81,7 +81,7 @@ function spans(run: Run): { list: Span[]; total: number | null; live: boolean } 
     return { list, total: rel(m.done), live: !run.done }
   }
   const planMs = run.plan?.ms ?? 0
-  list.push({ key: 'plan', label: `plan · ${run.plan?.planner ?? '–'}`, start: 0, end: planMs, color: 'var(--accent)', kind: 'plan' })
+  list.push({ key: 'plan', label: `plan · ${run.plan?.planner ?? '-'}`, start: 0, end: planMs, color: 'var(--accent)', kind: 'plan' })
   let last = planMs
   for (const tid of run.order) {
     const t = run.tasks[tid], jev = t?.routed?.jev_ms ?? 0, ag = t?.answered?.agent_ms ?? 0
@@ -104,7 +104,7 @@ export function Waterfall({ run }: { run: Run | undefined }) {
     return () => clearInterval(id)
   }, [live])
   // The measured wrapper must mount on the first render (useSize observes once), so the empty state lives inside it.
-  if (!run) return <div ref={ref} className="waterfall"><p className="muted small empty">No runs yet.</p></div>
+  if (!run) return <div ref={ref} className="waterfall"><p className="m-0 py-8 text-center text-[13px] text-muted-foreground">No runs yet.</p></div>
   const { list, total } = spans(run)
   const now = run.marks.query != null ? performance.now() - run.marks.query : 0
   const end = (s: Span) => s.end ?? now
@@ -193,7 +193,7 @@ export function Donut({ data, onPick }: { data: Array<{ agent: string; count: nu
   const arc = d3.arc<d3.PieArcDatum<{ agent: string; count: number }>>().innerRadius(r * 0.62).outerRadius(r - 2).cornerRadius(3)
   const shown = useCountUp(total)
   return (
-    <div className="donut">
+    <div className="donut flex h-full min-w-0 flex-nowrap items-center gap-4">
       <svg width={size} height={size} viewBox={`${-r} ${-r} ${size} ${size}`} role="img" aria-label={`Traffic by agent, ${total} subtasks`}>
         <circle r={r * 0.81} fill="none" stroke="var(--soft)" strokeWidth={r * 0.38} />
         {arcs.map(a => (
@@ -204,12 +204,16 @@ export function Donut({ data, onPick }: { data: Array<{ agent: string; count: nu
         <text className="donut-v" y={4} textAnchor="middle">{Math.round(shown)}</text>
         <text className="donut-l" y={20} textAnchor="middle">subtasks</text>
       </svg>
-      <ul className="donut-legend">
+      <ul className="m-0 flex max-h-full min-w-0 flex-1 list-none flex-col gap-0.5 overflow-y-auto p-0">
         {data.map(d => (
-          <li key={d.agent} className={d.count ? '' : 'zero'} onClick={() => onPick?.(d.agent)}>
-            <AgentIcon agent={d.agent} size={14} strokeWidth={2} style={{ color: colorOf(d.agent) }} />{d.agent}
-            <span className="num">{d.count}</span>
-            <span className="num muted">{total ? Math.round((d.count / total) * 100) + '%' : ''}</span>
+          <li key={d.agent}>
+            <button type="button" data-slot="button" onClick={() => onPick?.(d.agent)}
+              className={'grid w-full cursor-pointer grid-cols-[16px_minmax(0,1fr)_2.25rem_2.5rem] items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-left text-xs text-foreground outline-none transition-colors hover:bg-subtle focus-visible:ring-[3px] focus-visible:ring-ring/35' + (d.count ? '' : ' opacity-45')}>
+              <AgentIcon agent={d.agent} size={14} strokeWidth={2} style={{ color: colorOf(d.agent) }} />
+              <span className="truncate">{d.agent}</span>
+              <span className="text-right tabular-nums">{d.count}</span>
+              <span className="text-right tabular-nums text-muted-foreground">{total ? Math.round((d.count / total) * 100) + '%' : ''}</span>
+            </button>
           </li>
         ))}
       </ul>

@@ -49,9 +49,9 @@ export const ENGINE_ICONS: Record<string, LucideIcon> = {
   auto: Zap, 'claude-code': SquareTerminal, codex: Braces, agy: Rocket, anthropic: KeyRound, none: PlugZap,
 }
 
-export function EngineIcon({ name, size = 15, strokeWidth = 1.9 }: { name: string; size?: number; strokeWidth?: number }) {
+export function EngineIcon({ name, size = 15, strokeWidth = 1.9, className }: { name: string; size?: number; strokeWidth?: number; className?: string }) {
   const C = ENGINE_ICONS[name] ?? Cpu
-  return <C size={size} strokeWidth={strokeWidth} aria-hidden="true" focusable="false" />
+  return <C size={size} strokeWidth={strokeWidth} aria-hidden="true" focusable="false" className={className} />
 }
 
 export function agentIcon(agent: string | undefined): LucideIcon {

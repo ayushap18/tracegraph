@@ -65,7 +65,7 @@ export function MobileMenu({ onNavigate }: { onNavigate: (id: string) => void })
               }}
             >
               <motion.div
-                className="tg-scope fixed inset-x-0 top-0 z-50 max-h-[100dvh] overflow-y-auto rounded-b-xl border-b border-border bg-background text-foreground shadow-frame outline-none"
+                className="fixed inset-x-0 top-0 z-50 max-h-[100dvh] overflow-y-auto rounded-b-xl border-b border-border bg-background text-foreground shadow-frame outline-none"
                 style={{ paddingTop: 'env(safe-area-inset-top)' }}
                 initial={{ y: '-100%' }} animate={{ y: 0 }} exit={{ y: '-100%' }}
                 transition={{ duration: 0.4, ease: EASE }}

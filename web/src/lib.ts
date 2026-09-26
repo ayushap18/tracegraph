@@ -20,8 +20,8 @@ export function costs(stats: Stats, prices: Prices) {
 }
 
 export const money = (v: number) => '$' + (v === 0 ? '0' : v < 0.01 ? v.toFixed(5) : v.toFixed(3))
-export const pct = (v: number | undefined) => (v == null ? '–' : Math.round(v * 100) + '%')
-export const ms = (v: number | null | undefined) => (v == null ? '–' : Math.round(v).toLocaleString() + ' ms')
+export const pct = (v: number | undefined) => (v == null ? '-' : Math.round(v * 100) + '%')
+export const ms = (v: number | null | undefined) => (v == null ? '-' : Math.round(v).toLocaleString() + ' ms')
 export const clock = (at: number) => new Date(at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 
 // Source links from agents: only ever render http(s) hrefs.

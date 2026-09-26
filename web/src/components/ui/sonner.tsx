@@ -15,7 +15,7 @@ const Toaster = ({ ...props }: ToasterProps) => {
   return (
     <Sonner
       theme={resolved}
-      className="toaster group tg-scope"
+      className="toaster group"
       icons={{
         success: <CircleCheckIcon className="size-4 text-ok" />,
         info: <InfoIcon className="size-4 text-primary" />,
