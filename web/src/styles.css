@@ -287,3 +287,25 @@ td.ans { color:var(--muted); max-width:340px; overflow:hidden; text-overflow:ell
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
 }
+
+/* ---------- analytics panel template ---------- */
+.chart-row { align-items:stretch; }
+.chart-panel { display:flex; flex-direction:column; gap:12px; }
+.cp-head { display:flex; justify-content:space-between; align-items:flex-start; gap:4px 12px; flex-wrap:wrap; }
+.cp-head h2 { margin:2px 0 0; }
+.cp-stat { display:flex; flex-direction:column; align-items:flex-end; text-align:right; }
+.cp-v { font-size:18px; font-weight:750; letter-spacing:-.02em; line-height:1.15; }
+.cp-note { font-size:11.5px; color:var(--muted); }
+.cp-body { height:200px; min-width:0; display:flex; align-items:center; }
+.cp-body > * { flex:1 1 auto; min-width:0; }
+.cp-legend { margin-top:auto; padding-top:10px; border-top:1px solid var(--line); min-height:28px; align-items:center; }
+.cp-legend .scale { display:inline-flex; align-items:center; gap:6px; }
+.cp-legend .ramp { width:72px; height:8px; border-radius:4px; margin:0; background:linear-gradient(90deg, var(--soft), var(--accent)); }
+.cp-legend .dash { width:16px; height:0; border-radius:0; border-top:2px dashed var(--warn); vertical-align:middle; }
+.chart-panel .donut { height:200px; flex-wrap:nowrap; }
+.chart-panel .donut-legend { align-content:center; }
+@media (max-width: 640px) {
+  .cp-stat { align-items:flex-start; text-align:left; }
+  .chart-panel .donut { height:auto; flex-wrap:wrap; justify-content:center; }
+  .chart-panel .cp-body:has(.donut) { height:auto; }
+}

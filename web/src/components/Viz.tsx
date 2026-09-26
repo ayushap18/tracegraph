@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import * as d3 from 'd3'
 import { colorOf } from '../protocol'
 import type { Run } from '../useEventStream'
-import { useSize, type Row } from '../lib'
+import { CHART_H, useSize, type Row } from '../lib'
 
 // ---------- count-up numbers and sparklines for the KPI cards ----------
 
@@ -149,7 +149,7 @@ export function Heatmap({ rows, agents, onPick }: { rows: Row[]; agents: string[
   const [ref, size] = useSize<HTMLDivElement>()
   const w = size.width
   const cols = rows.filter(r => r.task.routed)
-  const labelW = 74, top = 14, cellH = 17
+  const labelW = 74, top = 2, cellH = (CHART_H - top - 4) / (agents.length + 1)
   const maxCols = Math.max(1, Math.floor((w - labelW) / 12))
   const shown = cols.slice(-maxCols)
   const cw = shown.length ? (w - labelW) / Math.max(shown.length, 30) : 0 // fills the width once 30 subtasks exist
@@ -184,7 +184,7 @@ export function Heatmap({ rows, agents, onPick }: { rows: Row[]; agents: string[
 // ---------- traffic donut ----------
 
 export function Donut({ data, onPick }: { data: Array<{ agent: string; count: number }>; onPick?: (agent: string) => void }) {
-  const size = 150, r = size / 2
+  const size = CHART_H - 16, r = size / 2
   const total = data.reduce((s, d) => s + d.count, 0)
   const live = data.filter(d => d.count > 0)
   const arcs = d3.pie<{ agent: string; count: number }>().value(d => d.count).sort(null).padAngle(0.02)(live)

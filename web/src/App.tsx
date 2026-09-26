@@ -2,9 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useEventStream, post } from './useEventStream'
 import type { ControlState } from './protocol'
 import { inFlight, latency, rows } from './lib'
+import { colorOf, MIN_CONFIDENCE } from './protocol'
 import Graph, { type AgentStat } from './components/Graph'
 import { ConfidenceChart, LatencyChart, LATENCY_COLORS, type ConfPoint, type LatencyPoint } from './components/Charts'
-import { AskBox, Inspector, Kpis, LatestRun, RoutingLog } from './components/Panels'
+import { AskBox, ChartPanel, Inspector, Kpis, LatestRun, RoutingLog } from './components/Panels'
 import { Donut, Heatmap, Waterfall } from './components/Viz'
 
 type Theme = 'auto' | 'light' | 'dark'
@@ -83,6 +84,24 @@ export default function App() {
   const lat = useMemo<LatencyPoint[]>(() => runs.filter(r => r.done && r.order.length).slice(-40)
     .map(r => ({ key: String(r.qid), label: r.text, ...latency(r) })), [rev])
   const heatAgents = useMemo(() => Object.keys(store.agents), [store.agents])
+
+  // Headline numbers for the analytics panels.
+  const summary = useMemo(() => {
+    const confs = conf.map(c => c.confidence)
+    const totals = lat.map(l => l.jev + l.agent + l.merge).sort((a, b) => a - b)
+    const q = (p: number) => (totals.length ? totals[Math.min(totals.length - 1, Math.floor(p * totals.length))] : null)
+    const top = [...traffic].sort((a, b) => b.count - a.count)[0]
+    const routedCount = allRows.filter(r => r.task.routed).length
+    return {
+      avgConf: confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : null,
+      low: confs.filter(c => c < MIN_CONFIDENCE).length,
+      p50: q(0.5), p95: q(0.95),
+      top: top && top.count ? top : null,
+      total: traffic.reduce((a, b) => a + b.count, 0),
+      routedCount,
+    }
+  }, [conf, lat, traffic, allRows])
+  const secs = (v: number | null) => (v == null ? '–' : v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
 
   // Errors surface as toasts for a few seconds, besides living in the run cards.
   const lastErr = useRef<string | null>(null)
@@ -192,21 +211,26 @@ export default function App() {
             <Waterfall run={shown} />
           </section>
         </div>
-        <div className="grid-2">
-          <section className="panel">
-            <h2>Routing heatmap <span>Jev's probability per agent · each column is a subtask</span></h2>
+        <div className="grid-2 chart-row">
+          <ChartPanel title="Routing heatmap" stat={`${summary.routedCount} subtasks`} note="Jev's probability for each agent, per subtask"
+            legend={<><span className="scale"><span>0%</span><i className="ramp" /><span>100%</span></span><span>older → newer · click a column</span></>}>
             <Heatmap rows={allRows} agents={heatAgents} onPick={tid => setSelected('t:' + tid)} />
-          </section>
-          <section className="panel">
-            <h2>Traffic by agent <span>click to inspect</span></h2>
+          </ChartPanel>
+          <ChartPanel title="Traffic by agent" stat={summary.top ? `${summary.top.agent} ${Math.round((summary.top.count / Math.max(1, summary.total)) * 100)}%` : '–'}
+            note="busiest agent" legend={<span>click a slice or row to inspect</span>}>
             <Donut data={traffic} onPick={a => setSelected('a:' + a)} />
-          </section>
+          </ChartPanel>
         </div>
-        <div className="grid-even">
-          <section className="panel"><h2>Route confidence <span>last 60 · 45% threshold</span></h2><ConfidenceChart data={conf} /></section>
-          <section className="panel"><h2>Latency per query <span>ms</span></h2><LatencyChart data={lat} />
-            <div className="legend">{Object.entries(LATENCY_COLORS).map(([k, c]) => <span key={k}><i style={{ background: c }} />{k}</span>)}</div>
-          </section>
+        <div className="grid-even chart-row">
+          <ChartPanel title="Route confidence" stat={summary.avgConf == null ? '–' : `${Math.round(summary.avgConf * 100)}% avg`}
+            note={summary.low ? `${summary.low} below threshold` : 'none below threshold'}
+            legend={<><span><i style={{ background: colorOf('weather') }} />subtask, colored by agent</span><span><i className="dash" />{Math.round(MIN_CONFIDENCE * 100)}% clarify threshold</span><span>last 60</span></>}>
+            <ConfidenceChart data={conf} />
+          </ChartPanel>
+          <ChartPanel title="Latency per query" stat={`${secs(summary.p50)} median`} note={`p95 ${secs(summary.p95)}`}
+            legend={<>{Object.entries(LATENCY_COLORS).map(([k, c]) => <span key={k}><i style={{ background: c }} />{k}</span>)}<span>last 40 queries</span></>}>
+            <LatencyChart data={lat} />
+          </ChartPanel>
         </div>
         <RoutingLog runs={runs} />
       </main>

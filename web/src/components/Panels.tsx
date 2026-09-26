@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
 import { colorOf, type ControlState } from '../protocol'
 import type { Run, Store, Task } from '../useEventStream'
 import { post } from '../useEventStream'
@@ -267,5 +267,22 @@ export function Inspector({ id, store, onClose }: { id: string; store: Store; on
       <button type="button" className="close" onClick={onClose} aria-label="Close">×</button>
       {body}
     </div>
+  )
+}
+
+// One template for every analytics panel: title + headline number, a fixed-height chart body, and a legend footer.
+// Paired panels therefore always line up, whatever their data.
+export function ChartPanel({ title, stat, note, legend, children }: {
+  title: string; stat: ReactNode; note?: ReactNode; legend?: ReactNode; children: ReactNode
+}) {
+  return (
+    <section className="panel chart-panel">
+      <div className="cp-head">
+        <h2>{title}</h2>
+        <div className="cp-stat"><span className="cp-v num">{stat}</span>{note && <span className="cp-note">{note}</span>}</div>
+      </div>
+      <div className="cp-body">{children}</div>
+      <div className="legend cp-legend">{legend}</div>
+    </section>
   )
 }

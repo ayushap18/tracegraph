@@ -1,9 +1,9 @@
 import { useEffect, useRef } from 'react'
 import * as d3 from 'd3'
 import { MIN_CONFIDENCE, colorOf } from '../protocol'
-import { useSize } from '../lib'
+import { CHART_H, useSize } from '../lib'
 
-const H = 170
+const H = CHART_H
 
 function useChart<D>(data: D, draw: (svg: d3.Selection<SVGSVGElement, unknown, null, undefined>, w: number, h: number, data: D) => void) {
   const [wrapRef, size] = useSize<HTMLDivElement>()

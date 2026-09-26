@@ -6,6 +6,9 @@ export interface Row { run: Run; task: Task }
 
 export const rows = (runs: Run[]): Row[] => runs.flatMap(run => run.order.map(tid => ({ run, task: run.tasks[tid] })).filter(r => r.task))
 
+// Every analytics chart body is this tall, so panels side by side line up exactly.
+export const CHART_H = 200
+
 export const inFlight = (runs: Run[]) => runs.filter(r => !r.done)
 
 // Prices come as $ per million tokens (0.042 / 5 / 25). Tolerate a per-token feed too.
