@@ -5,6 +5,9 @@ Config comes from the environment or a .env file next to this script:
   TYPESAFE_API_KEY  required (Jev routing)
   TG_ENGINE         auto (default) | claude-code | codex | agy | anthropic | none
                     auto uses the first installed subscription CLI, then ANTHROPIC_API_KEY, else keyless agents only.
+  TG_DB             SQLite file for runs, sessions, agents, files and evals (default data/tracegraph.db)
+  TG_RUN_TIMEOUT    per-run deadline in seconds (default 300)
+Evals: .venv/bin/python -m jevrouter.evals [--engine NAME|none] [--save-baseline]
 """
 import os
 

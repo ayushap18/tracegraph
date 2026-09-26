@@ -35,7 +35,7 @@ async def test_ask_validation(client):
     assert (await client.post('/ask', data='not json')).status == 400
     assert (await client.post('/ask', json=['x'])).status == 400
     r = await client.post('/ask', json={'query': 'weather in Paris'})
-    assert r.status == 200 and await r.json() == {'ok': True, 'qid': 1}
+    assert r.status == 200 and await r.json() == {'ok': True, 'qid': 1, 'session_id': None}
 
 
 async def test_control_clamps_and_broadcasts(client):
@@ -48,7 +48,7 @@ async def test_control_clamps_and_broadcasts(client):
 
 async def test_config(client):
     body = await (await client.get('/api/config')).json()
-    assert set(body) == {'agents', 'guards', 'claude', 'state', 'stats', 'samples', 'prices', 'engine', 'engines'}
+    assert set(body) == {'agents', 'guards', 'claude', 'state', 'stats', 'samples', 'prices', 'engine', 'engines', 'features'}
     assert body['engine'] is None and body['engines'] == []
     assert body['claude'] is False and 'research' not in body['agents'] and body['guards'] == ['clarify', 'blocked']
     assert set(body['prices']) == {'jev_in', 'claude_in', 'claude_out'}
@@ -58,7 +58,8 @@ async def test_events_stream(client):
     resp = await client.get('/events')
     assert resp.headers['Content-Type'] == 'text/event-stream'
     hello = (await read_events(resp, 'hello'))[0]
-    assert set(hello) == {'type', 'agents', 'guards', 'claude', 'state', 'stats', 'samples', 'prices', 'engine', 'engines', 'history'}
+    assert set(hello) == {'type', 'agents', 'guards', 'claude', 'state', 'stats', 'samples', 'prices', 'engine', 'engines', 'history',
+                          'features'}
     qid = (await (await client.post('/ask', json={'query': 'weather in Paris and convert 100 EUR to INR'})).json())['qid']
     events = await read_events(resp, 'done')
     types = [e['type'] for e in events]
@@ -129,3 +130,16 @@ async def check_switching(client):
     cfg = (await read_events(resp, 'config'))[-1]
     assert cfg['engine'] is None and cfg['claude'] is False
     resp.close()
+
+
+async def test_index_revalidates_and_assets_are_immutable(client, tmp_path, monkeypatch):
+    # A new build must reach browsers: index.html is no-cache, hashed assets are cached for a year.
+    dist = tmp_path / 'dist'
+    (dist / 'assets').mkdir(parents=True)
+    (dist / 'index.html').write_text('<html></html>')
+    (dist / 'assets' / 'index-abc.js').write_text('x')
+    monkeypatch.setattr(appmod, 'DIST', dist)
+    r = await client.get('/')
+    assert r.status == 200 and r.headers['Cache-Control'] == 'no-cache'
+    r = await client.get('/assets/index-abc.js')
+    assert r.status == 200 and 'immutable' in r.headers['Cache-Control']

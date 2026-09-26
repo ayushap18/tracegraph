@@ -1,13 +1,13 @@
 """Registry: name -> async run(text, emit_delta) -> AgentResult. The active LLM engine takes code/knowledge/chat/research;
 math/weather/time/currency stay keyless because they're exact."""
 from ..engines import EngineError, EngineRefusal
-from .llm import LLM_RUNNERS
+from .llm import LLM_RUNNERS, custom, run_code
 from .tools import BLOCKED, KEYLESS_RUNNERS, AgentResult, clarify
 
-__all__ = ['build', 'AgentResult', 'BLOCKED', 'clarify']
+__all__ = ['build', 'extras', 'AgentResult', 'BLOCKED', 'clarify']
 
 
-def build(http, engine=None) -> dict:
+def build(http, engine=None, customs=()) -> dict:
     registry = {}
     for name, fn in KEYLESS_RUNNERS.items():
         registry[name] = keyless(fn, http)
@@ -16,7 +16,17 @@ def build(http, engine=None) -> dict:
             if name == 'research' and not engine.supports_web:
                 continue
             registry[name] = with_engine(name, fn, engine, http, KEYLESS_RUNNERS.get(name))
-    return registry
+    return {**registry, **extras(http, engine, customs)}
+
+
+def extras(http, engine, customs=()) -> dict:
+    """Engine-only agents beyond the built-in LLM set: `run` (code execution) and the user's custom agents."""
+    if engine is None:
+        return {}
+    out = {a['name']: with_engine(a['name'], custom(a), engine, http, None) for a in customs}
+    if getattr(engine, 'supports_exec', False):
+        out['run'] = with_engine('run', run_code, engine, http, None)
+    return out
 
 
 def keyless(fn, http):

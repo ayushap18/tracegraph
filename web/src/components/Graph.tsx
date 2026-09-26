@@ -22,7 +22,7 @@ export interface GraphProps {
 
 type Status = 'idle' | 'running' | 'done' | 'warn' | 'error'
 interface Card { id: string; x: number; y: number; w: number; h: number; color: string; icon: string; title: string; lines: string[]; status: Status; badge?: string; dim?: boolean }
-interface Edge { id: string; from: string; to: string; d: string; x2: number; y2: number; color: string | null; width: number; state: 'idle' | 'done' | 'running'; label?: string }
+interface Edge { id: string; from: string; to: string; d: string; x2: number; y2: number; color: string | null; width: number; state: 'idle' | 'done' | 'running'; label?: string; dep?: boolean }
 
 // Card icons: 'u:<ui icon>' for pipeline nodes, 'a:<agent>' for agents, anything else is drawn as text (subtask numbers).
 const ICONS = { query: 'u:query', jev: 'u:jev', answer: 'u:answer' }
@@ -84,13 +84,16 @@ function layout(width: number, p: GraphProps) {
   })
 
   const subY0 = midY - subsH / 2
+  // v4 DAG plans: a step whose dependencies have not answered yet is waiting, not routing.
+  const waitingOn = (t: (typeof tasks)[number]) => t.depends_on.filter(d => { const dt = run!.tasks[d]; return dt && !dt.answered && !dt.error })
   tasks.forEach((t, i) => {
     const r = t.routed
+    const waits = !r && !t.error ? waitingOn(t) : []
     add({
       id: 't:' + t.tid, x: colX(1), y: subY0 + i * (SUB_H + SUB_GAP), w: colW[1], h: SUB_H,
       color: r ? colorOf(r.agent) : 'var(--muted)', icon: t.tid.split('.')[1] ?? '·', title: clip(t.text || t.tid, chars(1) - 1),
-      lines: [t.error ? 'routing failed' : r ? `→ ${r.agent} · ${pct(r.confidence)}` : 'routing…'],
-      status: t.error ? 'error' : !r ? 'running' : !t.answered ? 'running' : t.answered.ok ? 'done' : 'warn',
+      lines: [t.error ? 'routing failed' : r ? `→ ${r.agent} · ${pct(r.confidence)}` : waits.length ? `waits for ${waits.join(', ')}` : 'routing…'],
+      status: t.error ? 'error' : waits.length ? 'idle' : !r ? 'running' : !t.answered ? 'running' : t.answered.ok ? 'done' : 'warn',
     })
   })
   if (!tasks.length) add({ id: 'none', x: colX(1), y: midY - SUB_H / 2, w: colW[1], h: SUB_H, color: 'var(--line)', icon: '·', title: run ? 'planning…' : 'no subtasks', lines: [''], status: 'idle', dim: true })
@@ -129,6 +132,16 @@ function layout(width: number, p: GraphProps) {
     if (!a || !b) return
     const x1 = a.x + a.w, y1 = a.y + a.h / 2, x2 = b.x, y2 = b.y + b.h / 2
     edges.push({ id: `${from}>${to}`, from, to, d: curve(x1, y1, x2, y2), x2, y2, color: null, width: 1.25, state: 'idle', ...o })
+  }
+  // Dependency arcs between steps bulge out to the left of the subtask column.
+  for (const t of tasks) for (const d of t.depends_on) {
+    const a = byId.get('t:' + d), b = byId.get('t:' + t.tid)
+    if (!a || !b) continue
+    const x1 = a.x, y1 = a.y + a.h / 2 + 6, x2 = b.x, y2 = b.y + b.h / 2 - 6
+    const bulge = Math.min(46, 18 + Math.abs(y2 - y1) * 0.25)
+    const dt = run!.tasks[d]
+    edges.push({ id: `dep:${d}>${t.tid}`, from: 't:' + d, to: 't:' + t.tid, d: `M${x1},${y1} C${x1 - bulge},${y1} ${x2 - bulge},${y2} ${x2},${y2}`,
+      x2, y2, color: 'var(--accent2)', width: 1.4, state: dt?.answered ? 'done' : 'running', dep: true })
   }
   if (tasks.length) for (const t of tasks) {
     const sid = 't:' + t.tid
@@ -227,10 +240,10 @@ export default function Graph(props: GraphProps) {
             {L.edges.map(e => {
               const faded = linked ? !(e.from === focus || e.to === focus) : false
               return (
-                <g key={e.id} className={`edge e-${e.state}${e.color ? ' colored' : ''}${faded ? ' faded' : ''}`}>
+                <g key={e.id} className={`edge e-${e.state}${e.color ? ' colored' : ''}${faded ? ' faded' : ''}${e.dep ? ' dep' : ''}`}>
                   <path className="wire" d={e.d} strokeWidth={e.width} style={e.color ? { stroke: e.color } : undefined} />
                   <path className="arrow" d={`M${e.x2 - 6},${e.y2 - 3.5} L${e.x2},${e.y2} L${e.x2 - 6},${e.y2 + 3.5} Z`} style={e.color ? { fill: e.color } : undefined} />
-                  {e.state === 'running' && (
+                  {e.state === 'running' && !e.dep && (
                     <circle className="packet" r={3.2} style={{ fill: e.color ?? 'var(--accent)' }}>
                       <animateMotion dur="1.1s" repeatCount="indefinite" path={e.d} keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines="0.4 0 0.2 1" />
                     </circle>

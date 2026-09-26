@@ -1,51 +1,74 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import type { EngineInfo } from '../protocol'
 import { EngineIcon, Icon } from '../icons'
+import { setEngine, errorText } from '../api'
+import { useToast } from '../ui'
 
 // Which LLM backend writes plans, answers and merges. Subscription CLIs (Claude Code, Codex, Antigravity) run on the
 // user's own plan; the Anthropic API bills per token; "Keyless" uses only the built-in agents.
-export function EnginePicker({ engine, engines }: { engine: EngineInfo | null; engines: EngineInfo[] }) {
+export function EnginePicker({ engine, engines, placement = 'down', compact = false }: {
+  engine: EngineInfo | null; engines: EngineInfo[]; placement?: 'down' | 'up'; compact?: boolean
+}) {
   const [open, setOpen] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const btn = useRef<HTMLButtonElement>(null)
+  const list = useRef<HTMLUListElement>(null)
+  const toast = useToast()
 
   useEffect(() => {
     if (!open) return
-    const close = (e: MouseEvent | KeyboardEvent) => {
-      if (e instanceof KeyboardEvent ? e.key === 'Escape' : !ref.current?.contains(e.target as Node)) setOpen(false)
-    }
+    const close = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false) }
     window.addEventListener('mousedown', close)
-    window.addEventListener('keydown', close)
-    return () => { window.removeEventListener('mousedown', close); window.removeEventListener('keydown', close) }
+    // Focus the current option so arrow keys work straight away.
+    const cur = list.current?.querySelector<HTMLButtonElement>('button[aria-selected="true"]:not(:disabled)') ?? list.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')
+    cur?.focus()
+    return () => window.removeEventListener('mousedown', close)
   }, [open])
 
-  const pick = async (name: string) => {
+  const pick = async (name: string, label: string) => {
     setOpen(false)
-    setError(null)
-    const r = await fetch('/control', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ engine: name }) })
-      .catch(() => null)
-    if (!r || !r.ok) setError(((await r?.json().catch(() => null)) as { error?: string } | null)?.error ?? 'could not switch engine')
+    btn.current?.focus()
+    if (name === (engine?.name ?? 'none')) return
+    setBusy(true)
+    try {
+      await setEngine(name)
+      toast.success(`Engine switched to ${label}`)
+    } catch (e) {
+      toast.error(`Could not switch engine: ${errorText(e)}`)
+    } finally { setBusy(false) }
+  }
+
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); btn.current?.focus(); return }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return
+    e.preventDefault()
+    const items = [...(list.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])]
+    const i = items.indexOf(document.activeElement as HTMLButtonElement)
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : (i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
+    items[next]?.focus()
   }
 
   const current = engine?.name ?? 'none'
   const options: Array<EngineInfo | { name: 'none'; label: string; billing: 'free'; available: true; why: ''; web: false }> =
     [...engines, { name: 'none', label: 'Keyless', billing: 'free', available: true, why: '', web: false }]
+  const label = engine ? engine.label : 'Keyless'
 
   return (
-    <div className="engine-picker" ref={ref}>
-      <button type="button" className={'engine-btn' + (engine ? ' on' : '')} aria-haspopup="listbox" aria-expanded={open}
-        onClick={() => setOpen(o => !o)} title={error ?? 'LLM engine for planning, answers and merging'}>
+    <div className={'engine-picker' + (compact ? ' compact' : '') + (placement === 'up' ? ' up' : '')} ref={ref} onKeyDown={onKey}>
+      <button ref={btn} type="button" className={'engine-btn' + (engine ? ' on' : '')} aria-haspopup="listbox" aria-expanded={open}
+        aria-label={`LLM engine: ${label}`} onClick={() => setOpen(o => !o)} title={`LLM engine: ${label}`} disabled={busy}>
         <EngineIcon name={current} />
-        <span>{engine ? engine.label : 'Keyless'}</span>
-        {engine?.billing === 'subscription' && <span className="engine-sub">plan</span>}
-        <Icon name="chevron-down" size={14} />
+        {!compact && <span className="engine-label">{label}</span>}
+        {!compact && engine?.billing === 'subscription' && <span className="engine-sub">plan</span>}
+        {!compact && <Icon name="chevron-down" size={14} />}
       </button>
       {open && (
-        <ul className="engine-menu" role="listbox" aria-label="LLM engine">
+        <ul ref={list} className="engine-menu" role="listbox" aria-label="LLM engine">
           {options.map(o => (
             <li key={o.name}>
               <button type="button" role="option" aria-selected={o.name === current} disabled={!o.available}
-                onClick={() => void pick(o.name)} title={o.available ? '' : o.why}>
+                onClick={() => void pick(o.name, o.label)} title={o.available ? '' : o.why}>
                 <EngineIcon name={o.name} size={16} />
                 <span className="engine-opt">
                   <span className="engine-name">{o.label}</span>
@@ -62,7 +85,6 @@ export function EnginePicker({ engine, engines }: { engine: EngineInfo | null; e
           ))}
         </ul>
       )}
-      {error && <span className="engine-err" role="alert">{error}</span>}
     </div>
   )
 }

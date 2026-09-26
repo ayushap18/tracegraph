@@ -41,4 +41,34 @@ async def research(engine, http, q: str, emit_delta) -> AgentResult:
     return result(engine, reply)
 
 
-LLM_RUNNERS = {'code': code, 'knowledge': knowledge, 'chat': chat, 'research': research}
+async def report(engine, http, q: str, emit_delta) -> AgentResult:
+    web = engine.supports_web
+    system = (ABOUT.replace(' Do not use tools unless told to.', '' if web else ' Do not use tools.') +
+              ' You are the report agent: ' + ('search the web, then ' if web else '') +
+              'write a well-structured Markdown report of 400-900 words with headings, and end with a "## Sources" '
+              'section listing the URLs or references you relied on.')
+    reply = await engine.stream(system=system, prompt=q, effort='high', emit_delta=emit_delta, max_tokens=8192, web=web)
+    return result(engine, reply)
+
+
+async def run_code(engine, http, q: str, emit_delta) -> AgentResult:
+    system = (ABOUT.replace(' Do not use tools unless told to.', '') +
+              ' You are the run agent, working in an empty scratch directory inside a sandbox with no network access. '
+              'Write a small script (Python unless the task names another language), execute it, and reply with: the '
+              'script in a fenced code block, its exact output in a fenced block, then a one-line summary.')
+    return result(engine, await engine.stream(system=system, prompt=q, effort='medium', emit_delta=emit_delta,
+                                              max_tokens=4096, exec=True))
+
+
+def custom(agent: dict):
+    """A user-defined agent: its own prompt on the active engine, with web search only if the engine has it."""
+    async def run(engine, http, q: str, emit_delta) -> AgentResult:
+        web = bool(agent.get('web')) and engine.supports_web
+        base = ABOUT.replace(' Do not use tools unless told to.', '') if web else ABOUT
+        system = f"{base} You are the {agent['name']} agent. {agent['prompt']}"
+        return result(engine, await engine.stream(system=system, prompt=q, effort='medium', emit_delta=emit_delta,
+                                                  max_tokens=4096, web=web))
+    return run
+
+
+LLM_RUNNERS = {'code': code, 'knowledge': knowledge, 'chat': chat, 'research': research, 'report': report}

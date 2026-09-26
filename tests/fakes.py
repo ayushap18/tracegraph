@@ -15,9 +15,12 @@ class FakeJev:
         self.route_for = route_for or (lambda text: ('chat', 0.9))
         self.multi, self.unsafe, self.clear, self.delay, self.fail_on = multi, unsafe, clear, delay, fail_on
         self.calls = []
+        self.criteria = []  # the route Choice's criteria per route call: which agents Jev was offered
 
     async def system_one(self, state, qs):
         self.calls.append((state, sorted(qs)))
+        if 'route' in qs:
+            self.criteria.append(dict(qs['route'].criteria))
         await asyncio.sleep(self.delay)
         usage = NS(input_tokens=100)
         if 'multi' in qs:
@@ -107,9 +110,36 @@ class FakeEngine:
         return {'name': self.name, 'label': self.label, 'billing': self.billing, 'web': self.supports_web,
                 'available': self.ok, 'why': '' if self.ok else 'not installed'}
 
-    async def stream(self, *, system, prompt, effort='medium', emit_delta=None, max_tokens=2048, web=False, schema=None):
+    async def stream(self, *, system, prompt, effort='medium', emit_delta=None, max_tokens=2048, web=False, schema=None,
+                     exec=False):
         from jevrouter.engines import Reply
         text = '{"subtasks": ["%s"]}' % prompt if schema else f'{self.name}: {prompt}'
+        if emit_delta:
+            emit_delta(text)
+        return Reply(text, 5, 3)
+
+
+class ScriptEngine(FakeEngine):
+    """FakeEngine that records every call. Structured (planner) calls return `plan`; the dependent-step rewrite returns
+    the first `rewrites` value whose key is in the prompt (none: an empty reply, so the router falls back); anything
+    else echoes after `delay` seconds."""
+
+    def __init__(self, plan=None, rewrites=None, delay=0.0, exec_ok=False, **kw):
+        super().__init__(**kw)
+        self.plan, self.rewrites, self.delay, self.supports_exec = plan, rewrites or {}, delay, exec_ok
+        self.calls = []
+
+    async def stream(self, *, system, prompt, effort='medium', emit_delta=None, max_tokens=2048, web=False, schema=None,
+                     exec=False):
+        import json
+        from jevrouter.engines import Reply
+        self.calls.append({'system': system, 'prompt': prompt, 'effort': effort, 'web': web, 'exec': exec, 'schema': schema})
+        if schema is not None:
+            return Reply(json.dumps(self.plan), 7, 4)
+        if system.startswith('Do not use tools. Rewrite'):
+            return Reply(next((v for k, v in self.rewrites.items() if k in prompt), ''), 2, 1)
+        await asyncio.sleep(self.delay)
+        text = f'{self.name}: {prompt}'
         if emit_delta:
             emit_delta(text)
         return Reply(text, 5, 3)

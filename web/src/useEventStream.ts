@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import {
   MERGE_TID, emptyStats,
-  type AnsweredFields, type ControlState, type EngineInfo, type HistoryRecord, type MergeEngine, type Planner, type Prices,
+  type AnsweredFields, type ControlState, type EngineInfo, type Features, type HistoryRecord, type RunStatus, type MergeEngine, type Planner, type Prices,
   type RoutedFields, type ServerEvent, type Source, type Stats,
 } from './protocol'
 
@@ -14,6 +14,7 @@ export interface Task {
   answered?: AnsweredFields
   stream: string // deltas so far; replaced by the full answer on `answered`
   error?: string // Jev failed to route it; no routed/answered will follow
+  depends_on: string[] // tids this step waits for (v4 DAG plans); [] for independent steps
 }
 
 export interface Run {
@@ -29,6 +30,11 @@ export interface Run {
   total_ms: number | null
   done: boolean
   error?: string
+  status: RunStatus // v4: running until done; cancelled/timeout/error come from the server
+  engine: string | null // per-run engine override, when one was given
+  session_id: string | null
+  compare_id: string | null
+  files: string[]
   marks: Marks // client receipt times (performance.now ms); empty for runs loaded from history
 }
 
@@ -54,6 +60,7 @@ export interface Store {
   stats: Stats
   samples: string[]
   prices: Prices
+  features: Features
   runs: Run[] // ascending qid, capped at MAX_RUNS
   lastError: string | null
   rev: number // bumps on every non-delta change, so charts can skip per-token redraws
@@ -67,20 +74,25 @@ const initial: Store = {
   connected: false, ready: false, agents: {}, guards: [], claude: false, engine: null, engines: [],
   state: { autopilot: false, interval: 3 }, stats: emptyStats(), samples: [],
   prices: { jev_in: 0.042, claude_in: 5, claude_out: 25 }, runs: [], lastError: null, rev: 0,
+  features: { files: false, compare: false, evals: false, custom_agents: false, exec: false },
 }
 
 const newRun = (qid: number, text = '', source: Source = 'you'): Run => ({
   qid, text, source, at: Date.now() / 1000, order: [], tasks: {}, mergeStream: '', total_ms: null, done: false,
+  status: 'running', engine: null, session_id: null, compare_id: null, files: [],
   marks: { routed: {}, answered: {} },
 })
 
-function fromRecord(r: HistoryRecord): Run {
+const newTask = (tid: string, text = ''): Task => ({ tid, text, stream: '', depends_on: [] })
+
+/** Builds a client Run from a history/persisted record (hello.history, /api/runs, sessions, compare). */
+export function fromRecord(r: HistoryRecord): Run {
   const run = newRun(r.qid, r.text, r.source)
   run.at = r.at
   if (r.plan) run.plan = { planner: r.plan.planner, multi: null, ms: null }
-  for (const s of r.plan?.subtasks ?? []) { run.order.push(s.tid); run.tasks[s.tid] = { tid: s.tid, text: s.text, stream: '' } }
+  for (const s of r.plan?.subtasks ?? []) { run.order.push(s.tid); run.tasks[s.tid] = { ...newTask(s.tid, s.text), depends_on: s.depends_on ?? [] } }
   for (const t of r.tasks ?? []) {
-    const task = run.tasks[t.tid] ?? { tid: t.tid, text: t.text ?? '', stream: '' }
+    const task = run.tasks[t.tid] ?? newTask(t.tid, t.text ?? '')
     if (!run.tasks[t.tid]) run.order.push(t.tid)
     if (t.error) task.error = t.error
     if (t.agent !== undefined && t.probabilities) {
@@ -102,7 +114,12 @@ function fromRecord(r: HistoryRecord): Run {
   if (r.merged) run.merged = { ...r.merged, ms: null }
   if (r.error) run.error = r.error
   run.total_ms = r.total_ms
-  run.done = r.total_ms != null // in-flight record: later live events finish it
+  run.status = r.status ?? (r.total_ms == null ? 'running' : r.error ? 'error' : 'done')
+  run.done = r.total_ms != null || (r.status != null && r.status !== 'running') // in-flight record: later live events finish it
+  run.engine = r.engine ?? null
+  run.session_id = r.session_id ?? null
+  run.compare_id = r.compare_id ?? null
+  run.files = r.files ?? []
   return run
 }
 
@@ -116,7 +133,7 @@ function withRun(runs: Run[], qid: number, fn: (r: Run) => Run): Run[] {
 }
 
 function withTask(run: Run, tid: string, fn: (t: Task) => Task): Run {
-  const cur = run.tasks[tid] ?? { tid, text: '', stream: '' }
+  const cur = run.tasks[tid] ?? newTask(tid)
   return { ...run, order: run.tasks[tid] ? run.order : [...run.order, tid], tasks: { ...run.tasks, [tid]: fn(cur) } }
 }
 
@@ -126,20 +143,26 @@ function apply(s: Store, e: ServerEvent, rx: number): Store {
       const runs = (e.history ?? []).map(fromRecord).sort((a, b) => a.qid - b.qid).slice(-MAX_RUNS)
       return {
         ...s, ready: true, agents: e.agents ?? {}, guards: e.guards ?? [], claude: !!e.claude, engine: e.engine ?? null, engines: e.engines ?? [], state: e.state,
+        features: e.features ?? s.features,
         stats: e.stats ?? emptyStats(), samples: e.samples ?? [], prices: e.prices ?? s.prices, runs, lastError: null,
       }
     }
     case 'state': return { ...s, state: e.state }
     case 'config':
       return { ...s, agents: e.agents ?? s.agents, guards: e.guards ?? s.guards, claude: !!e.claude, engine: e.engine ?? null,
-        engines: e.engines ?? s.engines, prices: e.prices ?? s.prices, samples: e.samples ?? s.samples }
+        engines: e.engines ?? s.engines, prices: e.prices ?? s.prices, samples: e.samples ?? s.samples, features: e.features ?? s.features }
     case 'query':
-      return { ...s, runs: withRun(s.runs, e.qid, r => ({ ...r, text: e.text, source: e.source, marks: { ...r.marks, query: rx } })) }
+      return {
+        ...s, runs: withRun(s.runs, e.qid, r => ({
+          ...r, text: e.text, source: e.source, at: Date.now() / 1000, marks: { ...r.marks, query: rx },
+          engine: e.engine ?? null, session_id: e.session_id ?? null, compare_id: e.compare_id ?? null, files: e.files ?? [],
+        })),
+      }
     case 'plan':
       return {
         ...s, runs: withRun(s.runs, e.qid, r => {
           let out: Run = { ...r, plan: { planner: e.planner, multi: e.multi, ms: e.ms }, marks: { ...r.marks, plan: rx } }
-          for (const st of e.subtasks) out = withTask(out, st.tid, t => ({ ...t, text: st.text }))
+          for (const st of e.subtasks) out = withTask(out, st.tid, t => ({ ...t, text: st.text, depends_on: st.depends_on ?? [] }))
           return out
         }),
       }
@@ -160,7 +183,15 @@ function apply(s: Store, e: ServerEvent, rx: number): Store {
     case 'merged':
       return { ...s, runs: withRun(s.runs, e.qid, r => ({ ...r, merged: { answer: e.answer, engine: e.engine, ms: e.ms }, mergeStream: e.answer, marks: { ...r.marks, merged: rx } })) }
     case 'done':
-      return { ...s, stats: e.stats ?? s.stats, runs: withRun(s.runs, e.qid, r => ({ ...r, done: true, total_ms: e.total_ms, marks: { ...r.marks, done: rx } })) }
+      return {
+        ...s, stats: e.stats ?? s.stats, runs: withRun(s.runs, e.qid, r => ({
+          ...r, done: true, total_ms: e.total_ms, marks: { ...r.marks, done: rx },
+          // `cancelled` arrives before `done`; keep it if done carries no status (older servers).
+          status: e.status ?? (r.status === 'running' ? (r.error ? 'error' : 'done') : r.status),
+        })),
+      }
+    case 'cancelled':
+      return { ...s, runs: withRun(s.runs, e.qid, r => ({ ...r, status: 'cancelled' })) }
     case 'error': {
       // A tid error belongs to that task (it never gets routed); only query-level errors mark the run.
       const runs = e.qid == null ? s.runs : withRun(s.runs, e.qid, r => e.tid

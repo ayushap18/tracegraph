@@ -122,7 +122,7 @@ export function Kpis({ store }: { store: Store }) {
   )
 }
 
-function TaskCard({ task }: { task: Task }) {
+export function TaskCard({ task }: { task: Task }) {
   const r = task.routed, a = task.answered
   const text = a ? a.answer : task.stream
   return (
@@ -227,8 +227,9 @@ const HUB_INFO: Record<string, string> = {
   answer: 'The final answer streamed back to the page.',
 }
 
-export function Inspector({ id, store, onClose }: { id: string; store: Store; onClose: () => void }) {
-  const all = rows(store.runs)
+export function Inspector({ id, store, onClose, run }: { id: string; store: Store; onClose: () => void; run?: Run }) {
+  // A run fetched from the API (not in the live store) is searched first, so its subtasks still inspect.
+  const all = run && !store.runs.some(r => r.qid === run.qid) ? [...rows([run]), ...rows(store.runs)] : rows(store.runs)
   let body: JSX.Element
   if (id.startsWith('a:')) {
     const agent = id.slice(2)

@@ -1,7 +1,8 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-const target = 'http://localhost:8777'
+// Point the dev server at another backend (e.g. the mock on 8799): TG_TARGET=http://localhost:8799 npm run dev
+const target = process.env.TG_TARGET || 'http://localhost:8777'
 
 export default defineConfig({
   base: '/',

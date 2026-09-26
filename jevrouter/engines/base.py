@@ -37,6 +37,7 @@ class Engine:
     label = 'Engine'
     billing = 'api'  # 'api' (pay per token) or 'subscription' (counts against a plan, $0 per call here)
     supports_web = False  # can run a web-search tool, which is what the research agent needs
+    supports_exec = False  # can write and run code in its own sandbox, which is what the run agent needs
 
     def available(self) -> tuple[bool, str]:
         """(usable, why not). Cheap: never spends a model call."""
@@ -45,10 +46,11 @@ class Engine:
     def info(self) -> dict:
         ok, why = self.available()
         return {'name': self.name, 'label': self.label, 'billing': self.billing, 'web': self.supports_web,
-                'available': ok, 'why': why}
+                'exec': self.supports_exec, 'available': ok, 'why': why}
 
     async def stream(self, *, system: str, prompt: str, effort: str = 'medium', emit_delta=None,
-                     max_tokens: int = 2048, web: bool = False, schema: dict | None = None) -> Reply:
+                     max_tokens: int = 2048, web: bool = False, schema: dict | None = None, exec: bool = False) -> Reply:
+        """exec=True lets the engine write and run code in a sandbox; engines without supports_exec ignore it."""
         raise NotImplementedError
 
     async def aclose(self):

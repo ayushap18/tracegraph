@@ -17,6 +17,9 @@ AGENTS = {
 }
 # Only offered to Jev when the active engine can search the web.
 RESEARCH = {'research': 'Recent news, current events, or anything that needs searching the web for up-to-date information'}
+# Engine-only built-ins: `report` on any engine, `run` only on an engine that can execute code in a sandbox (Codex).
+REPORT = {'report': 'Long-form written reports, essays, comparisons or summaries, with sources'}
+RUN = {'run': 'Write and execute code to compute or produce something'}
 # Guard outcomes that are decided from Jev's other answers rather than picked by the route question.
 GUARDS = ['clarify', 'blocked']
 KEYLESS = {'math', 'weather', 'time', 'currency'}
@@ -27,6 +30,7 @@ BLOCK_AT = 0.7
 MULTI_AT = 0.5
 MAX_SUBTASKS = 4
 HISTORY = 60
+RUN_TIMEOUT = 300.0  # seconds; TG_RUN_TIMEOUT overrides
 
 # Dollars per million tokens.
 PRICES = {'jev_in': 0.042, 'claude_in': 5.0, 'claude_out': 25.0}

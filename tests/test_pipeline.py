@@ -5,14 +5,14 @@ from jevrouter.pipeline import Router
 from tests.fakes import FakeAnthropic, FakeJev, eng
 
 FIELDS = {
-    'query': {'type', 'qid', 'text', 'source'},
+    'query': {'type', 'qid', 'text', 'source', 'session_id', 'compare_id', 'engine', 'files'},  # v4 adds the last four
     'plan': {'type', 'qid', 'planner', 'subtasks', 'multi', 'ms'},
     'routed': {'type', 'qid', 'tid', 'agent', 'pick', 'reason', 'probabilities', 'confidence', 'urgency', 'unsafe', 'clear',
                'jev_ms', 'model'},
     'delta': {'type', 'qid', 'tid', 'text'},
     'answered': {'type', 'qid', 'tid', 'agent', 'agent_ms', 'answer', 'ok', 'source', 'engine'},
     'merged': {'type', 'qid', 'answer', 'engine', 'ms'},
-    'done': {'type', 'qid', 'total_ms', 'stats'},
+    'done': {'type', 'qid', 'total_ms', 'stats', 'status', 'tokens'},  # v4 adds status and tokens
     'error': {'type', 'qid', 'tid', 'message'},
 }
 STATS = {'queries', 'subtasks', 'errors', 'jev_input_tokens', 'claude_input_tokens', 'claude_output_tokens', 'by_agent'}
@@ -66,9 +66,11 @@ async def test_two_subtask_event_sequence():
     assert max(i for i, t in enumerate(types) if t == 'routed') < min(i for i, t in enumerate(types) if t in ('answered', 'delta'))
 
     q, p = events[0], events[1]
-    assert q == {'type': 'query', 'qid': 1, 'text': 'weather in Paris and convert 100 EUR to INR', 'source': 'you'}
+    assert q == {'type': 'query', 'qid': 1, 'text': 'weather in Paris and convert 100 EUR to INR', 'source': 'you',
+                 'session_id': None, 'compare_id': None, 'engine': None, 'files': []}
     assert p['planner'] == 'heuristic' and p['multi'] == 0.9
-    assert p['subtasks'] == [{'tid': '1.1', 'text': 'weather in Paris'}, {'tid': '1.2', 'text': 'convert 100 EUR to INR'}]
+    assert p['subtasks'] == [{'tid': '1.1', 'text': 'weather in Paris', 'depends_on': []},
+                             {'tid': '1.2', 'text': 'convert 100 EUR to INR', 'depends_on': []}]
 
     routed = {e['tid']: e for e in events if e['type'] == 'routed'}
     answered = {e['tid']: e for e in events if e['type'] == 'answered'}
@@ -91,7 +93,9 @@ async def test_two_subtask_event_sequence():
     assert done['stats']['jev_input_tokens'] == 300  # multi + 2 routes
 
     rec = router.history[-1]
-    assert set(rec) == {'qid', 'text', 'source', 'at', 'plan', 'tasks', 'merged', 'total_ms', 'error'}
+    assert set(rec) == {'qid', 'text', 'source', 'at', 'plan', 'tasks', 'merged', 'total_ms', 'error',
+                        'status', 'engine', 'session_id', 'compare_id', 'files', 'tokens'}  # v4 fields
+    assert rec['status'] == 'done' and done['status'] == 'done' and done['tokens'] == rec['tokens'] == {'jev_in': 300, 'llm_in': 0, 'llm_out': 0}
     assert rec['error'] is None and not router.inflight
     assert rec['plan']['planner'] == 'heuristic' and len(rec['tasks']) == 2
     assert rec['tasks'][0]['agent'] == 'weather' and rec['tasks'][0]['answer'] and rec['tasks'][0]['probabilities']

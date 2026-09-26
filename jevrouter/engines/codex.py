@@ -49,13 +49,16 @@ class CodexEngine(CliEngine):
     binary = 'codex'
     bin_env = 'TG_CODEX_BIN'
     supports_web = True
+    supports_exec = True
     drop_env = ('OPENAI_API_KEY',)  # keep usage on the subscription login
     login_hint = 'run `codex login`'
 
-    def command(self, *, system, prompt, effort, web, schema):
+    def command(self, *, system, prompt, effort, web, schema, exec=False, workdir=None):
+        # exec: Codex may write and run files, but only inside its OS sandbox in a fresh scratch dir (network stays off).
         args = ['--search'] if web else []
         args += ['exec', '--json', '--ephemeral', '--skip-git-repo-check', '--ignore-user-config',
-                 '-s', 'read-only', '-C', self.cwd(), '-c', f'model_reasoning_effort="{EFFORT.get(effort, "medium")}"']
+                 '-s', 'workspace-write' if exec else 'read-only', '-C', workdir or self.cwd(),
+                 '-c', f'model_reasoning_effort="{EFFORT.get(effort, "medium")}"']
         if schema:
             path = Path(self.cwd(), f'schema-{abs(hash(json.dumps(schema, sort_keys=True)))}.json')
             path.write_text(json.dumps(schema))

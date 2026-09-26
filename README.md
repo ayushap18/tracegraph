@@ -25,6 +25,30 @@ Routing is the part of an agent system that is hardest to see. TraceGraph makes 
 - **Analytics:** a pipeline waterfall, a routing-probability heatmap, a traffic donut, confidence and latency charts, KPI cards with sparklines, and a routing log.
 - **Autopilot:** streams sample queries so the dashboard keeps moving during a demo.
 
+### The app
+
+- **Chat with follow-ups.** Sessions keep context, so "and in GBP?" works after a currency question. Answers stream in, with agent chips and a live trace panel.
+- **Dependent steps.** "Find the 2022 World Cup winner, then the time in its capital": later steps wait for earlier answers and get them as context.
+- **Files.** Attach TXT, MD, CSV, JSON or PDF. The `document` agent searches passages and the `data` agent computes table statistics.
+- **Heavy agents.** `report` writes sourced long-form reports. `run` writes and executes code inside Codex's OS sandbox, and only appears when Codex is the engine.
+- **Custom agents.** Describe a specialist and give it a prompt; Jev starts routing to it immediately.
+- **Compare engines.** One question sent to Claude Code, Codex, Antigravity or the API, with the answers side by side.
+- **Evals.** A 40-case suite built from real failure modes, run through the actual pipeline, with accuracy, silent-wrong answers and a history trend.
+- **Saved history.** Runs, chats, files, agents and eval results are stored in SQLite and survive restarts. Every run has a shareable `#/runs/:id` page with Answer, Trace, Timeline, Subtasks and Raw tabs.
+- **Run control.** A Stop button, per-run deadlines, and a CLI child process that is killed on cancel.
+- **Everywhere.** ⌘K command palette, light and dark themes, and a mobile layout with a bottom tab bar.
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/chat.jpg" alt="Chat: a multi-part question answered by currency and weather agents, then a follow-up 'and in GBP?' resolved from context, with the live trace panel"></td>
+    <td><img src="docs/screenshots/landing.jpg" alt="Landing page: 'Ask once. Watch it plan, route and answer.' with an animated trace illustration and feature grid"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Chat with follow-ups and live trace</sub></td>
+    <td align="center"><sub>Landing page</sub></td>
+  </tr>
+</table>
+
 <table>
   <tr>
     <td><img src="docs/screenshots/overview-light.jpg" alt="Dashboard overview in light theme: KPI cards with sparklines, ask box and sample queries"></td>
@@ -141,7 +165,8 @@ PLAN.md                   design notes and the SSE protocol
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/pytest -q           # 111 tests
+.venv/bin/pytest -q           # 155 tests
+.venv/bin/python -m jevrouter.evals --engine none   # routing/answer eval suite
 cd web && npm run build       # strict TypeScript check + production build
 ```
 

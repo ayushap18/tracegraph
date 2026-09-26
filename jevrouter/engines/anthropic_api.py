@@ -41,7 +41,8 @@ class AnthropicEngine(Engine):
             self.client = anthropic.AsyncAnthropic()
         return self.client
 
-    async def stream(self, *, system, prompt, effort='medium', emit_delta=None, max_tokens=2048, web=False, schema=None):
+    async def stream(self, *, system, prompt, effort='medium', emit_delta=None, max_tokens=2048, web=False, schema=None,
+                     exec=False):
         import anthropic
         output_config = {'effort': effort}
         if schema:

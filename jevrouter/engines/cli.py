@@ -72,14 +72,22 @@ class CliEngine(Engine):
     def parser(self) -> Parser:
         raise NotImplementedError
 
-    async def stream(self, *, system, prompt, effort='medium', emit_delta=None, max_tokens=2048, web=False, schema=None):
+    async def stream(self, *, system, prompt, effort='medium', emit_delta=None, max_tokens=2048, web=False, schema=None,
+                     exec=False):
         ok, why = self.available()
         if not ok:
             raise EngineError(why)
-        args, stdin = self.command(system=system, prompt=prompt, effort=effort, web=web, schema=schema)
-        async with self.sem:
-            return await run(self.path, args, stdin, self.parser(), emit_delta, env=self.env(), cwd=self.cwd(),
-                             timeout=self.timeout, login_hint=self.login_hint)
+        # Code execution gets a fresh scratch dir per call, so one run's files never leak into another's.
+        scratch = tempfile.mkdtemp(prefix=f'tracegraph-{self.name}-run-') if exec and self.supports_exec else None
+        extra = {'exec': True, 'workdir': scratch} if scratch else {}
+        try:
+            args, stdin = self.command(system=system, prompt=prompt, effort=effort, web=web, schema=schema, **extra)
+            async with self.sem:
+                return await run(self.path, args, stdin, self.parser(), emit_delta, env=self.env(), cwd=scratch or self.cwd(),
+                                 timeout=self.timeout, login_hint=self.login_hint)
+        finally:
+            if scratch:
+                shutil.rmtree(scratch, ignore_errors=True)
 
     async def aclose(self):
         if self.workdir:
