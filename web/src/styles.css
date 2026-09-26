@@ -309,3 +309,25 @@ td.ans { color:var(--muted); max-width:340px; overflow:hidden; text-overflow:ell
   .chart-panel .donut { height:auto; flex-wrap:wrap; justify-content:center; }
   .chart-panel .cp-body:has(.donut) { height:auto; }
 }
+
+/* ---------- icons ---------- */
+svg.lucide { flex:none; vertical-align:middle; }
+.h-title { display:inline-flex; align-items:center; gap:7px; }
+.h-title svg { color:var(--muted); opacity:.9; }
+.chip { display:inline-flex; align-items:center; gap:4px; }
+.chip svg { margin-left:-2px; }
+button.with-icon { display:inline-flex; align-items:center; justify-content:center; gap:7px; }
+button.mini { display:inline-flex; align-items:center; justify-content:center; gap:5px; height:28px; padding:0 8px; }
+.btn-group .mini { width:32px; padding:0; }
+button.icon { display:inline-flex; align-items:center; justify-content:center; }
+.kpi-l { display:flex; align-items:center; gap:6px; }
+.kpi-l svg { color:var(--accent); opacity:.85; }
+.ask-field .ask-icon { position:absolute; left:12px; color:var(--muted); pointer-events:none; }
+.inspector h3 svg { color:var(--muted); }
+.inspector .close { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border-radius:7px; }
+.inspector .close:hover { background:var(--soft); color:var(--ink); }
+.donut-legend li { grid-template-columns:16px 1fr 36px 40px; }
+.brand .logo { display:block; border-radius:7px; box-shadow:0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent); }
+.brand .dot { margin-left:2px; }
+.dag .card svg.lucide { pointer-events:none; }
+.panel h2 > span.h-title { text-transform:uppercase; letter-spacing:.06em; font-weight:600; }

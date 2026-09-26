@@ -7,10 +7,11 @@ import Graph, { type AgentStat } from './components/Graph'
 import { ConfidenceChart, LatencyChart, LATENCY_COLORS, type ConfPoint, type LatencyPoint } from './components/Charts'
 import { AskBox, ChartPanel, Inspector, Kpis, LatestRun, RoutingLog } from './components/Panels'
 import { Donut, Heatmap, Waterfall } from './components/Viz'
+import { Icon, Logo, type UiIconName } from './icons'
 
 type Theme = 'auto' | 'light' | 'dark'
 const THEMES: Theme[] = ['auto', 'dark', 'light']
-const THEME_ICON: Record<Theme, string> = { auto: '◐', dark: '☾', light: '☀' }
+const THEME_ICON: Record<Theme, UiIconName> = { auto: 'auto', dark: 'moon', light: 'sun' }
 
 function useTheme() {
   const [theme, setTheme] = useState<Theme>(() => {
@@ -158,8 +159,9 @@ export default function App() {
     <>
       <header className="top">
         <div className="brand">
-          <span className={'dot' + (store.connected ? ' on' : '')} />
+          <Logo size={26} />
           <h1>Jev Router</h1>
+          <span className={'dot' + (store.connected ? ' on' : '')} title={store.connected ? 'connected' : 'offline'} />
           <span className="ver">v2.2</span>
         </div>
         <span className="conn">{store.connected ? (flying ? `live · ${flying} in flight` : 'live') : store.ready ? 'server offline, retrying…' : 'connecting…'}</span>
@@ -169,7 +171,7 @@ export default function App() {
         {state.autopilot && <span className="tag warn">autopilot · {state.interval}s</span>}
         <div className="head-actions">
           <span className="keys" aria-hidden="true"><kbd>/</kbd> ask <kbd>a</kbd> autopilot <kbd>←</kbd><kbd>→</kbd> runs <kbd>f</kbd> fullscreen <kbd>t</kbd> theme</span>
-          <button type="button" className="icon" onClick={cycleTheme} title={`Theme: ${theme}`} aria-label={`Theme: ${theme}`}>{THEME_ICON[theme]}</button>
+          <button type="button" className="icon" onClick={cycleTheme} title={`Theme: ${theme}`} aria-label={`Theme: ${theme}`}><Icon name={THEME_ICON[theme]} size={17} /></button>
         </div>
       </header>
       <main className="wrap">
@@ -178,13 +180,13 @@ export default function App() {
         <section ref={graphPanel} className={'panel graph-panel' + (full ? ' full' : '')}>
           <div className="graph-bar">
             <div className="graph-title">
-              <h2>Trace graph</h2>
+              <h2><span className="h-title"><Icon name="graph" size={14} strokeWidth={2} />Trace graph</span></h2>
               <div className="run-nav" role="group" aria-label="Browse runs">
-                <button type="button" className="mini" onClick={() => step(-1)} disabled={!runs.length || shownIdx === 0} title="Previous run (←)" aria-label="Previous run">‹</button>
+                <button type="button" className="mini" onClick={() => step(-1)} disabled={!runs.length || shownIdx === 0} title="Previous run (←)" aria-label="Previous run"><Icon name="prev" size={15} strokeWidth={2} /></button>
                 <span className="run-id num">{shown ? `Run #${shown.qid}` : 'No runs'}{shown && <span className="muted"> · {shown.done ? 'finished' : 'running'}</span>}</span>
-                <button type="button" className="mini" onClick={() => step(1)} disabled={following} title="Next run (→)" aria-label="Next run">›</button>
+                <button type="button" className="mini" onClick={() => step(1)} disabled={following} title="Next run (→)" aria-label="Next run"><Icon name="next" size={15} strokeWidth={2} /></button>
                 <button type="button" className={'mini live' + (following ? ' on' : '')} onClick={() => setViewQid(null)} title="Follow the newest run (l)">
-                  <span className="live-dot" />Live
+                  <Icon name="live" size={13} strokeWidth={2} />Live
                 </button>
               </div>
             </div>
@@ -193,11 +195,11 @@ export default function App() {
                 <span><i className="st-running" />running</span><span><i className="st-done" />done</span><span><i className="st-warn" />no answer</span><span><i className="st-error" />failed</span>
               </span>
               <div className="btn-group" role="group" aria-label="Zoom">
-                <button type="button" className="mini" onClick={() => setZoomBy(z => ({ n: z.n + 1, k: 1 / 1.25 }))} aria-label="Zoom out">−</button>
-                <button type="button" className="mini" onClick={() => setResetKey(k => k + 1)} title="Fit (r)">fit</button>
-                <button type="button" className="mini" onClick={() => setZoomBy(z => ({ n: z.n + 1, k: 1.25 }))} aria-label="Zoom in">+</button>
+                <button type="button" className="mini" onClick={() => setZoomBy(z => ({ n: z.n + 1, k: 1 / 1.25 }))} aria-label="Zoom out" title="Zoom out"><Icon name="zoom-out" size={15} /></button>
+                <button type="button" className="mini" onClick={() => setResetKey(k => k + 1)} title="Fit to view (r)" aria-label="Fit to view"><Icon name="fit" size={15} /></button>
+                <button type="button" className="mini" onClick={() => setZoomBy(z => ({ n: z.n + 1, k: 1.25 }))} aria-label="Zoom in" title="Zoom in"><Icon name="zoom-in" size={15} /></button>
               </div>
-              <button type="button" className="mini" onClick={toggleFull} title="Fullscreen (f)">{full ? 'exit' : '⤢'}</button>
+              <button type="button" className="mini" onClick={toggleFull} title={full ? 'Exit fullscreen (f)' : 'Fullscreen (f)'} aria-label={full ? 'Exit fullscreen' : 'Fullscreen'}><Icon name={full ? 'minimize' : 'maximize'} size={15} /></button>
             </div>
           </div>
           <Graph run={shown} agents={allAgents} agentStats={agentStats} jev={jevInfo} selected={selected} onSelect={setSelected} resetKey={resetKey} zoomBy={zoomBy} />
@@ -207,27 +209,27 @@ export default function App() {
         <div className="grid-even">
           <LatestRun run={shown} claude={store.claude} />
           <section className="panel">
-            <h2>Pipeline timeline <span>{shown ? `#${shown.qid} · ${shown.done ? 'finished' : 'running'}` : ''}</span></h2>
+            <h2><span className="h-title"><Icon name="timeline" size={14} strokeWidth={2} />Pipeline timeline</span> <span>{shown ? `#${shown.qid} · ${shown.done ? 'finished' : 'running'}` : ''}</span></h2>
             <Waterfall run={shown} />
           </section>
         </div>
         <div className="grid-2 chart-row">
-          <ChartPanel title="Routing heatmap" stat={`${summary.routedCount} subtasks`} note="Jev's probability for each agent, per subtask"
+          <ChartPanel icon="heatmap" title="Routing heatmap" stat={`${summary.routedCount} subtasks`} note="Jev's probability for each agent, per subtask"
             legend={<><span className="scale"><span>0%</span><i className="ramp" /><span>100%</span></span><span>older → newer · click a column</span></>}>
             <Heatmap rows={allRows} agents={heatAgents} onPick={tid => setSelected('t:' + tid)} />
           </ChartPanel>
-          <ChartPanel title="Traffic by agent" stat={summary.top ? `${summary.top.agent} ${Math.round((summary.top.count / Math.max(1, summary.total)) * 100)}%` : '–'}
+          <ChartPanel icon="traffic" title="Traffic by agent" stat={summary.top ? `${summary.top.agent} ${Math.round((summary.top.count / Math.max(1, summary.total)) * 100)}%` : '–'}
             note="busiest agent" legend={<span>click a slice or row to inspect</span>}>
             <Donut data={traffic} onPick={a => setSelected('a:' + a)} />
           </ChartPanel>
         </div>
         <div className="grid-even chart-row">
-          <ChartPanel title="Route confidence" stat={summary.avgConf == null ? '–' : `${Math.round(summary.avgConf * 100)}% avg`}
+          <ChartPanel icon="confidence" title="Route confidence" stat={summary.avgConf == null ? '–' : `${Math.round(summary.avgConf * 100)}% avg`}
             note={summary.low ? `${summary.low} below threshold` : 'none below threshold'}
             legend={<><span><i style={{ background: colorOf('weather') }} />subtask, colored by agent</span><span><i className="dash" />{Math.round(MIN_CONFIDENCE * 100)}% clarify threshold</span><span>last 60</span></>}>
             <ConfidenceChart data={conf} />
           </ChartPanel>
-          <ChartPanel title="Latency per query" stat={`${secs(summary.p50)} median`} note={`p95 ${secs(summary.p95)}`}
+          <ChartPanel icon="latency" title="Latency per query" stat={`${secs(summary.p50)} median`} note={`p95 ${secs(summary.p95)}`}
             legend={<>{Object.entries(LATENCY_COLORS).map(([k, c]) => <span key={k}><i style={{ background: c }} />{k}</span>)}<span>last 40 queries</span></>}>
             <LatencyChart data={lat} />
           </ChartPanel>

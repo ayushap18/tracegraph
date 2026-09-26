@@ -3,6 +3,7 @@ import * as d3 from 'd3'
 import { colorOf } from '../protocol'
 import type { Run } from '../useEventStream'
 import { useSize } from '../lib'
+import { AgentIcon, Icon, type UiIconName } from '../icons'
 
 // A layered trace graph: Query → Subtasks → Router → Agents → Response.
 // Positions are computed, not simulated, so the picture is stable and every run reads the same way.
@@ -23,10 +24,8 @@ type Status = 'idle' | 'running' | 'done' | 'warn' | 'error'
 interface Card { id: string; x: number; y: number; w: number; h: number; color: string; icon: string; title: string; lines: string[]; status: Status; badge?: string; dim?: boolean }
 interface Edge { id: string; from: string; to: string; d: string; x2: number; y2: number; color: string | null; width: number; state: 'idle' | 'done' | 'running'; label?: string }
 
-const ICONS: Record<string, string> = {
-  query: '↳', jev: 'J', answer: '✓', math: '∑', weather: '☁', time: '◷', currency: '¤', knowledge: '◆',
-  code: '</>', chat: '❝', research: '⌕', clarify: '?', blocked: '⊘',
-}
+// Card icons: 'u:<ui icon>' for pipeline nodes, 'a:<agent>' for agents, anything else is drawn as text (subtask numbers).
+const ICONS = { query: 'u:query', jev: 'u:jev', answer: 'u:answer' }
 const LAYOUT_MIN_W = 760 // below this the graph lays out at this width and scales down to fit
 const PAD = 16, HEAD = 34, AGENT_H = 40, AGENT_GAP = 10, SUB_H = 48, SUB_GAP = 12
 
@@ -107,7 +106,7 @@ function layout(width: number, p: GraphProps) {
     const st = agentStats[a]
     const s = used.get(a)
     add({
-      id: 'a:' + a, x: colX(3), y: agY0 + i * (AGENT_H + AGENT_GAP), w: colW[3], h: AGENT_H, color: colorOf(a), icon: ICONS[a] ?? a[0].toUpperCase(),
+      id: 'a:' + a, x: colX(3), y: agY0 + i * (AGENT_H + AGENT_GAP), w: colW[3], h: AGENT_H, color: colorOf(a), icon: 'a:' + a,
       title: a, lines: [st?.count ? `${msf(st.avgMs)}${st.avgConf != null ? ' · ' + pct(st.avgConf) : ''}` : 'no runs yet'],
       badge: String(st?.count ?? 0), status: s ?? 'idle', dim: !!run && !s,
     })
@@ -206,7 +205,9 @@ export default function Graph(props: GraphProps) {
         <rect className="card-accent" width={3} height={c.h - 14} x={0} y={7} rx={1.5} style={{ fill: c.color }} />
         <rect className="card-icon" x={10} y={iconY} width={24} height={24} rx={6}
           style={{ fill: `color-mix(in srgb, ${c.color} 15%, transparent)`, stroke: `color-mix(in srgb, ${c.color} 38%, transparent)` }} />
-        <text className="card-glyph" x={22} y={iconY + 16} textAnchor="middle" style={{ fill: c.color }}>{c.icon}</text>
+        {c.icon.startsWith('u:') ? <Icon name={c.icon.slice(2) as UiIconName} x={15} y={iconY + 5} size={14} strokeWidth={2} style={{ color: c.color }} />
+          : c.icon.startsWith('a:') ? <AgentIcon agent={c.icon.slice(2)} x={15} y={iconY + 5} size={14} strokeWidth={2} style={{ color: c.color }} />
+          : <text className="card-glyph" x={22} y={iconY + 16} textAnchor="middle" style={{ fill: c.color }}>{c.icon}</text>}
         <text className="card-title" x={42} y={big ? 26 : c.lines[0] ? c.h / 2 - 3 : c.h / 2 + 4}>{c.title}</text>
         {c.lines.map((l, i) => l && <text key={i} className="card-line" x={big ? 12 : 42} y={big ? 50 + i * 16 : c.h / 2 + 12 + i * 14}>{l}</text>)}
         {c.badge != null && <text className="card-badge" x={c.w - 22} y={c.h / 2 + 4} textAnchor="end">{c.badge}</text>}

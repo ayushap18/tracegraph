@@ -4,12 +4,13 @@ import type { Run, Store, Task } from '../useEventStream'
 import { post } from '../useEventStream'
 import { clock, costs, latency, money, ms, pct, rows, safeHref } from '../lib'
 import Markdown from './Markdown'
+import { AgentIcon, Icon, type UiIconName } from '../icons'
 import { Sparkline, useCountUp } from './Viz'
 
 const cvar = (c: string) => ({ '--c': c }) as CSSProperties
 
 export function Chip({ agent }: { agent: string | undefined }) {
-  return <span className="chip" style={cvar(colorOf(agent))}>{agent ?? '…'}</span>
+  return <span className="chip" style={cvar(colorOf(agent))}>{agent && <AgentIcon agent={agent} size={12} strokeWidth={2.25} />}{agent ?? '…'}</span>
 }
 
 export function Bars({ probs, max = 5 }: { probs: Record<string, number>; max?: number }) {
@@ -57,16 +58,16 @@ export function AskBox({ samples, state, inputRef }: { samples: string[]; state:
     <section className="panel">
       <form className="ask" onSubmit={submit}>
         <div className="ask-field">
-          <span className="ask-icon" aria-hidden="true">⌕</span>
+          <Icon name="search" className="ask-icon" size={18} />
           <input ref={inputRef} value={q} onChange={e => setQ(e.target.value)} onKeyDown={recall} maxLength={500} autoComplete="off" aria-label="Query"
             placeholder="Ask anything, or several things: weather in Paris and convert 100 EUR to INR" />
           <kbd className="hint">/</kbd>
         </div>
-        <button type="submit" disabled={busy || !q.trim()}>Route</button>
+        <button type="submit" className="with-icon" disabled={busy || !q.trim()}><Icon name="send" size={16} strokeWidth={2} />Route</button>
         <div className="auto">
-          <button type="button" className={'ghost' + (state.autopilot ? ' on' : '')} aria-pressed={state.autopilot}
+          <button type="button" className={'ghost with-icon' + (state.autopilot ? ' on' : '')} aria-pressed={state.autopilot}
             onClick={() => void post('/control', { autopilot: !state.autopilot })}>
-            Autopilot {state.autopilot ? 'on' : 'off'}
+            <Icon name={state.autopilot ? 'pause' : 'play'} size={14} strokeWidth={2} />Autopilot {state.autopilot ? 'on' : 'off'}
           </button>
           <label>every <input type="range" min={1} max={15} step={0.5} value={interval}
             onChange={e => setIntervalV(+e.target.value)}
@@ -83,13 +84,13 @@ export function AskBox({ samples, state, inputRef }: { samples: string[]; state:
   )
 }
 
-function Kpi({ label, value, fmt, spark, color, min, note }: {
-  label: string; value: number | null; fmt: (v: number) => string; spark?: number[]; color?: string; min?: number; note?: string
+function Kpi({ icon, label, value, fmt, spark, color, min, note }: {
+  icon: UiIconName; label: string; value: number | null; fmt: (v: number) => string; spark?: number[]; color?: string; min?: number; note?: string
 }) {
   const v = useCountUp(value ?? 0)
   return (
     <div className="kpi-card">
-      <div className="kpi-l">{label}</div>
+      <div className="kpi-l"><Icon name={icon} size={13} strokeWidth={2} />{label}</div>
       <div className="kpi-v">{value == null ? '–' : fmt(v)}</div>
       {spark && spark.length > 1 ? <Sparkline values={spark} color={color} min={min} /> : <div className="kpi-note">{note ?? '\u00a0'}</div>}
     </div>
@@ -106,14 +107,14 @@ export function Kpis({ store }: { store: Store }) {
   const int = (v: number) => Math.round(v).toLocaleString()
   return (
     <section className="kpi-strip" aria-label="Key numbers">
-      <Kpi label="queries" value={store.stats.queries} fmt={int} spark={store.runs.slice(-30).map(r => r.order.length)} min={0}
+      <Kpi icon="queries" label="queries" value={store.stats.queries} fmt={int} spark={store.runs.slice(-30).map(r => r.order.length)} min={0}
         note={`${multi} multi-agent`} />
-      <Kpi label="subtasks routed" value={store.stats.subtasks} fmt={int} note={`${store.stats.errors} errors`} />
-      <Kpi label="avg Jev latency" value={avg(r => r.jev_ms)} fmt={v => int(v) + ' ms'} spark={recent.map(r => r.jev_ms)} />
-      <Kpi label="avg confidence" value={avg(r => r.confidence)} fmt={v => Math.round(v * 100) + '%'} spark={recent.map(r => r.confidence)} color="var(--ok)" min={0} />
-      <Kpi label="end-to-end" value={done.length ? done.reduce((s, r) => s + (r.total_ms ?? 0), 0) / done.length : null} fmt={v => int(v) + ' ms'}
+      <Kpi icon="subtasks" label="subtasks routed" value={store.stats.subtasks} fmt={int} note={`${store.stats.errors} errors`} />
+      <Kpi icon="latency" label="avg Jev latency" value={avg(r => r.jev_ms)} fmt={v => int(v) + ' ms'} spark={recent.map(r => r.jev_ms)} />
+      <Kpi icon="confidence" label="avg confidence" value={avg(r => r.confidence)} fmt={v => Math.round(v * 100) + '%'} spark={recent.map(r => r.confidence)} color="var(--ok)" min={0} />
+      <Kpi icon="activity" label="end-to-end" value={done.length ? done.reduce((s, r) => s + (r.total_ms ?? 0), 0) / done.length : null} fmt={v => int(v) + ' ms'}
         spark={done.map(r => r.total_ms ?? 0)} color="var(--warn)" min={0} />
-      <Kpi label="spend" value={c.jev + c.claude} fmt={money}
+      <Kpi icon="spend" label="spend" value={c.jev + c.claude} fmt={money}
         note={store.claude ? `Jev ${money(c.jev)} · Claude ${money(c.claude)}` : `Jev only · ${store.stats.jev_input_tokens.toLocaleString()} tokens`} />
     </section>
   )
@@ -154,7 +155,7 @@ function TaskCard({ task }: { task: Task }) {
 export function LatestRun({ run, claude }: { run: Run | undefined; claude: boolean }) {
   if (!run) return (
     <section className="panel latest">
-      <h2>Latest run</h2>
+      <h2><span className="h-title"><Icon name="activity" size={14} strokeWidth={2} />Latest run</span></h2>
       <p className="muted">Ask something above, or switch on Autopilot to stream sample queries. {claude ? 'Claude is on.' : 'Running keyless (no Claude key).'}</p>
     </section>
   )
@@ -162,7 +163,7 @@ export function LatestRun({ run, claude }: { run: Run | undefined; claude: boole
   const mergeText = run.merged?.answer ?? run.mergeStream
   return (
     <section className="panel latest">
-      <h2>Latest run <span>#{run.qid} · {run.done ? ms(run.total_ms) : 'running'}</span></h2>
+      <h2><span className="h-title"><Icon name="activity" size={14} strokeWidth={2} />Latest run</span> <span>#{run.qid} · {run.done ? ms(run.total_ms) : 'running'}</span></h2>
       <p className="q">{run.text || '…'} {run.source === 'autopilot' && <span className="src">auto</span>}</p>
       <div className="meta">
         {run.plan ? <>
@@ -188,7 +189,7 @@ export function RoutingLog({ runs }: { runs: Run[] }) {
   const list = rows(runs).reverse().slice(0, 30)
   return (
     <section className="panel">
-      <h2>Routing log <span>{list.length ? `last ${list.length} subtasks` : 'empty'}</span></h2>
+      <h2><span className="h-title"><Icon name="log" size={14} strokeWidth={2} />Routing log</span> <span>{list.length ? `last ${list.length} subtasks` : 'empty'}</span></h2>
       <div className="table-wrap">
         <table>
           <thead><tr><th className="hide-sm">time</th><th>query</th><th>agent</th><th>conf</th><th className="hide-sm">Jev ms</th><th className="hide-sm">answer</th></tr></thead>
@@ -213,6 +214,8 @@ export function RoutingLog({ runs }: { runs: Run[] }) {
     </section>
   )
 }
+
+const HUB_ICON: Record<string, UiIconName> = { query: 'query', planner: 'planner', jev: 'jev', merger: 'merger', answer: 'answer' }
 
 const HUB_INFO: Record<string, string> = {
   query: 'Incoming queries, from you or autopilot.',
@@ -240,7 +243,7 @@ export function Inspector({ id, store, onClose }: { id: string; store: Store; on
     const tid = id.slice(2)
     const hit = all.find(r => r.task.tid === tid)
     body = hit ? <>
-      <h3>Subtask {tid}</h3>
+      <h3><Icon name="subtasks" size={15} />Subtask {tid}</h3>
       <p>{hit.task.text}</p>
       {hit.task.routed ? <><Chip agent={hit.task.routed.agent} /><Bars probs={hit.task.routed.probabilities} max={8} /></> : <p className="muted">{hit.task.error ?? 'routing…'}</p>}
       <div className="answer"><Markdown text={hit.task.answered?.answer ?? (hit.task.stream || '…')} /></div>
@@ -251,7 +254,7 @@ export function Inspector({ id, store, onClose }: { id: string; store: Store; on
     const avg = (f: (l: ReturnType<typeof latency>) => number) => (lat.length ? lat.reduce((s, l) => s + f(l), 0) / lat.length : null)
     const last = store.runs[store.runs.length - 1]
     body = <>
-      <h3>{id === 'jev' ? 'Jev' : id}</h3>
+      <h3>{(id in HUB_ICON) && <Icon name={HUB_ICON[id]} size={15} />}{id === 'jev' ? 'Jev router' : id}</h3>
       <p className="muted small">{HUB_INFO[id] ?? ''}</p>
       <div className="meta">
         {id === 'jev' && <><span>avg {ms(avg(l => l.jev))}</span><span>{store.stats.jev_input_tokens.toLocaleString()} input tokens</span>
@@ -264,7 +267,7 @@ export function Inspector({ id, store, onClose }: { id: string; store: Store; on
   }
   return (
     <div className="inspector" role="dialog" aria-label="Node details">
-      <button type="button" className="close" onClick={onClose} aria-label="Close">×</button>
+      <button type="button" className="close" onClick={onClose} aria-label="Close"><Icon name="close" size={16} /></button>
       {body}
     </div>
   )
@@ -272,13 +275,13 @@ export function Inspector({ id, store, onClose }: { id: string; store: Store; on
 
 // One template for every analytics panel: title + headline number, a fixed-height chart body, and a legend footer.
 // Paired panels therefore always line up, whatever their data.
-export function ChartPanel({ title, stat, note, legend, children }: {
-  title: string; stat: ReactNode; note?: ReactNode; legend?: ReactNode; children: ReactNode
+export function ChartPanel({ icon, title, stat, note, legend, children }: {
+  icon: UiIconName; title: string; stat: ReactNode; note?: ReactNode; legend?: ReactNode; children: ReactNode
 }) {
   return (
     <section className="panel chart-panel">
       <div className="cp-head">
-        <h2>{title}</h2>
+        <h2><span className="h-title"><Icon name={icon} size={14} strokeWidth={2} />{title}</span></h2>
         <div className="cp-stat"><span className="cp-v num">{stat}</span>{note && <span className="cp-note">{note}</span>}</div>
       </div>
       <div className="cp-body">{children}</div>

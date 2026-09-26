@@ -4,7 +4,7 @@
 
 Type any question, or several at once. TraceGraph splits it into subtasks. The [Jev](https://docs.typesafe.ai) classifier routes each subtask to the right specialist agent, the agents run in parallel, and the answers are merged. A live dashboard shows every step as it happens.
 
-![Trace graph, mid-run: three subtasks routed in parallel to weather, currency and knowledge agents](docs/screenshots/trace-graph-live.jpg)
+![Trace graph: three subtasks routed in parallel to time, currency and knowledge agents](docs/screenshots/trace-graph-live.jpg)
 
 ## Why
 
@@ -123,4 +123,4 @@ The LLM code paths are tested against a fake client, so the suite needs no API k
 
 ## Tech stack
 
-Python · aiohttp · TypeSafe Jev · Anthropic SDK (optional) · React 18 · TypeScript · D3 v7 · Vite · Server-Sent Events · pytest
+Python · aiohttp · TypeSafe Jev · Anthropic SDK (optional) · React 18 · TypeScript · D3 v7 · Lucide icons · Vite · Server-Sent Events · pytest

@@ -3,6 +3,7 @@ import * as d3 from 'd3'
 import { colorOf } from '../protocol'
 import type { Run } from '../useEventStream'
 import { CHART_H, useSize, type Row } from '../lib'
+import { AgentIcon } from '../icons'
 
 // ---------- count-up numbers and sparklines for the KPI cards ----------
 
@@ -205,7 +206,7 @@ export function Donut({ data, onPick }: { data: Array<{ agent: string; count: nu
       <ul className="donut-legend">
         {data.map(d => (
           <li key={d.agent} className={d.count ? '' : 'zero'} onClick={() => onPick?.(d.agent)}>
-            <i style={{ background: colorOf(d.agent) }} />{d.agent}
+            <AgentIcon agent={d.agent} size={14} strokeWidth={2} style={{ color: colorOf(d.agent) }} />{d.agent}
             <span className="num">{d.count}</span>
             <span className="num muted">{total ? Math.round((d.count / total) * 100) + '%' : ''}</span>
           </li>
