@@ -259,7 +259,7 @@ async def test_eval_run_progress_and_results(client, tmp_path, monkeypatch):
 
     listed = (await json_of(await client.get('/api/evals')))['evals']
     assert listed == [{'eval_id': eid, 'at': listed[0]['at'], 'engine': 'none', 'status': 'done', 'done': 3, 'passed': 1,
-                       'total': 3, 'accuracy': 0.3333, 'silent_wrong': 1}]  # the currency case answered ok but wrong
+                       'total': 3, 'accuracy': 0.3333, 'silent_wrong': 1, 'examples': False}]  # the currency case answered ok but wrong
     d = await json_of(await client.get(f'/api/evals/{eid}'))
     assert d['done'] == 3 and [c['id'] for c in d['cases']] == ['w', 'h', 'e']
     w, h, e = d['cases']

@@ -8,6 +8,7 @@ import { AgentIcon, Icon, Logo } from '../icons'
 import { Chip } from '../components/Panels'
 import Markdown from '../components/Markdown'
 import { TraceView } from '../components/TraceView'
+import { RouteFeedback, canLabel, useRunLabels } from '../components/RouteFeedback'
 import { Waterfall } from '../components/Viz'
 import { TopActions } from '../components/Shell'
 import { pct } from '../lib'
@@ -440,6 +441,7 @@ export default function Chat() {
           {selected ? (
             <div className="min-h-0 flex-1 overflow-y-auto">
               <TraceView run={selected} store={store} compact legend={false} />
+              <TraceFeedback run={selected} />
               <div className="border-t border-border px-4 py-4">
                 <h3 className="mb-3 flex items-center gap-1.5 text-[13px] font-semibold"><Icon name="timeline" size={14} className="text-muted-foreground" />Timeline</h3>
                 <Waterfall run={selected} />
@@ -450,6 +452,26 @@ export default function Chat() {
           )}
         </aside>
       )}
+    </div>
+  )
+}
+
+// Route feedback for each routed step of a finished, saved turn.
+function TraceFeedback({ run }: { run: Run }) {
+  const tasks = run.order.map(t => run.tasks[t]).filter(t => canLabel(run.source, t))
+  const [labels, setLabel] = useRunLabels(run.qid, run.done && tasks.length > 0)
+  if (!run.done || !tasks.length) return null
+  return (
+    <div className="border-t border-border px-4 py-4">
+      <h3 className="mb-3 flex items-center gap-1.5 text-[13px] font-semibold"><Icon name="review" size={14} className="text-muted-foreground" />Routing feedback</h3>
+      <ul className="m-0 flex list-none flex-col gap-3 p-0">
+        {tasks.map(t => canLabel(run.source, t) && (
+          <li key={t.tid} className="flex min-w-0 flex-col gap-1.5">
+            <span className="min-w-0 text-[13px] break-words text-foreground">{t.text}</span>
+            <RouteFeedback qid={run.qid} task={t} label={labels[t.tid]} onLabel={setLabel} />
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

@@ -11,26 +11,26 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { cn } from '@/lib/utils'
 import { Sparkline } from '../components/Viz'
 import { ms } from '../lib'
+import EvalCompare from './evals/EvalCompare'
+import { CELL, CHIP, HEAD, LINK_ICON, accTone, compareHref, parseCompare, pctOf, when } from './evals/shared'
 
 // Eval suite: run the cases in evals/cases.jsonl through the real pipeline, watch progress live over SSE,
-// and compare accuracy across runs. `#/evals/:id` drills into one run's cases.
+// and compare accuracy across runs. `#/evals/:id` drills into one run's cases; `#/evals/<a>...<b>` compares two.
 
-const pctOf = (v: number | null | undefined) => (v == null || Number.isNaN(v) ? 'n/a' : `${Math.round(v * 100)}%`)
-const when = (at: number) => new Date(at * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-const accTone = (v: number): 'ok' | 'warn' | 'bad' => (v >= 0.9 ? 'ok' : v >= 0.7 ? 'warn' : 'bad')
-
-const HEAD = 'h-9 px-3 text-xs font-medium text-muted-foreground first:pl-4 last:pr-4 sm:first:pl-5 sm:last:pr-5'
-const CELL = 'px-3 py-2.5 first:pl-4 last:pr-4 sm:first:pl-5 sm:last:pr-5'
-const LINK_ICON = 'inline-grid size-7 place-items-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-subtle hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/35'
-const CHIP = cn(
-  'h-8 rounded-md border border-border bg-surface px-2.5 text-[13px] font-medium text-muted-foreground shadow-none transition-colors',
-  'hover:bg-subtle hover:text-foreground focus-visible:ring-ring/35',
-  'data-[state=on]:border-primary/40 data-[state=on]:bg-primary/10 data-[state=on]:text-foreground',
-)
 const None = () => <span className="text-muted-foreground">none</span>
 
 export default function Evals({ params }: { params: Record<string, string> }) {
+  const pair = parseCompare(params.id)
+  if (pair) return <EvalCompare a={pair[0]} b={pair[1]} />
   return params.id ? <EvalDetailPage key={params.id} id={params.id} /> : <EvalList />
+}
+
+// Route examples for one eval run: follow the server switch, or force them on or off for this run only.
+type ExamplesMode = 'current' | 'on' | 'off'
+const EXAMPLES_LABEL: Record<ExamplesMode, string> = { current: 'Current setting', on: 'On', off: 'Off' }
+
+function ExamplesBadge() {
+  return <Badge tone="accent" title="Route examples were on for this run">examples</Badge>
 }
 
 interface Progress { eval_id: string; done: number; total: number; passed: number }
@@ -43,6 +43,9 @@ function EvalList() {
   const [engine, setEngine] = useState<string>('')
   const [starting, setStarting] = useState(false)
   const [progress, setProgress] = useState<Progress | null>(null)
+  const [examples, setExamples] = useState<ExamplesMode>('current')
+  const [picked, setPicked] = useState<string[]>([]) // up to two eval ids to compare
+  const pick = (id: string) => setPicked(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id].slice(-2))
 
   const load = useCallback(async () => {
     try { const res = await listEvals(); setEvals(res.evals); setError(null) } catch (err) { setError(errText(err)) }
@@ -74,7 +77,7 @@ function EvalList() {
   const start = async () => {
     setStarting(true)
     try {
-      const res = await runEval(engine || undefined)
+      const res = await runEval(engine || undefined, examples === 'current' ? undefined : examples === 'on')
       setProgress(p => p?.eval_id === res.eval_id ? p : { eval_id: res.eval_id, done: 0, total: 0, passed: 0 })
       void load()
     } catch (err) {
@@ -120,6 +123,15 @@ function EvalList() {
                 ))}
               </SelectContent>
             </Select>
+            <label className="sr-only" htmlFor="ev-examples">Route examples</label>
+            <Select value={examples} onValueChange={v => setExamples(v as ExamplesMode)} disabled={!!progress}>
+              <SelectTrigger id="ev-examples" className="h-9 w-full bg-background sm:w-56" title="Route examples for this run">
+                <span className="truncate"><span className="text-muted-foreground">Examples: </span>{EXAMPLES_LABEL[examples]}</span>
+              </SelectTrigger>
+              <SelectContent position="popper" align="end">
+                {(['current', 'on', 'off'] as ExamplesMode[]).map(m => <SelectItem key={m} value={m}>{EXAMPLES_LABEL[m]}</SelectItem>)}
+              </SelectContent>
+            </Select>
             {progress
               ? <Button variant="danger" icon="stop" onClick={() => void stop()}>Cancel</Button>
               : <Button icon="play" onClick={() => void start()} disabled={starting}>{starting ? 'Starting…' : 'Run eval'}</Button>}
@@ -151,7 +163,20 @@ function EvalList() {
         </StatStrip>
       </section>
 
-      <Card flush title="History" icon="history" aria-label="Eval history">
+      <Card flush title="History" icon="history" aria-label="Eval history"
+        actions={evals && evals.length > 1 ? <span className="hidden text-xs text-muted-foreground sm:inline">Tick two runs to compare them</span> : undefined}>
+        {picked.length > 0 && (
+          <div role="status" className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-primary/5 px-4 py-2.5 sm:px-5">
+            <span className="text-[13px] text-foreground">{picked.length === 1 ? 'Pick one more run to compare with.' : 'Two runs picked. The older one is A.'}</span>
+            <span className="flex items-center gap-2">
+              <Button size="sm" variant="ghost" onClick={() => setPicked([])}>Clear</Button>
+              <Button size="sm" icon="compare" disabled={picked.length < 2} onClick={() => {
+                const [x, y] = picked.map(id => sorted.find(e => e.eval_id === id)!).sort((p, q) => p.at - q.at)
+                navigate(compareHref(x.eval_id, y.eval_id))
+              }}>Compare</Button>
+            </span>
+          </div>
+        )}
         {evals == null && !error
           ? <div className="flex flex-col gap-3 p-4 sm:p-5" aria-busy="true">{[0, 1, 2, 3].map(i => <Skeleton key={i} height={28} radius={6} />)}</div>
           : error && !evals ? <EmptyState icon="evals" title="Could not load evals" text={error}
@@ -163,6 +188,7 @@ function EvalList() {
                 <Table>
                   <TableHeader>
                     <TableRow className="border-border hover:bg-transparent">
+                      <TableHead className={cn(HEAD, 'w-10')}><span className="sr-only">Compare</span></TableHead>
                       <TableHead className={HEAD}>When</TableHead>
                       <TableHead className={HEAD}>Engine</TableHead>
                       <TableHead className={HEAD}>Status</TableHead>
@@ -175,8 +201,13 @@ function EvalList() {
                   <TableBody>
                     {sorted.map(e => (
                       <TableRow key={e.eval_id} className="cursor-pointer border-border hover:bg-subtle" onClick={() => navigate(`/evals/${e.eval_id}`)}>
+                        <TableCell className={CELL} onClick={ev => ev.stopPropagation()}>
+                          <PickBox checked={picked.includes(e.eval_id)} onChange={() => pick(e.eval_id)} label={`Compare eval from ${when(e.at)}`} />
+                        </TableCell>
                         <TableCell className={cn(CELL, 'tabular-nums text-foreground')}>{when(e.at)}</TableCell>
-                        <TableCell className={CELL}><EngineBadge name={e.engine ?? 'none'} label={e.engine ?? 'keyless'} /></TableCell>
+                        <TableCell className={CELL}>
+                          <span className="flex items-center gap-2"><EngineBadge name={e.engine ?? 'none'} label={e.engine ?? 'keyless'} />{e.examples && <ExamplesBadge />}</span>
+                        </TableCell>
                         <TableCell className={CELL}><StatusBadge status={e.status} /></TableCell>
                         <TableCell className={cn(CELL, 'text-right tabular-nums')}>{e.passed}/{e.total}</TableCell>
                         <TableCell className={cn(CELL, 'text-right')}><AccBar v={e.accuracy} /></TableCell>
@@ -193,11 +224,12 @@ function EvalList() {
               </div>
               <ul className="m-0 flex list-none flex-col divide-y divide-border p-0 md:hidden">
                 {sorted.map(e => (
-                  <li key={e.eval_id}>
+                  <li key={e.eval_id} className="flex items-start">
+                    <span className="py-3 pl-4"><PickBox checked={picked.includes(e.eval_id)} onChange={() => pick(e.eval_id)} label={`Compare eval from ${when(e.at)}`} /></span>
                     <a href={`#/evals/${e.eval_id}`} aria-label={`Open eval ${e.eval_id}`}
-                      className="flex flex-col gap-2 px-4 py-3 outline-none transition-colors hover:bg-subtle focus-visible:bg-subtle">
+                      className="flex min-w-0 flex-1 flex-col gap-2 py-3 pr-4 pl-3 outline-none transition-colors hover:bg-subtle focus-visible:bg-subtle">
                       <span className="flex items-center justify-between gap-3">
-                        <EngineBadge name={e.engine ?? 'none'} label={e.engine ?? 'keyless'} />
+                        <span className="flex min-w-0 items-center gap-2"><EngineBadge name={e.engine ?? 'none'} label={e.engine ?? 'keyless'} />{e.examples && <ExamplesBadge />}</span>
                         <StatusBadge status={e.status} />
                       </span>
                       <span className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[13px]">
@@ -219,6 +251,13 @@ function EvalList() {
   )
 }
 
+function PickBox({ checked, onChange, label }: { checked: boolean; onChange: () => void; label: string }) {
+  return (
+    <input type="checkbox" checked={checked} onChange={onChange} aria-label={label}
+      className="size-4 cursor-pointer rounded-sm accent-primary align-middle focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35" />
+  )
+}
+
 const BAR_TONE = { ok: 'bg-ok', warn: 'bg-warn', bad: 'bg-destructive' }
 
 function AccBar({ v }: { v: number }) {
@@ -234,6 +273,7 @@ function AccBar({ v }: { v: number }) {
 
 type PassFilter = 'all' | 'pass' | 'fail'
 const ANY_TAG = '__any'
+const USER_TAG = 'user'
 
 function EvalDetailPage({ id }: { id: string }) {
   const { subscribe } = useStore()
@@ -260,7 +300,9 @@ function EvalDetailPage({ id }: { id: string }) {
   }, [data?.status, load])
 
   const cases = data?.cases ?? []
-  const tags = useMemo(() => [...new Set(cases.flatMap(c => c.tags ?? []))].sort(), [cases])
+  // "user" (cases promoted from your labels) leads the tag chips.
+  const tags = useMemo(() => [...new Set(cases.flatMap(c => c.tags ?? []))].sort((x, y) => Number(y === USER_TAG) - Number(x === USER_TAG) || x.localeCompare(y)), [cases])
+  const tagCount = (t: string) => cases.filter(c => c.tags?.includes(t)).length
   const shown = cases.filter(c => (filter === 'all' || (filter === 'pass') === c.pass) && (!tag || c.tags?.includes(tag)))
   const failCount = cases.filter(c => !c.pass).length
 
@@ -297,7 +339,11 @@ function EvalDetailPage({ id }: { id: string }) {
       {tags.length > 0 && (
         <ToggleGroup type="single" value={tag ?? ANY_TAG} onValueChange={v => setTag(!v || v === ANY_TAG ? null : v)} spacing={1} aria-label="Filter by tag" className="flex-wrap">
           <ToggleGroupItem value={ANY_TAG} className={CHIP}>any tag</ToggleGroupItem>
-          {tags.map(t => <ToggleGroupItem key={t} value={t} className={cn(CHIP, 'font-mono text-xs')}>#{t}</ToggleGroupItem>)}
+          {tags.map(t => (
+            <ToggleGroupItem key={t} value={t} className={cn(CHIP, 'font-mono text-xs')} title={t === USER_TAG ? 'Cases added from your route labels' : undefined}>
+              #{t}<span className="font-sans tabular-nums text-muted-foreground">{tagCount(t)}</span>
+            </ToggleGroupItem>
+          ))}
         </ToggleGroup>
       )}
     </div>
@@ -305,12 +351,15 @@ function EvalDetailPage({ id }: { id: string }) {
 
   return (
     <PageBody>
-      <BackLink href="#/evals">All evals</BackLink>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <BackLink href="#/evals">All evals</BackLink>
+        <CompareWith id={id} />
+      </div>
       <section aria-label="Eval summary" className="flex flex-col gap-3">
         <StatStrip cols={4}>
           <Stat label="Accuracy" value={pctOf(data.accuracy)} tone={data.status === 'done' ? accTone(data.accuracy) : undefined} note={`${data.passed}/${data.total} passed`} />
           <Stat label="Engine" value={<span className="inline-flex items-center gap-2 text-lg"><EngineIcon name={data.engine ?? 'none'} size={18} />{data.engine ?? 'keyless'}</span>}
-            note={when(data.at)} />
+            note={`${when(data.at)}${data.examples == null ? '' : data.examples ? ', examples on' : ', examples off'}`} />
           <Stat label="Status" value={<span className="inline-flex h-8 items-center"><StatusBadge status={data.status} /></span>} note={`${cases.length} of ${data.total} cases recorded`} />
           <Stat label="Silent wrong" value={data.silent_wrong} tone={data.silent_wrong ? 'bad' : undefined} note="failed, yet every answer said ok" />
         </StatStrip>
@@ -351,6 +400,25 @@ function EvalDetailPage({ id }: { id: string }) {
   )
 }
 
+/** "Compare with..." on one run: this run is B, the picked one is A. */
+function CompareWith({ id }: { id: string }) {
+  const [others, setOthers] = useState<EvalSummary[] | null>(null)
+  useEffect(() => { listEvals().then(r => setOthers(r.evals.filter(e => e.eval_id !== id && e.status !== 'running').sort((a, b) => b.at - a.at)), () => setOthers([])) }, [id])
+  if (!others?.length) return null
+  return (
+    <Select value="" onValueChange={v => navigate(compareHref(v, id))}>
+      <SelectTrigger aria-label="Compare with another eval" className="h-8 w-full bg-background text-[13px] sm:w-56">
+        <span className="flex items-center gap-1.5 text-muted-foreground"><Icon name="compare" size={14} />Compare with…</span>
+      </SelectTrigger>
+      <SelectContent position="popper" align="end">
+        {others.map(e => (
+          <SelectItem key={e.eval_id} value={e.eval_id}>{when(e.at)}, {e.engine ?? 'keyless'}{e.examples ? ', examples' : ''}, {pctOf(e.accuracy)}</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
 // Pieces shared by the table row (md+) and the stacked card (phones).
 
 function ResultBadge({ pass }: { pass: boolean }) {
@@ -361,7 +429,7 @@ function Tags({ tags }: { tags: string[] | undefined }) {
   if (!tags?.length) return null
   return (
     <span className="flex flex-wrap gap-1">
-      {tags.map(t => <span key={t} className="rounded-sm bg-subtle px-1 font-mono text-[11px] text-muted-foreground">#{t}</span>)}
+      {tags.map(t => <span key={t} className={cn('rounded-sm px-1 font-mono text-[11px]', t === USER_TAG ? 'bg-primary/10 text-primary' : 'bg-subtle text-muted-foreground')}>#{t}</span>)}
     </span>
   )
 }

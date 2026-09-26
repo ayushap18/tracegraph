@@ -48,8 +48,9 @@ async def test_control_clamps_and_broadcasts(client):
 
 async def test_config(client):
     body = await (await client.get('/api/config')).json()
-    assert set(body) == {'agents', 'guards', 'claude', 'state', 'stats', 'samples', 'prices', 'engine', 'engines', 'features'}
-    assert body['engine'] is None and body['engines'] == []
+    assert set(body) == {'agents', 'guards', 'claude', 'state', 'stats', 'samples', 'prices', 'engine', 'engines', 'features',
+                         'route_examples'}
+    assert body['engine'] is None and body['route_examples'] is False and body['engines'] == []
     assert body['claude'] is False and 'research' not in body['agents'] and body['guards'] == ['clarify', 'blocked']
     assert set(body['prices']) == {'jev_in', 'claude_in', 'claude_out'}
 
@@ -59,7 +60,7 @@ async def test_events_stream(client):
     assert resp.headers['Content-Type'] == 'text/event-stream'
     hello = (await read_events(resp, 'hello'))[0]
     assert set(hello) == {'type', 'agents', 'guards', 'claude', 'state', 'stats', 'samples', 'prices', 'engine', 'engines', 'history',
-                          'features'}
+                          'features', 'route_examples'}
     qid = (await (await client.post('/ask', json={'query': 'weather in Paris and convert 100 EUR to INR'})).json())['qid']
     events = await read_events(resp, 'done')
     types = [e['type'] for e in events]

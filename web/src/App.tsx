@@ -13,6 +13,7 @@ import Sandbox from './pages/Sandbox'
 import Live from './pages/Live'
 import Runs from './pages/Runs'
 import RunDetail from './pages/RunDetail'
+import Review from './pages/Review'
 import Settings from './pages/Settings'
 import Compare from './pages/Compare'
 import Evals from './pages/Evals'
@@ -44,6 +45,7 @@ function Page({ match }: { match: Match }) {
     case 'live': return <Live />
     case 'runs': return <Runs />
     case 'run': return <RunDetail params={params} />
+    case 'review': return <Review />
     case 'compare': return <Compare params={params} />
     case 'evals': return <Evals params={params} />
     case 'agents': return <Agents params={params} />

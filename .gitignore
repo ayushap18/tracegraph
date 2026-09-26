@@ -5,3 +5,5 @@ node_modules/
 *.log
 web/dist/
 data/
+evals/cases.local.jsonl
+evals/*.local*

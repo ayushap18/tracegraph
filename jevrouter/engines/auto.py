@@ -3,7 +3,7 @@
 The default order puts the subscription CLIs first (Claude Code, Codex, Antigravity) and the pay-per-token Anthropic
 API last, so a plan that is out of quota, logged out or timing out never fails a run while another backend works.
 TG_ENGINE_ORDER (comma separated) or the UI sets the order. An engine that just failed is skipped for a while, so a
-used-up plan costs one failed call, not one per request.
+used-up plan costs one failed call, not one per request. Each move to the next engine is counted in engines/health.py.
 """
 import asyncio
 import os
@@ -101,6 +101,9 @@ class AutoEngine(Engine):
                 self.cooling[e.name] = (time.monotonic() + (COOLDOWN if LASTING.search(why) else SHORT_COOLDOWN), why)
                 self.warm_new_lead()
                 failures.append(f'{e.label}: {why}')
+                health = getattr(self, '_health', None)  # set by health.instrument
+                if health is not None and i + 1 < len(chain):
+                    health.fallback(e.name, chain[i + 1].name)
                 if err.partial and emit_delta and i + 1 < len(chain):
                     emit_delta(f'\n[{e.label} failed ({why}); switching to {chain[i + 1].label}]\n')
                 continue

@@ -1,5 +1,6 @@
 """aiohttp routes: GET / (web/dist or legacy page), GET /events (SSE), POST /ask, POST /control, GET /api/config,
-plus the v4 API in docs/PLAN-v4.md §1 (runs, sessions, agents, files, compare, evals, engine test)."""
+plus the v4 API in docs/PLAN-v4.md §1 (runs, sessions, agents, files, compare, evals, engine test) and the learning API in
+docs/PLAN-learning.md (labels, review queue, route examples, eval compare, engine health)."""
 import asyncio
 import json
 import os
@@ -12,9 +13,11 @@ import aiohttp
 from aiohttp import web
 
 from . import evals as evals_mod
+from . import labels as labels_mod
 from .config import AGENTS, DIST, GUARDS, LEGACY_PAGE, REPORT, RESEARCH, RUN
 from .engines import EngineError, catalog, choose
 from .events import sse
+from .jev import examples_for
 from .files import FILE_AGENTS, MAX_BYTES, FileError, extract
 from .pipeline import USE_ACTIVE, Router, warm_up
 from .sandbox import MAX_FILES as MAX_SANDBOX_FILES, SandboxError
@@ -405,11 +408,24 @@ async def get_compare(request):
 
 async def run_eval(request):
     body, router = await read_json(request), request.app[ROUTER]
+    examples = body.get('examples')
     try:
         engine = pick_engine(router, body['engine']) if body.get('engine') else router.engine
+        if examples is not None and not isinstance(examples, bool):
+            raise Bad('examples must be true or false')
     except Bad as e:
         return err(str(e), e.status)
-    return web.json_response({'eval_id': evals_mod.start(router, engine, engine.name if engine else 'none')})
+    return web.json_response({'eval_id': evals_mod.start(router, engine, engine.name if engine else 'none', examples=examples)})
+
+
+async def compare_evals(request):
+    store, q = request.app[ROUTER].store, request.query
+    if not q.get('a') or not q.get('b'):
+        return err('a and b must be eval ids')
+    a, b = store.get_eval(q['a']), store.get_eval(q['b'])
+    if a is None or b is None:
+        return err(f"no such eval {q['a'] if a is None else q['b']}", 404)
+    return web.json_response(evals_mod.compare(a, b))
 
 
 async def list_evals(request):
@@ -430,7 +446,85 @@ async def cancel_eval(request):
     return err('that eval has already finished', 409) if router.store.get_eval(eid) else err('no such eval', 404)
 
 
+# ---------- labels, review and route examples (docs/PLAN-learning.md) ----------
+
+MAX_LABELS = 500
+
+
+def int_param(q, key: str, default=None, lo: int = 1, hi: int | None = None):
+    if q.get(key) in (None, ''):
+        return default
+    try:
+        v = int(q[key])
+    except ValueError:
+        raise Bad(f'{key} must be an integer')
+    return max(lo, min(hi, v)) if hi else v
+
+
+async def create_label(request):
+    body, router = await read_json(request), request.app[ROUTER]
+    try:
+        label = labels_mod.make_label(router, body)
+    except labels_mod.LabelError as e:
+        return err(str(e), e.status)
+    return web.json_response(label)
+
+
+async def list_labels(request):
+    router, q = request.app[ROUTER], request.query
+    try:
+        limit = int_param(q, 'limit', 100, 1, MAX_LABELS)
+        qid = int_param(q, 'qid', lo=0)
+        if q.get('verdict') and q['verdict'] not in labels_mod.VERDICTS:
+            raise Bad('verdict must be right or wrong')
+    except Bad as e:
+        return err(str(e), e.status)
+    labels = router.store.list_labels(q.get('agent') or None, q.get('verdict') or None, qid, limit)
+    return web.json_response({'labels': labels})
+
+
+async def delete_label(request):
+    router = request.app[ROUTER]
+    if not router.store.delete_label(request.match_info['id']):
+        return err('no such label', 404)
+    router.refresh_labels()  # a deleted label stops steering routing at once
+    return web.json_response({'ok': True})
+
+
+async def promote_label(request):
+    try:
+        return web.json_response(labels_mod.promote(request.app[ROUTER], request.match_info['id']))
+    except labels_mod.LabelError as e:
+        return err(str(e), e.status)
+
+
+async def review(request):
+    q = request.query
+    try:
+        limit = int_param(q, 'limit', 50, 1, MAX_LABELS)
+        reason = q.get('reason') or None
+        if reason is not None and reason not in labels_mod.REASONS:
+            raise Bad(f'reason must be one of {", ".join(labels_mod.REASONS)}')
+    except Bad as e:
+        return err(str(e), e.status)
+    return web.json_response(await asyncio.to_thread(labels_mod.review, request.app[ROUTER], limit, reason))
+
+
+async def agent_examples(request):
+    """Exactly what Jev would see now: each offered agent's examples and not-list (only agents that have some)."""
+    router = request.app[ROUTER]
+    offered = {**router.agents, **FILE_AGENTS}
+    ex = examples_for(offered, router.labels)
+    return web.json_response({'enabled': router.route_examples,
+                              'agents': [{'agent': a, **ex[a]} for a in offered if a in ex]})
+
+
 # ---------- engines ----------
+
+async def engine_health(request):
+    router = request.app[ROUTER]
+    return web.json_response({'engines': router.health.snapshot(router.engines)})
+
 
 TEST_PROMPT = 'Reply with exactly: ok'
 TEST_TIMEOUT = 60.0
@@ -471,6 +565,11 @@ async def control(request):
             router.state['interval'] = max(1.0, min(15.0, float(body['interval'])))
     except (TypeError, ValueError):
         return web.json_response({'error': 'interval must be a number'}, status=400)
+    if 'route_examples' in body:
+        if not isinstance(body['route_examples'], bool):
+            return web.json_response({'error': 'route_examples must be true or false'}, status=400)
+        router.route_examples = body['route_examples']
+        router.bus.emit('config', **router.config())
     if 'engine_order' in body:
         auto = router.engines.get('auto')
         if auto is None or not isinstance(body['engine_order'], list):
@@ -616,9 +715,13 @@ def create_app(router_factory=None) -> web.Application:
         web.get('/api/agents', list_agents), web.post('/api/agents', create_agent), web.delete('/api/agents/{name}', delete_agent),
         web.get('/api/files', list_files), web.post('/api/files', upload_file), web.delete('/api/files/{id}', delete_file),
         web.post('/api/compare', compare), web.get('/api/compare/{id}', get_compare),
-        web.post('/api/evals/run', run_eval), web.get('/api/evals', list_evals), web.get('/api/evals/{id}', get_eval),
+        web.post('/api/evals/run', run_eval), web.get('/api/evals', list_evals),
+        web.get('/api/evals/compare', compare_evals), web.get('/api/evals/{id}', get_eval),
         web.post('/api/evals/{id}/cancel', cancel_eval),
-        web.post('/api/engines/{name}/test', test_engine),
+        web.get('/api/labels', list_labels), web.post('/api/labels', create_label), web.delete('/api/labels/{id}', delete_label),
+        web.post('/api/labels/{id}/promote', promote_label), web.get('/api/review', review),
+        web.get('/api/agents/examples', agent_examples),
+        web.get('/api/engines/health', engine_health), web.post('/api/engines/{name}/test', test_engine),
         web.get('/{tail:.+}', static)])
     app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)

@@ -4,6 +4,7 @@ import type { ControlState } from '../protocol'
 import { CHART_H, inFlight, latency } from '../lib'
 import { colorOf, MIN_CONFIDENCE } from '../protocol'
 import Graph from '../components/Graph'
+import EngineHealth from '../components/EngineHealth'
 import { ConfidenceChart, LatencyChart, LATENCY_COLORS, type ConfPoint, type LatencyPoint } from '../components/Charts'
 import { AskBox, Inspector, Kpis, LatestRun, RoutingLog } from '../components/Panels'
 import { ChartCard, PageBody } from '../components/app'
@@ -207,6 +208,7 @@ export default function Live() {
               : <ChartEmpty icon="latency" title="No finished queries yet" text="Jev, agent and merge time for each finished query stack up here." />}
           </ChartCard>
         </div>
+        {store.engines.some(e => e.name !== 'none') && <EngineHealth compact />}
         <RoutingLog runs={runs} />
       </PageBody>
     </>

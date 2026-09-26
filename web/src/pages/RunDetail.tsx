@@ -8,6 +8,7 @@ import { EngineIcon, Icon } from '../icons'
 import { TaskCard } from '../components/Panels'
 import Markdown from '../components/Markdown'
 import { TraceView } from '../components/TraceView'
+import { RouteFeedback, canLabel, useRunLabels } from '../components/RouteFeedback'
 import { Waterfall } from '../components/Viz'
 import { AgentBadge, BackLink, PageBody } from '../components/app'
 import { cn } from '@/lib/utils'
@@ -114,25 +115,35 @@ export default function RunDetail({ params }: { params: Record<string, string> }
             </Card>
           )}
           {tab === 'subtasks' && (
-            tasks.length ? (
-              <div className="grid gap-4 lg:grid-cols-2">
-                {tasks.map(t => (
-                  <div key={t.tid} className="flex min-w-0 flex-col gap-3 overflow-hidden rounded-lg border border-border bg-surface p-4 sm:p-5">
-                    {t.depends_on.length > 0 && (
-                      <p className="m-0 flex items-center gap-1.5 text-xs text-muted-foreground">
-                        <Icon name="layers" size={12} />Runs after <span className="font-mono">{t.depends_on.join(', ')}</span>
-                      </p>
-                    )}
-                    <TaskCard task={t} bare />
-                  </div>
-                ))}
-              </div>
-            ) : <Card><EmptyState icon="subtasks" title={run.done ? 'No subtasks' : 'Planning…'} text={run.done ? 'This run finished without a plan.' : 'Subtasks appear as soon as the planner splits the query.'} /></Card>
+            tasks.length ? <SubtasksTab run={run} /> : <Card><EmptyState icon="subtasks" title={run.done ? 'No subtasks' : 'Planning…'} text={run.done ? 'This run finished without a plan.' : 'Subtasks appear as soon as the planner splits the query.'} /></Card>
           )}
           {tab === 'raw' && <RawTab run={run} />}
         </div>
       </div>
     </PageBody>
+  )
+}
+
+// One card per subtask; saved runs get route feedback under each routing decision.
+function SubtasksTab({ run }: { run: Run }) {
+  const tasks = run.order.map(t => run.tasks[t]).filter(Boolean)
+  const [labels, setLabel] = useRunLabels(run.qid, run.done && run.source !== 'sandbox')
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      {tasks.map(t => (
+        <div key={t.tid} className="flex min-w-0 flex-col gap-3 overflow-hidden rounded-lg border border-border bg-surface p-4 sm:p-5">
+          {t.depends_on.length > 0 && (
+            <p className="m-0 flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Icon name="layers" size={12} />Runs after <span className="font-mono">{t.depends_on.join(', ')}</span>
+            </p>
+          )}
+          <TaskCard task={t} bare />
+          {run.done && canLabel(run.source, t) && (
+            <RouteFeedback qid={run.qid} task={t} label={labels[t.tid]} onLabel={setLabel} className="border-t border-border pt-3" />
+          )}
+        </div>
+      ))}
+    </div>
   )
 }
 

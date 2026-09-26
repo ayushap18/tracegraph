@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { deleteFile, errorText, listAgents, listEvals, listFiles, listSessions, setEngine, testEngine } from '../api'
+import { agentExamples, deleteFile, errorText, listAgents, listEvals, listFiles, listSessions, setEngine, setRouteExamples, testEngine } from '../api'
 import type { EngineInfo, EngineTestResult, FileInfo } from '../protocol'
 import { useStore } from '../store'
 import { useTheme, THEMES, THEME_ICON, THEME_LABEL, type Theme } from '../theme'
-import { Badge, Button, EmptyState, IconButton, Kbd, Skeleton, Spinner, useToast } from '../ui'
+import { Badge, Button, EmptyState, IconButton, Kbd, Skeleton, Spinner, Toggle, useToast } from '../ui'
 import { EngineIcon, Icon, type UiIconName } from '../icons'
 import { MOD_KEY } from '../components/Shell'
+import EngineHealth from '../components/EngineHealth'
 import { PageBody, Section, Stat, StatStrip } from '../components/app'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { cn } from '@/lib/utils'
@@ -16,6 +17,8 @@ const KEYLESS: EngineInfo = { name: 'none', label: 'Keyless', billing: 'api', we
 
 const SECTIONS: Array<{ id: string; label: string; icon: UiIconName }> = [
   { id: 'settings-engines', label: 'Engines', icon: 'engine' },
+  { id: 'settings-health', label: 'Engine health', icon: 'activity' },
+  { id: 'settings-routing', label: 'Routing', icon: 'jev' },
   { id: 'settings-appearance', label: 'Appearance', icon: 'sun' },
   { id: 'settings-limits', label: 'Limits', icon: 'latency' },
   { id: 'settings-shortcuts', label: 'Shortcuts', icon: 'keyboard' },
@@ -48,6 +51,13 @@ export default function Settings() {
                 : engines.map(e => <li key={e.name}><EngineRow engine={e} active={e.name === active} /></li>)}
             </ul>
           </Section>
+
+          <Section id="settings-health" headingId="health-h" icon="activity" title="Engine health" className="scroll-mt-20"
+            description="How each engine has behaved since the server started. A failing engine can make routing look wrong when it is not.">
+            <EngineHealth />
+          </Section>
+
+          <RoutingSection />
 
           <Section id="settings-appearance" headingId="appearance-h" icon="sun" title="Appearance" className="scroll-mt-20">
             <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-4 sm:p-5">
@@ -233,6 +243,41 @@ function EngineRow({ engine: e, active }: { engine: EngineInfo; active: boolean 
         </Button>
       </div>
     </article>
+  )
+}
+
+/** The route examples switch. The live value comes from hello/config events; agentExamples() seeds it on load. */
+function RoutingSection() {
+  const { subscribe } = useStore()
+  const toast = useToast()
+  const [on, setOn] = useState<boolean | null>(null)
+  const [count, setCount] = useState<number | null>(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    agentExamples().then(r => {
+      setOn(v => v ?? r.enabled)
+      setCount(r.agents.reduce((n, a) => n + a.examples.length + a.not.length, 0))
+    }, () => setOn(v => v ?? false))
+  }, [])
+  useEffect(() => subscribe(e => {
+    if ((e.type === 'hello' || e.type === 'config') && typeof e.route_examples === 'boolean') setOn(e.route_examples)
+  }), [subscribe])
+  const flip = async (v: boolean) => {
+    setBusy(true)
+    try { await setRouteExamples(v); setOn(v); toast.success(v ? 'Route examples are on for new runs' : 'Route examples are off for new runs') }
+    catch (err) { toast.error(`Could not change route examples: ${errorText(err)}`) } finally { setBusy(false) }
+  }
+  return (
+    <Section id="settings-routing" headingId="routing-h" icon="jev" title="Routing" className="scroll-mt-20">
+      <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface p-4 sm:p-5">
+        <Toggle checked={!!on} disabled={on == null || busy} onChange={v => void flip(v)} label="Route examples"
+          hint="Shows Jev your corrected routes as examples for each agent, so similar questions go to the right place." />
+        <p className="m-0 pl-11 text-xs text-muted-foreground">
+          {count == null ? '' : `${count} example${count === 1 ? '' : 's'} from your labels. `}Applies to new runs only.{' '}
+          <a href="#/agents" className="font-medium text-primary underline-offset-2 hover:underline">See them on Agents</a>
+        </p>
+      </div>
+    </Section>
   )
 }
 

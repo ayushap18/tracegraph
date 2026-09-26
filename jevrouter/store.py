@@ -1,4 +1,4 @@
-"""SQLite persistence (stdlib sqlite3): runs, chat sessions, custom agents, uploaded files and eval results.
+"""SQLite persistence (stdlib sqlite3): runs, chat sessions, custom agents, uploaded files, eval results and route labels.
 
 Every write is one small statement on a WAL database, so it runs inline rather than in a thread: that keeps the
 final save of a cancelled run from depending on the event loop still being willing to schedule work.
@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from .config import ROOT
 
@@ -25,7 +26,14 @@ CREATE TABLE IF NOT EXISTS files(id TEXT PRIMARY KEY, name TEXT, size INTEGER, k
                                  columns TEXT, created REAL);
 CREATE TABLE IF NOT EXISTS evals(id TEXT PRIMARY KEY, at REAL, engine TEXT, status TEXT, done INTEGER, passed INTEGER,
                                  total INTEGER, accuracy REAL, silent_wrong INTEGER, cases TEXT);
+CREATE TABLE IF NOT EXISTS labels(id TEXT PRIMARY KEY, qid INTEGER, tid TEXT, text TEXT, picked TEXT, correct TEXT,
+                                  verdict TEXT, confidence REAL, margin REAL, note TEXT, at REAL, promoted TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS labels_run_task ON labels(qid, tid);
 """
+# Columns added after a table first shipped: (table, column, type). Older databases get them on open.
+MIGRATIONS = [('evals', 'examples', 'INTEGER')]
+LABEL_COLS = ('id', 'qid', 'tid', 'text', 'picked', 'correct', 'verdict', 'confidence', 'margin', 'note', 'at', 'promoted')
+EVAL_COLS = ('id', 'at', 'engine', 'status', 'done', 'passed', 'total', 'accuracy', 'silent_wrong', 'cases', 'examples')
 
 
 class Store:
@@ -42,6 +50,9 @@ class Store:
         if self.path != ':memory:':
             self.db.execute('PRAGMA journal_mode=WAL')
         self.db.executescript(SCHEMA)
+        for table, col, kind in MIGRATIONS:
+            if col not in {r['name'] for r in self.q(f'PRAGMA table_info({table})')}:
+                self.x(f'ALTER TABLE {table} ADD COLUMN {col} {kind}')
         # A run still marked running was cut off by a restart; it will never finish now.
         for r in self.q("SELECT qid, record FROM runs WHERE status = 'running'"):
             rec = {**json.loads(r['record']), 'status': 'error', 'error': 'interrupted by a server restart'}
@@ -115,7 +126,14 @@ class Store:
         return out
 
     def counts(self) -> dict:
-        return {t: self.q(f'SELECT COUNT(*) AS n FROM {t}')[0]['n'] for t in ('runs', 'sessions', 'agents', 'files', 'evals')}
+        return {t: self.q(f'SELECT COUNT(*) AS n FROM {t}')[0]['n'] for t in ('runs', 'sessions', 'agents', 'files', 'evals', 'labels')}
+
+    def recent_runs(self, n: int, skip_sources=()) -> list[dict]:
+        """The newest n saved runs, newest first, leaving out runs from `skip_sources` (the review queue's window:
+        eval and compare runs are skipped in SQL, so a burst of evals can't push people's questions out of it)."""
+        skip = list(skip_sources)
+        where = f" WHERE source NOT IN ({','.join('?' * len(skip))})" if skip else ''
+        return [json.loads(r['record']) for r in self.q(f'SELECT record FROM runs{where} ORDER BY qid DESC LIMIT ?', *skip, int(n))]
 
     # ---------- sessions ----------
 
@@ -181,8 +199,9 @@ class Store:
     # ---------- evals ----------
 
     def save_eval(self, e: dict):
-        self.x('INSERT OR REPLACE INTO evals VALUES (?,?,?,?,?,?,?,?,?,?)', e['eval_id'], e['at'], e['engine'], e['status'],
-               e['done'], e['passed'], e['total'], e['accuracy'], e['silent_wrong'], json.dumps(e.get('cases', [])))
+        self.x(f'INSERT OR REPLACE INTO evals ({",".join(EVAL_COLS)}) VALUES ({",".join("?" * len(EVAL_COLS))})',
+               e['eval_id'], e['at'], e['engine'], e['status'], e['done'], e['passed'], e['total'], e['accuracy'],
+               e['silent_wrong'], json.dumps(e.get('cases', [])), int(bool(e.get('examples'))))
 
     def list_evals(self, limit=50) -> list[dict]:
         return [eval_row(r, cases=False) for r in self.q('SELECT * FROM evals ORDER BY at DESC LIMIT ?', int(limit))]
@@ -190,6 +209,64 @@ class Store:
     def get_eval(self, eid: str) -> dict | None:
         rows = self.q('SELECT * FROM evals WHERE id = ?', eid)
         return eval_row(rows[0], cases=True) if rows else None
+
+
+    # ---------- labels ----------
+
+    def save_label(self, label: dict) -> dict:
+        """One label per (qid, tid): marking a subtask again replaces its label but keeps the label's id."""
+        with self.lock:
+            old = self.db.execute('SELECT id FROM labels WHERE qid = ? AND tid = ?', (label['qid'], label['tid'])).fetchone()
+            label = {**label, 'id': old['id'] if old else label['id']}
+            self.db.execute(f'INSERT OR REPLACE INTO labels ({",".join(LABEL_COLS)}) VALUES ({",".join("?" * len(LABEL_COLS))})',
+                            [label[c] for c in LABEL_COLS])
+        return label
+
+    def get_label(self, lid: str) -> dict | None:
+        rows = self.q('SELECT * FROM labels WHERE id = ?', lid)
+        return dict(rows[0]) if rows else None
+
+    def label_for(self, qid: int, tid: str) -> dict | None:
+        rows = self.q('SELECT * FROM labels WHERE qid = ? AND tid = ?', qid, tid)
+        return dict(rows[0]) if rows else None
+
+    def list_labels(self, agent=None, verdict=None, qid=None, limit=None) -> list[dict]:
+        where, args = [], []
+        for col, val in (('correct', agent), ('verdict', verdict), ('qid', qid)):
+            if val is not None:
+                where.append(f'{col} = ?')
+                args.append(val)
+        sql = 'SELECT * FROM labels' + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY at DESC, rowid DESC'
+        if limit is not None:
+            sql += ' LIMIT ?'
+            args.append(int(limit))
+        return [dict(r) for r in self.q(sql, *args)]
+
+    def labelled(self) -> set[tuple[int, str]]:
+        return {(r['qid'], r['tid']) for r in self.q('SELECT qid, tid FROM labels')}
+
+    def delete_label(self, lid: str) -> bool:
+        found = bool(self.q('SELECT 1 FROM labels WHERE id = ?', lid))
+        self.x('DELETE FROM labels WHERE id = ?', lid)
+        return found
+
+    def set_promoted(self, lid: str, case_id: str | None):
+        self.x('UPDATE labels SET promoted = ? WHERE id = ?', case_id, lid)
+
+
+def read_labels(path: str | Path, limit: int = 5000) -> list[dict]:
+    """Labels from a database file, opened read-only (the eval CLI must not change the app's database). [] if none."""
+    try:
+        db = sqlite3.connect(f'file:{quote(str(Path(path).resolve()))}?mode=ro', uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        db.row_factory = sqlite3.Row
+        return [dict(r) for r in db.execute('SELECT * FROM labels ORDER BY at DESC LIMIT ?', (limit,))]
+    except sqlite3.Error:
+        return []
+    finally:
+        db.close()
 
 
 def file_meta(r) -> dict:
@@ -201,5 +278,5 @@ def file_meta(r) -> dict:
 
 def eval_row(r, cases: bool) -> dict:
     e = {'eval_id': r['id'], 'at': r['at'], 'engine': r['engine'], 'status': r['status'], 'done': r['done'], 'passed': r['passed'],
-         'total': r['total'], 'accuracy': r['accuracy'], 'silent_wrong': r['silent_wrong']}
+         'total': r['total'], 'accuracy': r['accuracy'], 'silent_wrong': r['silent_wrong'], 'examples': bool(r['examples'])}
     return {**e, 'cases': json.loads(r['cases'])} if cases else e

@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useState, type Dispatch, type FormEvent, type ReactNode, type SetStateAction } from 'react'
-import { createAgent, deleteAgent, errorText as errText, listAgents } from '../api'
+import { agentExamples, createAgent, deleteAgent, deleteLabel, errorText as errText, listAgents, listLabels } from '../api'
 import { Badge, Button, EmptyState, Field, IconButton, Skeleton, Toggle, useToast } from '../ui'
 import { useStore } from '../store'
-import { AgentIcon } from '../icons'
+import { AgentIcon, Icon } from '../icons'
 import { PageBody, Section } from '../components/app'
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { cn } from '@/lib/utils'
-import { colorOf, type AgentInfo } from '../protocol'
+import { colorOf, type AgentExamples, type AgentInfo, type Label } from '../protocol'
 
 // Every agent Jev can route to: built-ins, guards and user-defined agents, plus a form to create new ones.
 // Validation mirrors the server (PLAN-v4 §1.6) so errors show while typing, not after a round trip.
@@ -47,12 +47,31 @@ export default function Agents(_props: { params: Record<string, string> }) {
   // The draft lives here so closing the sheet by accident does not lose what was typed.
   const [draft, setDraft] = useState<Draft>(EMPTY)
 
+  const [examples, setExamples] = useState<Examples | null>(null)
+
   const load = useCallback(async () => {
     try { const res = await listAgents(); setAgents(res.agents); setError(null) } catch (err) { setError(errText(err)) }
   }, [])
-  useEffect(() => { void load() }, [load])
+  // Route examples are optional: a server without them just shows no examples.
+  const loadExamples = useCallback(async () => {
+    try {
+      const [ex, lb] = await Promise.all([agentExamples(), listLabels({ limit: 500 }).catch(() => ({ labels: [] as Label[] }))])
+      setExamples({ enabled: ex.enabled, by: Object.fromEntries(ex.agents.map(a => [a.agent, a])), labels: lb.labels })
+    } catch { setExamples(null) }
+  }, [])
+  useEffect(() => { void load(); void loadExamples() }, [load, loadExamples])
   // Engine switches and agent changes arrive as `config` events; availability depends on them.
-  useEffect(() => subscribe(e => { if (e.type === 'config') void load() }), [subscribe, load])
+  useEffect(() => subscribe(e => { if (e.type === 'config' || e.type === 'hello') { void load(); void loadExamples() } }), [subscribe, load, loadExamples])
+
+  const removeLabel = async (l: Label) => {
+    try { await deleteLabel(l.id); toast.success('Removed that label'); void loadExamples() }
+    catch (err) { toast.error(`Could not remove the label: ${errText(err)}`) }
+  }
+  const card = (a: AgentInfo, onDelete?: () => Promise<void>) => (
+    <AgentCard key={a.name} agent={a} onDelete={onDelete} examples={examples?.by[a.name]}
+      labelFor={(text, kind) => findLabel(examples?.labels ?? [], a.name, text, kind)} onRemove={removeLabel} />
+  )
+  const hasExamples = !!examples && Object.values(examples.by).some(x => x.examples.length || x.not.length)
 
   const groups = useMemo(() => {
     const list = agents ?? []
@@ -87,6 +106,12 @@ export default function Agents(_props: { params: Record<string, string> }) {
 
   return (
     <PageBody>
+      {hasExamples && !examples!.enabled && (
+        <p role="status" className="m-0 flex items-start gap-2 rounded-lg border border-warn/30 bg-warn/5 px-4 py-2.5 text-[13px] text-foreground">
+          <Icon name="info" size={14} className="mt-0.5 shrink-0 text-warn" />
+          <span>Route examples are off, so Jev does not see the examples below yet. <a href="#/settings" className="font-medium text-primary underline-offset-2 hover:underline">Turn them on in Settings</a>.</span>
+        </p>
+      )}
       <Section headingId="ag-custom-h" icon="agents" title="Your agents" count={`${groups.custom.length}/${MAX_CUSTOM}`} actions={newButton}
         description={!store.engine ? 'Custom agents run on an LLM engine; they are offered to Jev only while one is active.' : undefined}>
         {loading ? <Grid><SkeletonCards n={2} /></Grid>
@@ -97,19 +122,19 @@ export default function Agents(_props: { params: Record<string, string> }) {
                   action={<Button icon="plus" onClick={() => setCreating(true)}>New agent</Button>} />
               </div>
             )
-            : <Grid>{groups.custom.map(a => <AgentCard key={a.name} agent={a} onDelete={() => remove(a.name)} />)}</Grid>}
+            : <Grid>{groups.custom.map(a => card(a, () => remove(a.name)))}</Grid>}
       </Section>
 
       <Section headingId="ag-builtin-h" icon="agent" title="Built-in agents">
         {loading ? <Grid><SkeletonCards n={6} /></Grid>
           : groups.builtin.length === 0 ? <p className="m-0 text-[13px] text-muted-foreground">None reported.</p>
-          : <Grid>{groups.builtin.map(a => <AgentCard key={a.name} agent={a} />)}</Grid>}
+          : <Grid>{groups.builtin.map(a => card(a))}</Grid>}
       </Section>
 
       <Section headingId="ag-guard-h" icon="confidence" title="Guards" description="Guards catch unclear or unsafe subtasks before any agent runs.">
         {loading ? <Grid><SkeletonCards n={2} /></Grid>
           : groups.guard.length === 0 ? <p className="m-0 text-[13px] text-muted-foreground">None reported.</p>
-          : <Grid>{groups.guard.map(a => <AgentCard key={a.name} agent={a} />)}</Grid>}
+          : <Grid>{groups.guard.map(a => card(a))}</Grid>}
       </Section>
 
       <Sheet open={creating} onOpenChange={setCreating}>
@@ -130,6 +155,15 @@ export default function Agents(_props: { params: Record<string, string> }) {
   )
 }
 
+interface Examples { enabled: boolean; by: Record<string, AgentExamples>; labels: Label[] }
+type ExampleKind = 'examples' | 'not'
+
+/** The label behind an example string, so it can be removed. Examples come from correct = agent labels; "not"
+ *  entries from labels where Jev picked the agent and the user said wrong. */
+function findLabel(labels: Label[], agent: string, text: string, kind: ExampleKind): Label | undefined {
+  return labels.find(l => l.text === text && (kind === 'examples' ? l.correct === agent : l.picked === agent && l.verdict === 'wrong'))
+}
+
 function Grid({ children }: { children: ReactNode }) {
   return <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">{children}</div>
 }
@@ -143,7 +177,10 @@ function SkeletonCards({ n }: { n: number }) {
   ))}</>
 }
 
-function AgentCard({ agent: a, onDelete }: { agent: AgentInfo; onDelete?: () => Promise<void> }) {
+function AgentCard({ agent: a, onDelete, examples, labelFor, onRemove }: {
+  agent: AgentInfo; onDelete?: () => Promise<void>; examples?: AgentExamples
+  labelFor: (text: string, kind: ExampleKind) => Label | undefined; onRemove: (l: Label) => Promise<void>
+}) {
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
   const [showPrompt, setShowPrompt] = useState(false)
@@ -170,6 +207,12 @@ function AgentCard({ agent: a, onDelete }: { agent: AgentInfo; onDelete?: () => 
         </div>
       </header>
       <p className="m-0 text-[13px] leading-relaxed text-muted-foreground text-pretty">{a.description}</p>
+      {examples && (examples.examples.length > 0 || examples.not.length > 0) && (
+        <div className="flex flex-col gap-2 rounded-md bg-subtle px-3 py-2">
+          <ExampleList title="Examples" kind="examples" items={examples.examples} labelFor={labelFor} onRemove={onRemove} />
+          <ExampleList title="Not" kind="not" items={examples.not} labelFor={labelFor} onRemove={onRemove} />
+        </div>
+      )}
       {a.kind === 'custom' && a.prompt && (
         <div className="flex flex-col items-start gap-2">
           <button type="button" data-slot="button" aria-expanded={showPrompt} onClick={() => setShowPrompt(s => !s)}
@@ -191,6 +234,30 @@ function AgentCard({ agent: a, onDelete }: { agent: AgentInfo; onDelete?: () => 
         </footer>
       )}
     </article>
+  )
+}
+
+function ExampleList({ title, kind, items, labelFor, onRemove }: {
+  title: string; kind: ExampleKind; items: string[]
+  labelFor: (text: string, kind: ExampleKind) => Label | undefined; onRemove: (l: Label) => Promise<void>
+}) {
+  if (!items.length) return null
+  return (
+    <div className="flex min-w-0 flex-col gap-0.5">
+      <span className="text-xs font-medium text-muted-foreground">{title}</span>
+      <ul className="m-0 flex list-none flex-col p-0">
+        {items.map(t => {
+          const l = labelFor(t, kind)
+          return (
+            <li key={t} className="flex min-h-7 min-w-0 items-center gap-1 text-[13px] text-foreground">
+              <Icon name={kind === 'examples' ? 'check' : 'cancelled'} size={12} className={cn('shrink-0', kind === 'examples' ? 'text-ok' : 'text-destructive')} />
+              <span className="min-w-0 flex-1 truncate" title={t}>{t}</span>
+              {l && <IconButton icon="close" size="sm" className="size-6 shrink-0" label={`Remove the label for "${t}"`} onClick={() => void onRemove(l)} />}
+            </li>
+          )
+        })}
+      </ul>
+    </div>
   )
 }
 

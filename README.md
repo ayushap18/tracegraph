@@ -172,6 +172,8 @@ cd web && npm run build       # strict TypeScript check + production build
 
 The LLM code paths are tested against a fake API client and fake `claude`/`codex`/`agy` binaries that emit each CLI's real event format, so the suite needs no logins, keys or network.
 
+CI (`.github/workflows/ci.yml`) runs the tests and the web build on every push and pull request to `main`. The eval suite also runs there once a `TYPESAFE_API_KEY` repo secret is added, since Jev routing calls the TypeSafe API.
+
 ## Tech stack
 
 Python · aiohttp · TypeSafe Jev · Claude Code / Codex / Antigravity CLIs or Anthropic SDK (optional) · React 18 · TypeScript · D3 v7 · Lucide icons · Vite · Server-Sent Events · pytest

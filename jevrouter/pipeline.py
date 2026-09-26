@@ -10,22 +10,25 @@ from collections import deque
 
 from . import agents as agent_registry
 from .agents.llm import COMMON
-from .config import AGENTS, GUARDS, HISTORY, KEYLESS, PRICES, REPORT, RESEARCH, RUN, RUN_TIMEOUT, SAMPLES
+from .config import AGENTS, GUARDS, HISTORY, KEYLESS, PRICES, REPORT, RESEARCH, RUN, RUN_TIMEOUT, SAMPLES, env_flag
+from .engines.health import Health, instrument_all
 from .events import Broadcaster
 from .files import FILE_AGENTS, file_agents
-from .jev import route_one
+from .jev import clean, criteria, route_one
 from .merger import merge
 from .planner import SCHEMA as PLAN_SCHEMA, SYSTEM as PLAN_SYSTEM, plan, resolve_step
 from .sandbox import DEFAULT_TTL, MAX_SANDBOXES, TURNS as SANDBOX_TURNS, Sandboxes, SandboxError
 from .store import Store
 
-ROUTED_KEYS = ('agent', 'pick', 'reason', 'probabilities', 'confidence', 'urgency', 'unsafe', 'clear', 'jev_ms', 'model')
+ROUTED_KEYS = ('agent', 'pick', 'reason', 'probabilities', 'confidence', 'urgency', 'unsafe', 'clear', 'jev_ms', 'model',
+               'examples')
 USE_ACTIVE = object()  # a run's engine argument: the engine active at submit time (None means keyless)
 CONTEXT_CHARS = 500
 # Sandbox runs are never stored. Their qids come from a separate range so they can't collide with
 # (or leave gaps in) the persisted run numbers, and they're forgotten when they finish.
 SANDBOX_QID0 = 1_000_000_000
 SANDBOX_SESSIONS = MAX_SANDBOXES  # most sandbox conversations kept in memory (jevrouter/sandbox.py)
+LABELS_CACHED = 5000  # newest labels kept in memory for route examples (each agent uses only its latest few)
 
 
 async def warm_up(engine):
@@ -50,6 +53,10 @@ class Router:
         self.bus = bus or Broadcaster()
         self.store = store or Store()
         self.engines = engines or ({engine.name: engine} if engine is not None else {})
+        self.health = Health()  # per-engine counters since start (GET /api/engines/health)
+        instrument_all(self.engines, self.health)
+        if engine is not None and engine.name not in self.engines:
+            instrument_all({engine.name: engine}, self.health)
         self.fixed_registry = registry  # tests pin agents; real runs rebuild the registry when the engine changes
         self.customs = self.store.agents()
         self.use_engine(engine)
@@ -71,6 +78,28 @@ class Router:
         self.sandboxes = Sandboxes()
         self.sandbox_ids = itertools.count(SANDBOX_QID0)
         self.sandbox_ttl = float(os.environ.get('TG_SANDBOX_TTL', DEFAULT_TTL))
+        # Route examples (docs/PLAN-learning.md): the global switch, and the labels Jev's criteria are built from.
+        self.route_examples = env_flag('TG_ROUTE_EXAMPLES')
+        self.labels: list[dict] = []
+        self.refresh_labels()
+
+    def refresh_labels(self):
+        """Reloads the labels cache after a label is saved or deleted, so the next route sees the change."""
+        self.labels = self.store.list_labels(limit=LABELS_CACHED)
+
+    def criteria(self, agents: dict) -> dict:
+        """The route criteria with examples from the cached labels, memoised until the labels or the agents change."""
+        labels, key = self.labels, tuple(agents.items())
+        cached = getattr(self, '_criteria', None)
+        if cached is None or cached[0] is not labels or cached[1] != key:  # refresh_labels swaps in a new list
+            cached = self._criteria = (labels, key, criteria(agents, labels))
+        return cached[2]
+
+    def criteria_without(self, agents: dict, texts) -> dict:
+        """criteria() minus every label whose text is one of `texts` (compared as Jev sees examples). An eval holds out
+        its own case this way, so examples on measures whether routing generalises, not recall of the answer."""
+        drop = {clean(t).casefold() for t in texts if t}
+        return criteria(agents, [l for l in self.labels if clean(l.get('text')).casefold() not in drop])
 
     # ---------- agents and engines ----------
 
@@ -108,7 +137,7 @@ class Router:
         return {'agents': {**self.agents, **FILE_AGENTS}, 'guards': GUARDS, 'claude': e is not None, 'state': self.state,
                 'stats': self.stats, 'samples': SAMPLES, 'prices': prices,
                 'engine': e.info() if e is not None else None, 'engines': [x.info() for x in self.engines.values()],
-                'features': features}
+                'features': features, 'route_examples': self.route_examples}
 
     def hello(self) -> dict:
         # history fills in completion order; replay wants qid order, with in-flight runs included
@@ -145,12 +174,15 @@ class Router:
         return [self.inflight.get(r['qid'], r) for r in self.store.runs_where(col, value)]
 
     def submit(self, query: str, source: str, *, session_id=None, engine=USE_ACTIVE, files=(), compare_id=None,
-               sandbox: str | None = None, extras: dict | None = None) -> int:
+               sandbox: str | None = None, extras: dict | None = None, examples: bool | None = None) -> int:
         """Allocates the qid now (so POST /ask can return it) and runs the query in the background.
         With `sandbox` (a sandbox id) the run is ephemeral: nothing is stored, it doesn't count towards stats or
         history, and its events only reach that sandbox's event stream. A sandbox run's `extras` (all optional):
         `draft` (an unsaved custom agent dict), `files` ([(meta, text)] from sandbox memory), `replaces` (qid of the
-        turn this edits) and `remember` (default True: read and write the sandbox's follow-up memory)."""
+        turn this edits) and `remember` (default True: read and write the sandbox's follow-up memory).
+        `examples` forces route examples on or off for this run only (evals); None follows the global switch.
+        An eval run's `extras` may carry `holdout` (the case query): with examples on, labels whose text is that query or
+        the subtask being routed are left out of that route's criteria."""
         if sandbox:
             self.sandboxes.get(sandbox, create=True)  # marks it used, so the sweeper leaves it alone
             qid = next(self.sandbox_ids)
@@ -160,7 +192,7 @@ class Router:
         else:
             qid = next(self.ids)
         task = asyncio.create_task(self.handle(query, source, qid, session_id=session_id, engine=engine, files=files,
-                                               compare_id=compare_id, extras=extras))
+                                               compare_id=compare_id, extras=extras, examples=examples))
         self.tasks.add(task)
         self.running[qid] = task
         task.add_done_callback(lambda t: (self.tasks.discard(t), self.running.pop(qid, None)))
@@ -175,10 +207,10 @@ class Router:
         return 'finished' if self.get_run(qid) else 'unknown'
 
     async def handle(self, query: str, source: str, qid: int | None = None, *, session_id=None, engine=USE_ACTIVE,
-                     files=(), compare_id=None, extras: dict | None = None):
+                     files=(), compare_id=None, extras: dict | None = None, examples: bool | None = None):
         qid = qid or next(self.ids)
         sandbox = self.sandbox.get(qid)
-        extras = extras or {}
+        extras = {**(extras or {}), 'examples': self.route_examples if examples is None else bool(examples)}
         engine = self.engine if engine is USE_ACTIVE else engine
         registry = self.registry if engine is self.engine else self.registry_for(engine)
         t0 = time.perf_counter()
@@ -340,12 +372,15 @@ class Router:
             by_tid[st['tid']]['input'] = text
             return text, ctx
 
+        crit = self.criteria(agents) if extras['examples'] else agents  # one set of criteria for every subtask
+        holdout = extras.get('holdout') if extras['examples'] else None  # an eval case's query: never its own example
         # Jev only sees text: without the file names, "the attached CSV" reads as unclear and gets gated to clarify.
         files_note = f"\n\n(Attached files: {', '.join(f['name'] for f in attached)})" if attached else ''
 
         async def route(st, text):
             try:
-                d = await route_one(self.jev, text + files_note, agents)
+                c = self.criteria_without(agents, (holdout, text, st.get('text'))) if holdout else crit
+                d = await route_one(self.jev, text + files_note, c)
             except Exception as e:
                 stats['errors'] += 1
                 by_tid[st['tid']]['error'] = f'Jev: {str(e)[:200]}'

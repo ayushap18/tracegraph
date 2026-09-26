@@ -8,7 +8,7 @@ FIELDS = {
     'query': {'type', 'qid', 'text', 'source', 'session_id', 'compare_id', 'engine', 'files'},  # v4 adds the last four
     'plan': {'type', 'qid', 'planner', 'subtasks', 'multi', 'ms'},
     'routed': {'type', 'qid', 'tid', 'agent', 'pick', 'reason', 'probabilities', 'confidence', 'urgency', 'unsafe', 'clear',
-               'jev_ms', 'model'},
+               'jev_ms', 'model', 'examples'},  # the learning plan adds examples
     'delta': {'type', 'qid', 'tid', 'text'},
     'answered': {'type', 'qid', 'tid', 'agent', 'agent_ms', 'answer', 'ok', 'source', 'engine'},
     'merged': {'type', 'qid', 'answer', 'engine', 'ms'},

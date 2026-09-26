@@ -32,6 +32,16 @@ MAX_SUBTASKS = 4
 HISTORY = 60
 RUN_TIMEOUT = 300.0  # seconds; TG_RUN_TIMEOUT overrides
 
+# Routing that learns (docs/PLAN-learning.md). A saved subtask is shaky, and shows in the review queue, below these.
+REVIEW_CONFIDENCE = 0.6
+REVIEW_MARGIN = 0.15  # top probability minus the runner-up's
+REASK_SECONDS = 60.0  # the next turn of the same chat came this soon after the answer
+REVIEW_SCAN = 2000  # most recent saved runs the queue looks at
+# Route examples: labelled corrections fed to Jev inside each agent's criterion. TG_ROUTE_EXAMPLES=1 turns them on.
+MAX_EXAMPLES = 3
+MAX_NOT = 2
+EXAMPLE_CHARS = 200
+
 # Dollars per million tokens.
 PRICES = {'jev_in': 0.042, 'claude_in': 5.0, 'claude_out': 25.0}
 
@@ -49,6 +59,11 @@ SAMPLES = [
     "What time is it in Tokyo and what's 15% of 380?",
     'Who was Alan Turing; then convert 50 GBP to USD',
 ]
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    v = os.environ.get(name)
+    return default if v is None or not v.strip() else v.strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 def load_env(path: Path = ROOT / '.env'):
