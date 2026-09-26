@@ -3,8 +3,8 @@
 Google documents launching the official agy binary as a headless child process on its cached credentials as a
 supported workflow that counts against the same subscription limits as interactive use. Install with
 `curl -fsSL https://antigravity.google/cli/install.sh | bash`, then run `agy` once to sign in.
-Event schema (docs: antigravity.google/docs/cli/headless): `init`, `step_update` with `text_delta`, and a final
-`result` carrying status, response, error and usage.
+Events: `init`, `step_update` with `text_delta`, and a final `result` carrying status, response, error and usage.
+agy 1.2 emits them nested as {"event": name, name: {...}}; the docs show a flat {"type": name, ...}. Both are accepted.
 """
 import json
 import os
@@ -21,7 +21,10 @@ class AgyParser(Parser):
         self.result: dict | None = None
 
     def feed(self, e):
-        t = e.get('type')
+        # agy 1.2 nests payloads ({"event": "step_update", "step_update": {...}}); the docs show flat {"type": ...}.
+        t = e.get('type') or e.get('event')
+        if isinstance(e.get(t), dict):
+            e = e[t]
         if t == 'step_update' and e.get('text_delta'):
             self.parts.append(e['text_delta'])
             return e['text_delta']

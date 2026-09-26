@@ -233,3 +233,18 @@ def test_choose_prefers_subscriptions(monkeypatch, tmp_path):
 def test_parse_json_tolerates_fences_and_prose():
     assert parse_json('```json\n{"a": 1}\n```') == {'a': 1}
     assert parse_json('Here you go: {"subtasks": ["x"]} done') == {'subtasks': ['x']}
+
+
+async def test_agy_real_nested_event_shape(tmp_path):
+    # Captured from agy 1.2.11: events are {"event": name, name: {...}}, not the flat shape in the docs.
+    path = fake(tmp_path, 'agy', '''
+        out({'event': 'init', 'conversation_id': 'c', 'init': {'cwd': '.', 'tools': []}})
+        out({'event': 'step_update', 'step_update': {'step_index': 0, 'state': 'DONE', 'step_type': 'user_input'}})
+        out({'event': 'step_update', 'step_update': {'step_index': 1, 'state': 'ACTIVE', 'step_type': 'agent_response', 'text_delta': 'pong'}})
+        out({'event': 'step_update', 'step_update': {'step_index': 1, 'state': 'DONE', 'step_type': 'agent_response', 'text_delta': '\\n'}})
+        out({'event': 'result', 'result': {'status': 'SUCCESS', 'response': 'pong\\n', 'num_turns': 1,
+             'usage': {'input_tokens': 12241, 'output_tokens': 30}}})
+    ''')
+    chunks = []
+    r = await AgyEngine(path).stream(system='s', prompt='p', emit_delta=chunks.append)
+    assert r.text == 'pong' and chunks == ['pong', '\n'] and (r.input_tokens, r.output_tokens) == (12241, 30)
