@@ -78,6 +78,17 @@ export function uploadFile(file: File) {
   return request<FileInfo>('POST', '/api/files', fd)
 }
 export const listFiles = () => get<{ files: FileInfo[] }>('/api/files')
+
+// ---------- sandbox (docs/PLAN-sandbox.md): files live in server memory only ----------
+export function uploadSandboxFile(sandboxId: string, file: File) {
+  const fd = new FormData()
+  fd.append('file', file, file.name)
+  return request<FileInfo>('POST', `/api/sandbox/${enc(sandboxId)}/files`, fd)
+}
+export const deleteSandboxFile = (sandboxId: string, fid: string) => del<{ ok: true }>(`/api/sandbox/${enc(sandboxId)}/files/${enc(fid)}`)
+/** Save sandbox turns as a normal chat (on request only). Default: the whole sandbox thread. */
+export const keepSandbox = (sandboxId: string, qids?: number[]) =>
+  post<{ session_id: string; qids: number[] }>(`/api/sandbox/${enc(sandboxId)}/keep`, qids ? { qids } : {})
 export const deleteFile = (id: string) => del<{ ok: true }>(`/api/files/${enc(id)}`)
 
 // ---------- compare ----------

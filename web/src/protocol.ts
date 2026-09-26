@@ -107,7 +107,8 @@ export interface RoutedEvent extends RoutedFields { type: 'routed'; qid: number;
 export interface DeltaEvent { type: 'delta'; qid: number; tid: string; text: string } // tid may be "merge"
 export interface AnsweredEvent extends AnsweredFields { type: 'answered'; qid: number; tid: string }
 export interface MergedEvent { type: 'merged'; qid: number; answer: string; engine: MergeEngine; ms: number }
-export interface DoneEvent { type: 'done'; qid: number; total_ms: number; stats: Stats; status?: RunStatus }
+export interface RunTokens { jev_in: number; llm_in: number; llm_out: number }
+export interface DoneEvent { type: 'done'; qid: number; total_ms: number; stats: Stats; status?: RunStatus; tokens?: RunTokens }
 export interface CancelledEvent { type: 'cancelled'; qid: number }
 export interface EvalProgressEvent { type: 'eval_progress'; eval_id: string; done: number; total: number; passed: number }
 export interface EvalDoneEvent { type: 'eval_done'; eval_id: string; passed: number; total: number; accuracy: number; status?: 'done' | 'cancelled' | 'error' }
@@ -122,7 +123,12 @@ export type ConfigBody = Omit<HelloEvent, 'type' | 'history'>
 
 // ---------- REST payloads (§1) ----------
 
-export interface AskBody { query: string; session_id?: string; engine?: string; files?: string[]; source?: 'you' | 'chat' | 'compare' | 'eval' | 'sandbox'; sandbox_id?: string }
+export interface DraftAgent { name: string; description: string; prompt: string; web?: boolean }
+export interface AskBody {
+  query: string; session_id?: string; engine?: string; files?: string[]; source?: 'you' | 'chat' | 'compare' | 'eval' | 'sandbox'
+  // sandbox only (docs/PLAN-sandbox.md)
+  sandbox_id?: string; draft_agent?: DraftAgent; replaces?: number; remember?: boolean
+}
 export interface AskResponse { ok: true; qid: number; session_id: string | null; sandbox_id?: string }
 
 export interface SessionSummary { id: string; title: string; created: number; updated: number; turns: number }

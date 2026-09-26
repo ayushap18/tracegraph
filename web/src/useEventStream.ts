@@ -35,6 +35,7 @@ export interface Run {
   session_id: string | null
   compare_id: string | null
   files: string[]
+  tokens?: import('./protocol').RunTokens // from `done`; absent for runs loaded from history
   marks: Marks // client receipt times (performance.now ms); empty for runs loaded from history
 }
 
@@ -185,7 +186,7 @@ function apply(s: Store, e: ServerEvent, rx: number): Store {
     case 'done':
       return {
         ...s, stats: e.stats ?? s.stats, runs: withRun(s.runs, e.qid, r => ({
-          ...r, done: true, total_ms: e.total_ms, marks: { ...r.marks, done: rx },
+          ...r, done: true, total_ms: e.total_ms, marks: { ...r.marks, done: rx }, tokens: e.tokens ?? r.tokens,
           // `cancelled` arrives before `done`; keep it if done carries no status (older servers).
           status: e.status ?? (r.status === 'running' ? (r.error ? 'error' : 'done') : r.status),
         })),
