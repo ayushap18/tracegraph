@@ -2,7 +2,7 @@ import asyncio
 
 from jevrouter.agents import AgentResult
 from jevrouter.pipeline import Router
-from tests.fakes import FakeAnthropic, FakeJev
+from tests.fakes import FakeAnthropic, FakeJev, eng
 
 FIELDS = {
     'query': {'type', 'qid', 'text', 'source'},
@@ -165,26 +165,27 @@ def test_clarify_reason_names_the_condition_that_fired():
     assert decide(NS(choice='chat', confidence=0.2), 0.0, 0.9) == ('clarify', 'low confidence (20%)')
 
 
-async def test_pipeline_with_claude():
+async def test_pipeline_with_llm_engine():
     # planner, research agent (streamed), merger all from Claude; weather stays keyless
     claude = FakeAnthropic(['{"subtasks": ["weather in Paris", "latest news on Mars rovers"]}'],
                            ['Perseverance ', 'found ', 'rocks.'], ['Paris is mild; ', 'Perseverance found rocks.'])
     from jevrouter import agents
-    registry = agents.build(None, claude)
+    engine = eng(claude)
+    registry = agents.build(None, engine)
     registry['weather'] = fake_registry()['weather']
-    router = Router(FakeJev(route_for=by_keyword), claude=claude, registry=registry)
+    router = Router(FakeJev(route_for=by_keyword), engine=engine, registry=registry)
     assert 'research' in router.agents and 'research' in router.stats['by_agent']
     events = await run(router, 'weather in Paris and latest news on Mars rovers')
     check_fields(events)
-    assert events[1]['planner'] == 'claude' and events[1]['multi'] is None
+    assert events[1]['planner'] == 'anthropic' and events[1]['multi'] is None
     routed = {e['tid']: e for e in events if e['type'] == 'routed'}
     assert routed['1.2']['agent'] == 'research' and 'research' in routed['1.2']['probabilities']
     ans = {e['tid']: e for e in events if e['type'] == 'answered'}
-    assert ans['1.2']['engine'] == 'claude' and ans['1.2']['answer'] == 'Perseverance found rocks.'
+    assert ans['1.2']['engine'] == 'anthropic' and ans['1.2']['answer'] == 'Perseverance found rocks.'
     assert [e['text'] for e in events if e['type'] == 'delta' and e['tid'] == '1.2'] == ['Perseverance ', 'found ', 'rocks.']
     assert [e['text'] for e in events if e['type'] == 'delta' and e['tid'] == 'merge'] == ['Paris is mild; ', 'Perseverance found rocks.']
     merged = events[-2]
-    assert merged['engine'] == 'claude' and merged['answer'] == 'Paris is mild; Perseverance found rocks.'
+    assert merged['engine'] == 'anthropic' and merged['answer'] == 'Paris is mild; Perseverance found rocks.'
     s = events[-1]['stats']
     assert s['claude_input_tokens'] == 30 and s['claude_output_tokens'] == 1 + 3 + 2
     assert claude.calls[1]['tools'][0]['type'] == 'web_search_20260209' and claude.calls[1]['output_config']['effort'] == 'medium'

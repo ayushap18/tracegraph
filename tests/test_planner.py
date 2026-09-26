@@ -3,7 +3,7 @@ import json
 import pytest
 
 from jevrouter.planner import candidate_split, plan
-from tests.fakes import FakeAnthropic, FakeJev, api_errors
+from tests.fakes import FakeAnthropic, FakeJev, api_errors, eng
 
 
 @pytest.mark.parametrize('q,parts', [
@@ -53,8 +53,8 @@ async def test_heuristic_survives_jev_failure():
 async def test_claude_planner():
     claude = FakeAnthropic(['{"subtasks": ["weather in Paris", ', '"convert 100 EUR to INR"]}'])
     jev = FakeJev()
-    p = await plan('weather in Paris and convert 100 EUR to INR', jev, claude)
-    assert p['planner'] == 'claude' and p['subtasks'] == ['weather in Paris', 'convert 100 EUR to INR'] and p['multi'] is None
+    p = await plan('weather in Paris and convert 100 EUR to INR', jev, eng(claude))
+    assert p['planner'] == 'anthropic' and p['subtasks'] == ['weather in Paris', 'convert 100 EUR to INR'] and p['multi'] is None
     assert p['claude_in'] == 10 and not jev.calls
     kw = claude.calls[0]
     assert kw['model'] == 'claude-opus-5' and kw['output_config']['effort'] == 'low'
@@ -64,12 +64,31 @@ async def test_claude_planner():
 
 async def test_claude_planner_caps_at_four():
     claude = FakeAnthropic([json.dumps({'subtasks': [f'task {i}' for i in range(6)] + ['  ']})])
-    p = await plan('x', FakeJev(), claude)
+    p = await plan('do a, b, c, d, e and f', FakeJev(), eng(claude))
     assert p['subtasks'] == ['task 0', 'task 1', 'task 2', 'task 3']
 
 
 @pytest.mark.parametrize('bad', ['rate', 'status', 'conn', 'json', 'refusal', 'empty'])
 async def test_claude_planner_falls_back(bad):
     item = {'json': ['not json'], 'refusal': ('refusal', ['no']), 'empty': ['{"subtasks": []}']}.get(bad) or api_errors()[bad]
-    p = await plan('weather in Paris and convert 100 EUR to INR', FakeJev(multi=0.9), FakeAnthropic(item))
+    p = await plan('weather in Paris and convert 100 EUR to INR', FakeJev(multi=0.9), eng(FakeAnthropic(item)))
     assert p['planner'] == 'heuristic' and len(p['subtasks']) == 2
+
+
+@pytest.mark.parametrize('query, llm', [
+    ('How do I kill a Python process?', False), ('Who was Ada Lovelace?', False), ('18% of 2450', False),
+    ('Convert 50 EUR to INR and then what time is it there', True), ("Who was Marks and Spencer's founder?", True),
+    ('weather in Paris; 18% of 2450', True), ('What time is it there?', True),
+])
+def test_worth_llm_plan(query, llm):
+    from jevrouter.planner import worth_llm_plan
+    assert worth_llm_plan(query) is llm
+
+
+async def test_single_clause_skips_llm_planner():
+    from tests.fakes import FakeEngine
+    engine = FakeEngine()
+    calls = []
+    engine.stream = lambda **kw: calls.append(kw)  # would blow up if awaited
+    p = await plan('Who was Ada Lovelace?', FakeJev(), engine)
+    assert p['planner'] == 'heuristic' and p['subtasks'] == ['Who was Ada Lovelace?'] and not calls

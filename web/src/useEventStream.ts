@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import {
   MERGE_TID, emptyStats,
-  type AnsweredFields, type ControlState, type HistoryRecord, type MergeEngine, type Planner, type Prices,
+  type AnsweredFields, type ControlState, type EngineInfo, type HistoryRecord, type MergeEngine, type Planner, type Prices,
   type RoutedFields, type ServerEvent, type Source, type Stats,
 } from './protocol'
 
@@ -48,6 +48,8 @@ export interface Store {
   agents: Record<string, string>
   guards: string[]
   claude: boolean
+  engine: EngineInfo | null
+  engines: EngineInfo[]
   state: ControlState
   stats: Stats
   samples: string[]
@@ -62,7 +64,7 @@ type Action =
   | { kind: 'conn'; connected: boolean }
 
 const initial: Store = {
-  connected: false, ready: false, agents: {}, guards: [], claude: false,
+  connected: false, ready: false, agents: {}, guards: [], claude: false, engine: null, engines: [],
   state: { autopilot: false, interval: 3 }, stats: emptyStats(), samples: [],
   prices: { jev_in: 0.042, claude_in: 5, claude_out: 25 }, runs: [], lastError: null, rev: 0,
 }
@@ -123,11 +125,14 @@ function apply(s: Store, e: ServerEvent, rx: number): Store {
     case 'hello': {
       const runs = (e.history ?? []).map(fromRecord).sort((a, b) => a.qid - b.qid).slice(-MAX_RUNS)
       return {
-        ...s, ready: true, agents: e.agents ?? {}, guards: e.guards ?? [], claude: !!e.claude, state: e.state,
+        ...s, ready: true, agents: e.agents ?? {}, guards: e.guards ?? [], claude: !!e.claude, engine: e.engine ?? null, engines: e.engines ?? [], state: e.state,
         stats: e.stats ?? emptyStats(), samples: e.samples ?? [], prices: e.prices ?? s.prices, runs, lastError: null,
       }
     }
     case 'state': return { ...s, state: e.state }
+    case 'config':
+      return { ...s, agents: e.agents ?? s.agents, guards: e.guards ?? s.guards, claude: !!e.claude, engine: e.engine ?? null,
+        engines: e.engines ?? s.engines, prices: e.prices ?? s.prices, samples: e.samples ?? s.samples }
     case 'query':
       return { ...s, runs: withRun(s.runs, e.qid, r => ({ ...r, text: e.text, source: e.source, marks: { ...r.marks, query: rx } })) }
     case 'plan':

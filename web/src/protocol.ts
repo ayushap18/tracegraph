@@ -1,9 +1,12 @@
 // Mirrors the SSE protocol table in PLAN.md. Server -> browser, `data: <json>\n\n` on GET /events.
 
 export type Source = 'you' | 'autopilot'
-export type Planner = 'claude' | 'heuristic'
-export type Engine = 'claude' | 'keyless'
-export type MergeEngine = 'claude' | 'concat' | 'single'
+// Planner, answer and merge engines carry the LLM engine's name (claude-code, codex, agy, anthropic) or a built-in mode.
+export type Planner = string // engine name | 'heuristic'
+export type Engine = string // engine name | 'keyless'
+export type MergeEngine = string // engine name | 'concat' | 'single'
+
+export interface EngineInfo { name: string; label: string; billing: 'api' | 'subscription'; web: boolean; available: boolean; why: string }
 
 export interface ControlState { autopilot: boolean; interval: number }
 
@@ -60,7 +63,9 @@ export interface HelloEvent {
   type: 'hello'
   agents: Record<string, string> // only the agents active now
   guards: string[]
-  claude: boolean
+  claude: boolean // an LLM engine is active (kept for older clients)
+  engine?: EngineInfo | null
+  engines?: EngineInfo[]
   state: ControlState
   stats: Stats
   history: HistoryRecord[]
@@ -68,6 +73,7 @@ export interface HelloEvent {
   prices: Prices
 }
 export interface StateEvent { type: 'state'; state: ControlState }
+export interface ConfigEvent extends Omit<HelloEvent, 'type' | 'history'> { type: 'config' } // engine switched
 export interface QueryEvent { type: 'query'; qid: number; text: string; source: Source }
 export interface PlanEvent { type: 'plan'; qid: number; planner: Planner; subtasks: Subtask[]; multi: number | null; ms: number }
 export interface RoutedEvent extends RoutedFields { type: 'routed'; qid: number; tid: string }
@@ -78,7 +84,7 @@ export interface DoneEvent { type: 'done'; qid: number; total_ms: number; stats:
 export interface ErrorEvent { type: 'error'; qid: number | null; tid: string | null; message: string }
 
 export type ServerEvent =
-  | HelloEvent | StateEvent | QueryEvent | PlanEvent | RoutedEvent
+  | HelloEvent | StateEvent | ConfigEvent | QueryEvent | PlanEvent | RoutedEvent
   | DeltaEvent | AnsweredEvent | MergedEvent | DoneEvent | ErrorEvent
 
 export type ConfigBody = Omit<HelloEvent, 'type' | 'history'>

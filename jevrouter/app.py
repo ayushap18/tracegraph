@@ -6,7 +6,8 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
-from .config import DIST, LEGACY_PAGE, claude_enabled
+from .config import DIST, LEGACY_PAGE
+from .engines import catalog, choose
 from .events import sse
 from .pipeline import Router
 
@@ -41,8 +42,22 @@ async def control(request):
             router.state['interval'] = max(1.0, min(15.0, float(body['interval'])))
     except (TypeError, ValueError):
         return web.json_response({'error': 'interval must be a number'}, status=400)
+    if 'engine' in body:
+        name = str(body['engine'] or 'none')
+        if name == 'none':
+            router.use_engine(None)
+        else:
+            engine = router.engines.get(name)
+            if engine is None:
+                return web.json_response({'error': f'unknown engine {name!r}'}, status=400)
+            ok, why = engine.available()
+            if not ok:
+                return web.json_response({'error': f'{engine.label} is not available: {why}'}, status=409)
+            router.use_engine(engine)
+        # Agents, prices and the engine badge all change, so every browser gets the new config (older clients ignore it).
+        router.bus.emit('config', **router.config())
     router.bus.emit('state', state=router.state)
-    return web.json_response(router.state)
+    return web.json_response({**router.state, 'engine': router.engine.name if router.engine else None})
 
 
 async def config(request):
@@ -90,7 +105,7 @@ async def static(request):
 
 
 def create_app(router_factory=None) -> web.Application:
-    """router_factory(http) -> Router; the default builds real Jev and (if keyed) Claude clients."""
+    """router_factory(http) -> Router; the default builds the real Jev client and picks an LLM engine (TG_ENGINE)."""
     app = web.Application()
 
     async def startup(app):
@@ -99,11 +114,8 @@ def create_app(router_factory=None) -> web.Application:
             app[ROUTER] = router_factory(app[HTTP])
         else:
             from typesafe_sdk import AsyncTypeSafeClient
-            claude = None
-            if claude_enabled():
-                import anthropic
-                claude = anthropic.AsyncAnthropic()
-            app[ROUTER] = Router(AsyncTypeSafeClient(), app[HTTP], claude)
+            engines = catalog()
+            app[ROUTER] = Router(AsyncTypeSafeClient(), app[HTTP], choose(engines), engines=engines)
         app[AUTOPILOT] = asyncio.create_task(app[ROUTER].autopilot())
 
     async def cleanup(app):
@@ -112,7 +124,7 @@ def create_app(router_factory=None) -> web.Application:
         for t in list(router.tasks):
             t.cancel()
         await app[HTTP].close()
-        for c in (router.jev, router.claude):
+        for c in (router.jev, *router.engines.values()):
             close = getattr(c, 'aclose', None) or getattr(c, 'close', None)
             if close:
                 try:

@@ -15,7 +15,7 @@ Routing is the part of an agent system that is hardest to see. TraceGraph makes 
 - **One router call per subtask.** Jev's `system_one` answers four questions at once: *which agent*, *how urgent*, *is it unsafe*, and *is it clear enough*. Guard rules turn those answers into `blocked` or `clarify` outcomes.
 - **Multi-agent chains.** "Weather in Paris **and** convert 100 EUR to INR" becomes two subtasks, routed and run in parallel, then merged into one answer.
 - **Keyless by default.** The built-in agents call free public APIs: math (a safe evaluator), weather (Open-Meteo), time zones, currency (Frankfurter), knowledge (DuckDuckGo/Wikipedia abstracts), code (Stack Overflow), and chat.
-- **Optional LLM agents.** Set `ANTHROPIC_API_KEY` and the planner, the code/knowledge/chat agents, a web-search `research` agent and the merger switch to a hosted LLM with streamed answers. If a call fails, the agent falls back to its keyless version.
+- **Bring your own LLM subscription.** The planner, the code/knowledge/chat agents, a web-search `research` agent and the merger can run on **Claude Code**, **Codex** or **Antigravity** (your existing plan, no API key), or on the Anthropic API. You can switch engines live from the header. If a call fails, the agent falls back to its keyless version.
 - **Live trace graph.** A fixed five-column layout (Query → Subtasks → Route → Agents → Response) with:
   - node cards showing live metrics and status
   - edges whose width follows Jev's probability
@@ -84,10 +84,35 @@ Hot-reload frontend development: run the server, then `cd web && npm run dev`. V
 | Variable | Required | Purpose |
 |---|---|---|
 | `TYPESAFE_API_KEY` | yes | Jev routing model |
-| `ANTHROPIC_API_KEY` | no | LLM planner, agents and merger |
+| `TG_ENGINE` | no | `auto` (default), `claude-code`, `codex`, `agy`, `anthropic` or `none` |
+| `ANTHROPIC_API_KEY` | no | Enables the `anthropic` engine (pay per token) |
+| `TG_ENGINE_TIMEOUT` | no | Seconds before an engine call is killed, default `180` |
+| `TG_ENGINE_CONCURRENCY` | no | Parallel calls per engine, default `2` (protects plan rate limits) |
+| `TG_CLAUDE_CODE_MODEL` / `TG_CODEX_MODEL` / `TG_AGY_MODEL` | no | Pin a model for that CLI |
 | `PORT` | no | Server port, default `8777` |
 
 Keys are read from the environment or a `.env` file next to `server.py`. `.env` is git-ignored.
+
+### LLM engines: use your subscription
+
+![Engine picker: Claude Code and Codex available on your plan, Antigravity and the API shown with what's missing](docs/screenshots/engine-picker.jpg)
+
+TraceGraph runs the official CLI of each tool as a headless child process on **your own login**. Usage counts against that plan, just as if you ran the CLI yourself. TraceGraph never reads or copies their credentials.
+
+| Engine | Plan | Setup | Headless call |
+|---|---|---|---|
+| **Claude Code** | Claude Pro / Max | install [Claude Code](https://docs.claude.com/en/docs/claude-code), run `claude` once to sign in | `claude -p --output-format stream-json` |
+| **Codex** | ChatGPT Plus / Pro | install the [Codex CLI](https://github.com/openai/codex), run `codex login` | `codex exec --json` |
+| **Antigravity** | Google account | `curl -fsSL https://antigravity.google/cli/install.sh \| bash`, run `agy` once to sign in | `agy -p --output-format stream-json` ([headless docs](https://antigravity.google/docs/cli/headless/)) |
+| **Anthropic API** | pay per token | set `ANTHROPIC_API_KEY` | Anthropic SDK |
+
+With `TG_ENGINE=auto`, the first installed CLI wins, in the order Claude Code → Codex → Antigravity → API key. With none of them, TraceGraph runs keyless. The server prints what it found at startup.
+
+Each call is isolated:
+- It runs in an empty scratch directory with a scrubbed environment: the Jev key is never passed on, and API keys are removed so the CLI stays on your plan.
+- It has a deadline and is killed with its whole process group if it overruns or you cancel.
+- Calls per engine are capped to respect plan rate limits.
+- Claude Code runs without tools, MCP servers or settings unless a call needs web search. That keeps each call to a few hundred tokens instead of about 100K.
 
 ### Keyboard shortcuts
 
@@ -104,7 +129,8 @@ jevrouter/
   pipeline.py             plan → route → run → merge, event emission
   merger.py               single / concat / LLM merge
   agents/tools.py         keyless agents
-  agents/claude.py        LLM agents with streaming and fallback
+  agents/llm.py           LLM agents (engine-agnostic) with streaming and fallback
+  engines/                claude-code, codex, agy (CLI subprocess runner) and anthropic API engines
   app.py                  aiohttp routes, SSE, static files
 tests/                    pytest suite (parsers, planner, pipeline, LLM paths with fakes, HTTP)
 web/                      React + TypeScript + D3 dashboard (Vite)
@@ -115,12 +141,12 @@ PLAN.md                   design notes and the SSE protocol
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/pytest -q           # 85 tests
+.venv/bin/pytest -q           # 111 tests
 cd web && npm run build       # strict TypeScript check + production build
 ```
 
-The LLM code paths are tested against a fake client, so the suite needs no API keys and makes no network calls.
+The LLM code paths are tested against a fake API client and fake `claude`/`codex`/`agy` binaries that emit each CLI's real event format, so the suite needs no logins, keys or network.
 
 ## Tech stack
 
-Python · aiohttp · TypeSafe Jev · Anthropic SDK (optional) · React 18 · TypeScript · D3 v7 · Lucide icons · Vite · Server-Sent Events · pytest
+Python · aiohttp · TypeSafe Jev · Claude Code / Codex / Antigravity CLIs or Anthropic SDK (optional) · React 18 · TypeScript · D3 v7 · Lucide icons · Vite · Server-Sent Events · pytest

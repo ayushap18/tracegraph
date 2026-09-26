@@ -20,22 +20,35 @@ def ms_since(t: float) -> int:
 
 
 class Router:
-    def __init__(self, jev, http=None, claude=None, bus: Broadcaster | None = None, registry: dict | None = None):
-        self.jev, self.http, self.claude = jev, http, claude
+    def __init__(self, jev, http=None, engine=None, bus: Broadcaster | None = None, registry: dict | None = None,
+                 engines: dict | None = None):
+        self.jev, self.http = jev, http
         self.bus = bus or Broadcaster()
-        self.agents = {**AGENTS, **(RESEARCH if claude is not None else {})}
-        self.registry = registry if registry is not None else agent_registry.build(http, claude)
+        self.engines = engines or ({engine.name: engine} if engine is not None else {})
+        self.fixed_registry = registry  # tests pin agents; real runs rebuild the registry when the engine changes
+        self.use_engine(engine)
         self.ids = itertools.count(1)
         self.history: deque = deque(maxlen=HISTORY)
         self.inflight: dict[int, dict] = {}  # qid -> partial record, so a browser joining mid-run can replay it
         self.state = {'autopilot': False, 'interval': 3.0}
         self.stats = {'queries': 0, 'subtasks': 0, 'errors': 0, 'jev_input_tokens': 0, 'claude_input_tokens': 0,
-                      'claude_output_tokens': 0, 'by_agent': {a: 0 for a in [*self.agents, *GUARDS]}}
+                      'claude_output_tokens': 0, 'by_agent': {a: 0 for a in [*AGENTS, *RESEARCH, *GUARDS]}}
         self.tasks: set[asyncio.Task] = set()
 
+    def use_engine(self, engine):
+        """Switch the LLM backend (or None for keyless). Runs already in flight keep the engine they started with."""
+        self.engine = engine
+        web = engine is not None and engine.supports_web
+        self.agents = {**AGENTS, **(RESEARCH if web else {})}
+        self.registry = self.fixed_registry if self.fixed_registry is not None else agent_registry.build(self.http, engine)
+
     def config(self) -> dict:
-        return {'agents': self.agents, 'guards': GUARDS, 'claude': self.claude is not None, 'state': self.state,
-                'stats': self.stats, 'samples': SAMPLES, 'prices': PRICES}
+        e = self.engine
+        # Subscription engines cost nothing per call here; the plan's own limits apply instead.
+        prices = PRICES if e is None or e.billing == 'api' else {**PRICES, 'claude_in': 0.0, 'claude_out': 0.0}
+        return {'agents': self.agents, 'guards': GUARDS, 'claude': e is not None, 'state': self.state,
+                'stats': self.stats, 'samples': SAMPLES, 'prices': prices,
+                'engine': e.info() if e is not None else None, 'engines': [x.info() for x in self.engines.values()]}
 
     def hello(self) -> dict:
         # history fills in completion order; replay wants qid order, with in-flight runs included
@@ -76,7 +89,8 @@ class Router:
         emit('query', qid=qid, text=query, source=source)
         self.stats['queries'] += 1
 
-        p = await plan(query, self.jev, self.claude)
+        engine, registry = self.engine, self.registry  # pinned for this run even if the user switches mid-way
+        p = await plan(query, self.jev, engine)
         self.stats['jev_input_tokens'] += p['jev_tokens']
         self.claude_usage(p)
         subtasks = [{'tid': f'{qid}.{n}', 'text': s} for n, s in enumerate(p['subtasks'], 1)]
@@ -114,7 +128,7 @@ class Router:
                     out = agent_registry.clarify(list(r['probabilities'].items()))
                     delta(out.answer)
                 else:
-                    out = await self.registry[agent](st['text'], delta)
+                    out = await registry[agent](st['text'], delta)
             except Exception as e:
                 out = agent_registry.AgentResult(f'{agent} agent failed: {str(e)[:160]}', False)
                 delta(out.answer)
@@ -131,7 +145,7 @@ class Router:
         t2 = time.perf_counter()
         if answers:
             m = await merge(query, [(a['agent'], a['answer']) for a in answers],
-                            lambda text: text and emit('delta', qid=qid, tid='merge', text=text), self.claude)
+                            lambda text: text and emit('delta', qid=qid, tid='merge', text=text), engine)
             self.claude_usage(m)
             rec['merged'] = {'answer': m['answer'], 'engine': m['engine']}
             emit('merged', qid=qid, **rec['merged'], ms=ms_since(t2))

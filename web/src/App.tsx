@@ -8,6 +8,7 @@ import { ConfidenceChart, LatencyChart, LATENCY_COLORS, type ConfPoint, type Lat
 import { AskBox, ChartPanel, Inspector, Kpis, LatestRun, RoutingLog } from './components/Panels'
 import { Donut, Heatmap, Waterfall } from './components/Viz'
 import { Icon, Logo, type UiIconName } from './icons'
+import { EnginePicker } from './components/EnginePicker'
 
 type Theme = 'auto' | 'light' | 'dark'
 const THEMES: Theme[] = ['auto', 'dark', 'light']
@@ -165,9 +166,7 @@ export default function App() {
           <span className="ver">v2.2</span>
         </div>
         <span className="conn">{store.connected ? (flying ? `live · ${flying} in flight` : 'live') : store.ready ? 'server offline, retrying…' : 'connecting…'}</span>
-        <span className={'tag' + (store.claude ? ' ok' : '')} title={store.claude ? 'Claude writes and merges answers' : 'Add ANTHROPIC_API_KEY to .env to enable Claude agents'}>
-          {store.claude ? 'Claude on' : 'keyless'}
-        </span>
+        <EnginePicker engine={store.engine} engines={store.engines} />
         {state.autopilot && <span className="tag warn">autopilot · {state.interval}s</span>}
         <div className="head-actions">
           <span className="keys" aria-hidden="true"><kbd>/</kbd> ask <kbd>a</kbd> autopilot <kbd>←</kbd><kbd>→</kbd> runs <kbd>f</kbd> fullscreen <kbd>t</kbd> theme</span>
@@ -207,7 +206,7 @@ export default function App() {
           <p className="graph-hint muted small">Hover a node to trace its connections · click for details · drag to pan · ⌘/Ctrl + scroll to zoom · ← → browse runs</p>
         </section>
         <div className="grid-even">
-          <LatestRun run={shown} claude={store.claude} />
+          <LatestRun run={shown} engine={store.engine} />
           <section className="panel">
             <h2><span className="h-title"><Icon name="timeline" size={14} strokeWidth={2} />Pipeline timeline</span> <span>{shown ? `#${shown.qid} · ${shown.done ? 'finished' : 'running'}` : ''}</span></h2>
             <Waterfall run={shown} />

@@ -5,9 +5,6 @@ ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / 'web' / 'dist'
 LEGACY_PAGE = ROOT / 'index.html'
 
-MODEL = 'claude-opus-5'
-BETAS = ['server-side-fallback-2026-07-01']
-
 # The route choice Jev makes. Descriptions are what Jev reads, so they say when each agent applies.
 AGENTS = {
     'math': 'Arithmetic, percentages, or evaluating a numeric expression',
@@ -18,7 +15,7 @@ AGENTS = {
     'code': 'Programming, software errors, or how to do something in code',
     'chat': 'Greetings, small talk, or questions about the assistant itself',
 }
-# Only offered to Jev when Claude can run it (web search is a Claude server tool).
+# Only offered to Jev when the active engine can search the web.
 RESEARCH = {'research': 'Recent news, current events, or anything that needs searching the web for up-to-date information'}
 # Guard outcomes that are decided from Jev's other answers rather than picked by the route question.
 GUARDS = ['clarify', 'blocked']
@@ -56,7 +53,3 @@ def load_env(path: Path = ROOT / '.env'):
             k, _, v = line.partition('=')
             if k.strip() and not k.startswith('#'):
                 os.environ.setdefault(k.strip(), v.strip().strip('"\''))
-
-
-def claude_enabled() -> bool:
-    return bool(os.environ.get('ANTHROPIC_API_KEY'))

@@ -115,7 +115,9 @@ export function Kpis({ store }: { store: Store }) {
       <Kpi icon="activity" label="end-to-end" value={done.length ? done.reduce((s, r) => s + (r.total_ms ?? 0), 0) / done.length : null} fmt={v => int(v) + ' ms'}
         spark={done.map(r => r.total_ms ?? 0)} color="var(--warn)" min={0} />
       <Kpi icon="spend" label="spend" value={c.jev + c.claude} fmt={money}
-        note={store.claude ? `Jev ${money(c.jev)} · Claude ${money(c.claude)}` : `Jev only · ${store.stats.jev_input_tokens.toLocaleString()} tokens`} />
+        note={!store.engine ? `Jev only · ${store.stats.jev_input_tokens.toLocaleString()} tokens`
+          : store.engine.billing === 'subscription' ? `Jev ${money(c.jev)} · ${store.engine.label} on subscription`
+          : `Jev ${money(c.jev)} · ${store.engine.label} ${money(c.claude)}`} />
     </section>
   )
 }
@@ -152,11 +154,11 @@ function TaskCard({ task }: { task: Task }) {
   )
 }
 
-export function LatestRun({ run, claude }: { run: Run | undefined; claude: boolean }) {
+export function LatestRun({ run, engine }: { run: Run | undefined; engine: Store['engine'] }) {
   if (!run) return (
     <section className="panel latest">
       <h2><span className="h-title"><Icon name="activity" size={14} strokeWidth={2} />Latest run</span></h2>
-      <p className="muted">Ask something above, or switch on Autopilot to stream sample queries. {claude ? 'Claude is on.' : 'Running keyless (no Claude key).'}</p>
+      <p className="muted">Ask something above, or switch on Autopilot to stream sample queries. {engine ? `LLM engine: ${engine.label}.` : 'Running keyless (no LLM engine).'}</p>
     </section>
   )
   const multi = run.order.length > 1
@@ -219,9 +221,9 @@ const HUB_ICON: Record<string, UiIconName> = { query: 'query', planner: 'planner
 
 const HUB_INFO: Record<string, string> = {
   query: 'Incoming queries, from you or autopilot.',
-  planner: 'Splits a query into up to 4 self-contained subtasks (Claude when available, else a heuristic plus Jev\'s "multi" check).',
+  planner: 'Splits a query into up to 4 self-contained subtasks (the LLM engine when one is active, else a heuristic plus Jev\'s "multi" check).',
   jev: 'Jev routes every subtask with one system_one call: route choice, urgency, unsafe and clear.',
-  merger: 'Combines subtask answers: single passes through, concat joins, Claude writes one answer.',
+  merger: 'Combines subtask answers: single passes through, concat joins, the LLM engine writes one answer.',
   answer: 'The final answer streamed back to the page.',
 }
 
@@ -259,7 +261,7 @@ export function Inspector({ id, store, onClose }: { id: string; store: Store; on
       <div className="meta">
         {id === 'jev' && <><span>avg {ms(avg(l => l.jev))}</span><span>{store.stats.jev_input_tokens.toLocaleString()} input tokens</span>
           {last && last.order[0] && last.tasks[last.order[0]]?.routed && <span>{last.tasks[last.order[0]].routed!.model}</span>}</>}
-        {id === 'planner' && <><span>{store.claude ? 'Claude' : 'heuristic'}</span>{last?.plan && <span>last: {last.plan.planner}, {last.order.length} subtasks</span>}</>}
+        {id === 'planner' && <><span>{store.engine ? store.engine.label : 'heuristic'}</span>{last?.plan && <span>last: {last.plan.planner}, {last.order.length} subtasks</span>}</>}
         {id === 'merger' && <><span>avg {ms(avg(l => l.merge))}</span>{last?.merged && <span>last: {last.merged.engine}</span>}</>}
         {(id === 'query' || id === 'answer') && <><span>{store.stats.queries} queries</span><span>{store.stats.errors} errors</span></>}
       </div>

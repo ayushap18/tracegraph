@@ -86,3 +86,30 @@ def api_errors():
         'status': anthropic.InternalServerError('boom', response=httpx.Response(500, request=req), body=None),
         'conn': anthropic.APIConnectionError(request=req),
     }
+
+
+def eng(fake):
+    """Wraps a FakeAnthropic client in the real Anthropic engine, so tests exercise the engine code too."""
+    from jevrouter.engines.anthropic_api import AnthropicEngine
+    return AnthropicEngine(client=fake)
+
+
+class FakeEngine:
+    """A minimal engine for router/HTTP tests: echoes the prompt, optionally unavailable."""
+
+    def __init__(self, name='claude-code', label='Claude Code', ok=True, web=True, billing='subscription'):
+        self.name, self.label, self.ok, self.supports_web, self.billing = name, label, ok, web, billing
+
+    def available(self):
+        return (True, '') if self.ok else (False, 'not installed')
+
+    def info(self):
+        return {'name': self.name, 'label': self.label, 'billing': self.billing, 'web': self.supports_web,
+                'available': self.ok, 'why': '' if self.ok else 'not installed'}
+
+    async def stream(self, *, system, prompt, effort='medium', emit_delta=None, max_tokens=2048, web=False, schema=None):
+        from jevrouter.engines import Reply
+        text = '{"subtasks": ["%s"]}' % prompt if schema else f'{self.name}: {prompt}'
+        if emit_delta:
+            emit_delta(text)
+        return Reply(text, 5, 3)

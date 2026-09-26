@@ -74,3 +74,11 @@ async def test_chat_and_clarify():
     assert (await agent_chat('thanks!')).answer == "You're welcome!"
     r = clarify([('math', 0.3), ('chat', 0.2)])
     assert not r.ok and 'math' in r.answer and 'chat' in r.answer
+
+
+def test_currency_ignores_sentence_punctuation():
+    # LLM planners end subtasks with a period; "JPY." must still be a currency code.
+    from jevrouter.agents.tools import parse_currency
+    known = {'USD', 'JPY', 'EUR', 'INR'}
+    assert parse_currency('Convert 20 USD to JPY.', known) == (20.0, 'USD', 'JPY')
+    assert parse_currency('Convert 12.5 EUR to INR.', known) == (12.5, 'EUR', 'INR')

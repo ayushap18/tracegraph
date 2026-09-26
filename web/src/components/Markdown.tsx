@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { safeHref } from '../lib'
 
-// A small, safe Markdown subset for agent answers (Claude writes Markdown; keyless agents write plain text).
+// A small, safe Markdown subset for agent answers (LLM engines write Markdown; keyless agents write plain text).
 // Everything is built as React elements, never HTML strings: bold, italics, inline code, links, fenced code,
 // bullet/numbered lists and headings.
 

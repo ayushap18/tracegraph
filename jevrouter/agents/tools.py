@@ -162,7 +162,9 @@ CURRENCY_NAMES = {'dollar': 'USD', 'dollars': 'USD', 'usd': 'USD', 'rupee': 'INR
 
 def parse_currency(q: str, known) -> tuple[float, str, str] | str:
     """Returns (amount, src, dst), or an error message. `known` is the set of supported codes."""
-    words = re.sub(r'[^\w.\s]', ' ', q.lower()).split()
+    # Keep decimal points in amounts but drop sentence dots: an LLM planner writes "Convert 20 USD to JPY."
+    words = [w.strip('.') for w in re.sub(r'[^\w.\s]', ' ', q.lower()).split()]
+    words = [w for w in words if w]
     codes = [CURRENCY_NAMES.get(w) or (w.upper() if len(w) == 3 and w.isalpha() else None) for w in words]
     found = [(i, c) for i, c in enumerate(codes) if c and c in known]
     if len(found) < 2:

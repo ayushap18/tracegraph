@@ -3,6 +3,7 @@ import {
   CloudSun, CodeXml, Coins, Globe, Grid3x3, Keyboard, ListTree, Maximize2, Merge, MessageSquare, MessageSquareText,
   MessagesSquare, Minimize2, Monitor, Moon, Pause, Play, Radio, Scan, ScrollText, Search, SendHorizontal, ShieldBan,
   Split, Sun, Target, Timer, Wallet, Waypoints, Workflow, X, Zap, ZoomIn, ZoomOut, type LucideIcon,
+  Braces, Check, ChevronDown, Cpu, KeyRound, PlugZap, Rocket, SquareTerminal,
 } from 'lucide-react'
 import type { SVGProps } from 'react'
 import { colorOf } from './protocol'
@@ -22,9 +23,20 @@ export const UI_ICONS = {
   search: Search, send: SendHorizontal, play: Play, pause: Pause, close: X, keyboard: Keyboard, bolt: Zap,
   queries: MessagesSquare, subtasks: ListTree, latency: Timer, confidence: Target, activity: Activity, spend: Wallet,
   heatmap: Grid3x3, traffic: ChartPie, timeline: ChartGantt, graph: Workflow, log: ScrollText, agent: Bot,
+  check: Check, 'chevron-down': ChevronDown,
 } satisfies Record<string, LucideIcon>
 
 export type UiIconName = keyof typeof UI_ICONS
+
+// LLM engines: subscription CLIs and the pay-per-token API, plus keyless mode.
+export const ENGINE_ICONS: Record<string, LucideIcon> = {
+  'claude-code': SquareTerminal, codex: Braces, agy: Rocket, anthropic: KeyRound, none: PlugZap,
+}
+
+export function EngineIcon({ name, size = 15, strokeWidth = 1.9 }: { name: string; size?: number; strokeWidth?: number }) {
+  const C = ENGINE_ICONS[name] ?? Cpu
+  return <C size={size} strokeWidth={strokeWidth} aria-hidden="true" focusable="false" />
+}
 
 export function agentIcon(agent: string | undefined): LucideIcon {
   return (agent && AGENT_ICONS[agent]) || Bot // new agents still get a sensible icon
