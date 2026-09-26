@@ -27,6 +27,8 @@ class FakeJev:
             if isinstance(self.multi, Exception):
                 raise self.multi
             return NS(answers={'multi': NS(noul=self.multi)}, usage=usage, model='jev-test')
+        if 'route' not in qs:  # the planner's safety check on a text on its own
+            return NS(answers={'unsafe': NS(noul=self.unsafe)}, usage=usage, model='jev-test')
         if any(f in state for f in self.fail_on):
             raise RuntimeError('jev down')
         agent, conf = self.route_for(state)

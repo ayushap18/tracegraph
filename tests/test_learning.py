@@ -10,7 +10,7 @@ import pytest
 from jevrouter import evals as evals_mod
 from jevrouter.config import AGENTS
 from jevrouter.engines import AutoEngine, EngineError, EngineRefusal, Reply
-from jevrouter.engines.health import Health, instrument, instrument_all, pct
+from jevrouter.engines.health import Health, instrument, instrument_all, pct, unblock
 from jevrouter.jev import clean, criteria, examples_for, route_one
 from jevrouter.pipeline import Router
 from jevrouter.store import Store, read_labels
@@ -422,3 +422,28 @@ async def test_health_endpoint(client):
     h = {x['name']: x for x in (await json_of(await client.get('/api/engines/health')))['engines']}
     assert h['codex']['calls'] == 1 and h['codex']['ok'] == 1 and h['codex']['p50_ms'] is not None
     assert h['claude-code']['calls'] >= 1 and h['agy']['calls'] == 0 and h['agy']['label'] == 'Antigravity'
+
+
+async def test_an_engine_out_of_quota_fails_at_once_until_unblocked():
+    agy = Stub('agy', fail='Individual quota reached. Resets in 156h', delay=0.05)
+    health = Health()
+    instrument(agy, health)
+    with pytest.raises(EngineError):
+        await agy.stream(system='s', prompt='p')  # the slow, real failure
+    t0 = time.perf_counter()
+    with pytest.raises(EngineError, match='quota'):
+        await agy.stream(system='s', prompt='p')  # pinned engine, no Auto: skipped without asking the CLI
+    assert time.perf_counter() - t0 < 0.02 and agy.calls == 1
+    assert health.snapshot({'agy': agy})[0]['cooling_until'] is not None
+    agy.fail = None
+    unblock(agy)  # Test or picking the engine again after the quota was refilled
+    assert (await agy.stream(system='s', prompt='p')).text == 'agy ok' and agy.calls == 2
+
+
+async def test_a_timeout_does_not_block_the_engine():
+    e = Stub('e', fail='timed out after 180s')
+    instrument(e, Health())
+    for _ in range(2):
+        with pytest.raises(EngineError):
+            await e.stream(system='s', prompt='p')
+    assert e.calls == 2  # timeouts may be one-offs: keep asking

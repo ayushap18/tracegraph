@@ -26,6 +26,9 @@ KEYLESS = {'math', 'weather', 'time', 'currency'}
 
 MIN_CONFIDENCE = 0.45
 MIN_CLEAR = 0.25
+# Jev said clarify, but its top pick is an exact keyless agent whose parser finds everything it needs (jevrouter/gate.py):
+# that agent runs when Jev gave it at least this probability.
+CONFIRM_AT = 0.6
 BLOCK_AT = 0.7
 MULTI_AT = 0.5
 MAX_SUBTASKS = 4

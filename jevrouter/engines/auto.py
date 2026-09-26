@@ -7,14 +7,11 @@ used-up plan costs one failed call, not one per request. Each move to the next e
 """
 import asyncio
 import os
-import re
 import time
 
-from .base import Engine, EngineError, EngineRefusal
+from .base import COOLDOWN, LASTING, Engine, EngineError, EngineRefusal
 
-COOLDOWN = float(os.environ.get('TG_ENGINE_COOLDOWN', 600))  # quota, login and install problems don't fix themselves
 SHORT_COOLDOWN = 30.0  # timeouts, crashes and one-off API errors may
-LASTING = re.compile(r'usage limit|rate limit|quota|not logged in|login|not installed|credit|upgrade', re.I)
 
 
 def default_order(names) -> list[str]:

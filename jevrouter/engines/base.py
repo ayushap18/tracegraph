@@ -4,6 +4,7 @@ Planner, merger and the LLM agents only talk to this interface, so an Anthropic 
 a Codex (ChatGPT) subscription or an Antigravity (Google) subscription are interchangeable backends.
 """
 import json
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -16,6 +17,11 @@ class Reply:
     source: str | None = None  # first cited URL, when the engine searched the web
     raw: list = field(default_factory=list)  # engine-specific final content, for debugging
     engine: str | None = None  # the backend that actually answered, when Auto picked one
+
+
+# Failures that don't fix themselves in seconds: an engine that hit one is skipped for COOLDOWN seconds.
+COOLDOWN = float(os.environ.get('TG_ENGINE_COOLDOWN', 600))
+LASTING = re.compile(r'usage limit|rate limit|quota|not logged in|login|not installed|credit|upgrade', re.I)
 
 
 class EngineError(Exception):

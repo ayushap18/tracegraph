@@ -55,7 +55,8 @@ async def test_claude_planner():
     jev = FakeJev()
     p = await plan('weather in Paris and convert 100 EUR to INR', jev, eng(claude))
     assert p['planner'] == 'anthropic' and p['subtasks'] == ['weather in Paris', 'convert 100 EUR to INR'] and p['multi'] is None
-    assert p['claude_in'] == 10 and not jev.calls
+    # Jev's only call is the safety check on the whole query (it runs alongside the planner); a safe query ends there
+    assert p['claude_in'] == 10 and [c[1] for c in jev.calls] == [['unsafe']] and p['jev_tokens'] == 100
     kw = claude.calls[0]
     assert kw['model'] == 'claude-opus-5' and kw['output_config']['effort'] == 'low'
     assert kw['output_config']['format']['type'] == 'json_schema' and kw['thinking'] == {'type': 'adaptive'}

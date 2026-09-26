@@ -16,6 +16,7 @@ from . import evals as evals_mod
 from . import labels as labels_mod
 from .config import AGENTS, DIST, GUARDS, LEGACY_PAGE, REPORT, RESEARCH, RUN
 from .engines import EngineError, catalog, choose
+from .engines.health import unblock
 from .events import sse
 from .jev import examples_for
 from .files import FILE_AGENTS, MAX_BYTES, FileError, extract
@@ -537,6 +538,7 @@ async def test_engine(request):
     ok, why = engine.available()
     if not ok:
         return web.json_response({'ok': False, 'ms': 0, 'error': why})
+    unblock(engine)  # a test is how you check a refilled quota or a fresh login: really ask the engine
     t0 = time.perf_counter()
     ms = lambda: round((time.perf_counter() - t0) * 1000)
     try:
@@ -592,6 +594,7 @@ async def control(request):
             ok, why = engine.available()
             if not ok:
                 return web.json_response({'error': f'{engine.label} is not available: {why}'}, status=409)
+            unblock(engine)
             router.use_engine(engine)
             background(warm_up(engine))
         # Agents, prices and the engine badge all change, so every browser gets the new config (older clients ignore it).

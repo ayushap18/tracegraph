@@ -6,11 +6,14 @@ from typesafe_sdk import Choice, Noul, Score
 from .config import BLOCK_AT, EXAMPLE_CHARS, MAX_EXAMPLES, MAX_NOT, MIN_CLEAR, MIN_CONFIDENCE
 
 
+UNSAFE = 'The query asks for help with something harmful, illegal, sexual, or hateful.'
+
+
 def questions(agents: dict) -> dict:
     return {
         'route': Choice(instructions='Which specialist agent should handle this user query?', criteria=agents),
         'urgency': Score(instructions='How urgently does the user need an answer?', criteria=['No rush', 'Soon', 'Right now']),
-        'unsafe': Noul(instructions='The query asks for help with something harmful, illegal, sexual, or hateful.'),
+        'unsafe': Noul(instructions=UNSAFE),
         'clear': Noul(instructions='The query is clear enough to answer without asking a follow-up question.'),
     }
 
@@ -95,3 +98,9 @@ async def route_one(jev, text: str, agents: dict) -> dict:
 async def multi_score(jev, text: str) -> tuple[float, int]:
     r = await jev.system_one(text, MULTI)
     return r.answers['multi'].noul, getattr(r.usage, 'input_tokens', 0) or 0
+
+
+async def unsafe_score(jev, text: str) -> tuple[float, int]:
+    """Jev's unsafe score for a text on its own (the same question route_one asks), and the tokens it used."""
+    r = await jev.system_one(text, {'unsafe': Noul(instructions=UNSAFE)})
+    return r.answers['unsafe'].noul, getattr(r.usage, 'input_tokens', 0) or 0

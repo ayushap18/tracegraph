@@ -175,8 +175,8 @@ async def test_tokens_sum_planner_agents_and_merger():
     two = {'subtasks': [{'text': 'hey', 'depends_on': []}, {'text': 'hello again', 'depends_on': []}]}
     router = Router(FakeJev(route_for=lambda t: ('chat', 0.9)), engine=ScriptEngine(plan=two))
     events = await run(router, 'hey and hello again')
-    # planner 7/4, two chat agents 5/3 each, merger 5/3; Jev: two routes at 100
-    assert events[-1]['tokens'] == {'jev_in': 200, 'llm_in': 7 + 5 + 5 + 5, 'llm_out': 4 + 3 + 3 + 3}
+    # planner 7/4, two chat agents 5/3 each, merger 5/3; Jev: the plan's safety check and two routes at 100
+    assert events[-1]['tokens'] == {'jev_in': 300, 'llm_in': 7 + 5 + 5 + 5, 'llm_out': 4 + 3 + 3 + 3}
     assert router.history[-1]['tokens'] == events[-1]['tokens']
 
 

@@ -73,7 +73,8 @@ def test_knowledge_term(q, term):
 async def test_chat_and_clarify():
     assert (await agent_chat('thanks!')).answer == "You're welcome!"
     r = clarify([('math', 0.3), ('chat', 0.2)])
-    assert not r.ok and 'math' in r.answer and 'chat' in r.answer
+    # plain-English options, never internal agent names (eval s11 caught "the currency agent or the math agent")
+    assert not r.ok and 'a calculation' in r.answer and 'just a chat' in r.answer and 'agent' not in r.answer
 
 
 def test_currency_ignores_sentence_punctuation():

@@ -41,7 +41,10 @@ class Health:
         now_mono, now = time.monotonic(), time.time()
         cooling = {}
         for e in engines.values():
-            for name, (until, _) in (getattr(e, 'cooling', None) or {}).items():
+            blocks = dict(getattr(e, 'cooling', None) or {})
+            if getattr(e, '_blocked', None):
+                blocks[e.name] = e._blocked
+            for name, (until, _) in blocks.items():
                 if until > now_mono:
                     cooling[name] = max(cooling.get(name, 0), round(now + until - now_mono, 1))
         out = []
@@ -74,14 +77,20 @@ def instrument(engine, health: Health):
     inner = engine.stream
 
     async def stream(**kw):
+        from .base import COOLDOWN, LASTING, EngineError, EngineRefusal
+        until, why = getattr(engine, '_blocked', None) or (0, '')
+        if until > time.monotonic():  # out of quota or logged out: fail at once instead of waiting for the CLI to say so
+            raise EngineError(why)
         t0 = time.perf_counter()
         try:
             reply = await inner(**kw)
         except Exception as e:
-            from .base import EngineError, EngineRefusal
             ok = isinstance(e, EngineRefusal)  # a refusal is an answer: the engine itself worked
             why = e.why if isinstance(e, EngineError) else f'{type(e).__name__}: {e}'
             engine._health.record(engine.name, ok, (time.perf_counter() - t0) * 1000, None if ok else why)
+            # Auto has its own per-backend cooldowns; blocking Auto itself would hide a backend that recovered.
+            if not ok and not getattr(engine, 'engines', None) and LASTING.search(why):
+                engine._blocked = (time.monotonic() + COOLDOWN, why)
             raise
         engine._health.record(engine.name, True, (time.perf_counter() - t0) * 1000)
         return reply
@@ -89,6 +98,14 @@ def instrument(engine, health: Health):
     engine.stream = stream
     engine._health_wrapped = True
     return engine
+
+
+def unblock(engine):
+    """Forget a quota or login failure, e.g. when the user tests or picks the engine again after fixing it."""
+    engine._blocked = None
+    for inner in (getattr(engine, 'engines', None) or {}).values():
+        inner._blocked = None
+    getattr(engine, 'cooling', {}).clear()
 
 
 def instrument_all(engines: dict, health: Health):

@@ -9,8 +9,9 @@ import uuid
 from collections import deque
 
 from . import agents as agent_registry
+from . import gate
 from .agents.llm import COMMON
-from .config import AGENTS, GUARDS, HISTORY, KEYLESS, PRICES, REPORT, RESEARCH, RUN, RUN_TIMEOUT, SAMPLES, env_flag
+from .config import AGENTS, CONFIRM_AT, GUARDS, HISTORY, KEYLESS, PRICES, REPORT, RESEARCH, RUN, RUN_TIMEOUT, SAMPLES, env_flag
 from .engines.health import Health, instrument_all
 from .events import Broadcaster
 from .files import FILE_AGENTS, file_agents
@@ -24,6 +25,7 @@ ROUTED_KEYS = ('agent', 'pick', 'reason', 'probabilities', 'confidence', 'urgenc
                'examples')
 USE_ACTIVE = object()  # a run's engine argument: the engine active at submit time (None means keyless)
 CONTEXT_CHARS = 500
+MEANINGS_TIMEOUT = 3.0  # seconds the lone-term lookup (jevrouter/gate.py) may add after Jev has routed
 # Sandbox runs are never stored. Their qids come from a separate range so they can't collide with
 # (or leave gaps in) the persisted run numbers, and they're forgotten when they finish.
 SANDBOX_QID0 = 1_000_000_000
@@ -362,13 +364,20 @@ class Router:
                 lines.append(f"- {by_tid[d]['text']}: " + (r['answer'][:CONTEXT_CHARS] if r['ok'] else
                                                             f"(this step failed: {r['answer'][:200]})"))
             ctx = '\n\nContext from earlier steps:\n' + '\n'.join(lines)
-            if engine is None:
+            earlier = [by_tid[d].get('input') or by_tid[d]['text'] for d in st['depends_on']]
+            text = None
+            if engine is not None:
+                try:
+                    text, tin, tout = await resolve_step(engine, st['text'] + ctx)
+                    self.usage(rec, {'claude_in': tin, 'claude_out': tout})
+                except Exception:
+                    text = None
+            # Keyless (or when the rewrite left it as it was): "the time there" names the place the earlier steps were
+            # about, a place or the country of the currency converted to, so the time or weather agent can parse it.
+            if text is None or gate.THERE.search(text):
+                text = gate.resolve_there(text or st['text'], earlier) or text
+            if text is None:
                 return st['text'], ctx
-            try:
-                text, tin, tout = await resolve_step(engine, st['text'] + ctx)
-            except Exception:
-                return st['text'], ctx
-            self.usage(rec, {'claude_in': tin, 'claude_out': tout})
             by_tid[st['tid']]['input'] = text
             return text, ctx
 
@@ -377,15 +386,22 @@ class Router:
         # Jev only sees text: without the file names, "the attached CSV" reads as unclear and gets gated to clarify.
         files_note = f"\n\n(Attached files: {', '.join(f['name'] for f in attached)})" if attached else ''
 
-        async def route(st, text):
+        notes: dict[str, agent_registry.AgentResult] = {}  # tid -> the answer a gate decided (jevrouter/gate.py)
+
+        async def route(st, text, ctx):
+            term = None if ctx else gate.bare_term(text)
+            lookup = asyncio.create_task(gate.meanings(self.http, term)) if term and self.http is not None else None
             try:
-                c = self.criteria_without(agents, (holdout, text, st.get('text'))) if holdout else crit
-                d = await route_one(self.jev, text + files_note, c)
+                c = self.criteria_without(agents, (holdout, text + ctx, st.get('text'))) if holdout else crit
+                d = await route_one(self.jev, text + ctx + files_note, c)
             except Exception as e:
+                if lookup:
+                    lookup.cancel()
                 stats['errors'] += 1
                 by_tid[st['tid']]['error'] = f'Jev: {str(e)[:200]}'
                 emit('error', qid=qid, tid=st['tid'], message=by_tid[st['tid']]['error'])
                 return None
+            await review(st['tid'], d, text, lookup)
             self.usage(rec, {'jev_tokens': d['input_tokens']})
             stats['subtasks'] += 1
             stats['by_agent'][d['agent']] = stats['by_agent'].get(d['agent'], 0) + 1
@@ -395,6 +411,47 @@ class Router:
             emit('routed', qid=qid, tid=st['tid'], **fields, **extra)
             return fields
 
+        async def review(tid, d, text, lookup):
+            """Checks Jev's decision against what the agents can actually do (jevrouter/gate.py). A blocked subtask stays
+            blocked; the reason says which check changed the agent. `text` is what a keyless agent will be given (see
+            `live` below), so its parser is checked on the same text."""
+            try:
+                if d['agent'] == 'blocked':
+                    return
+                # "Remind me at 5pm": an honest "I can't", not the current time
+                if cant := gate.cant_do(text, d['pick'], d['probabilities'].get(d['pick'], 0)):
+                    d['agent'], d['reason'] = 'chat', f"can't {cant[0]}"
+                    notes[tid] = agent_registry.AgentResult(cant[1], True)
+                    return
+                pick = d['pick']
+                if (d['agent'] == 'clarify' and pick in KEYLESS and pick in registry
+                        and d['probabilities'].get(pick, 0) >= CONFIRM_AT and gate.confirmed(pick, text)):
+                    d['agent'], d['reason'] = pick, f"{d['reason']}, but the {pick} parser found all it needs"
+                if d['agent'] not in GUARDS and (ask := gate.question(d['agent'], text)):
+                    d['agent'], d['reason'] = 'clarify', f"missing detail for {d['agent']}"
+                    notes[tid] = agent_registry.AgentResult(ask, False)
+                if lookup and d['agent'] not in (*GUARDS, 'chat') and (options := await meanings_of(lookup)):
+                    d['agent'], d['reason'] = 'clarify', f'ambiguous term ({len(options)} meanings)'
+                    notes[tid] = agent_registry.AgentResult(gate.meanings_text(text.strip().rstrip('.!?'), options), False)
+            finally:
+                if lookup and not lookup.done():
+                    lookup.cancel()
+
+        async def meanings_of(lookup) -> list[str] | None:
+            """The lone term's meanings, or None: a slow or failed lookup never fails or stalls the route."""
+            try:
+                return await asyncio.wait_for(lookup, MEANINGS_TIMEOUT)
+            except Exception:  # includes the timeout; wait_for has cancelled the lookup
+                return None
+
+        async def ask(text, probabilities) -> agent_registry.AgentResult:
+            """A clarify message: the engine writes the question when there is one, from a plain-English template."""
+            msg = gate.clarify_text(probabilities, text, agents)
+            if engine is None:
+                return agent_registry.AgentResult(msg, False)
+            msg, tin, tout = await gate.clarify_llm(engine, text, msg)
+            return agent_registry.AgentResult(msg, False, None, engine.name if tin or tout else 'keyless', tin, tout)
+
         async def run(st, r, text):
             tid, agent = st['tid'], r['agent']
             t1 = time.perf_counter()
@@ -403,8 +460,11 @@ class Router:
                 if agent == 'blocked':
                     out = agent_registry.BLOCKED
                     delta(out.answer)
+                elif tid in notes:
+                    out = notes[tid]
+                    delta(out.answer)
                 elif agent == 'clarify':
-                    out = agent_registry.clarify(list(r['probabilities'].items()))
+                    out = await ask(by_tid[tid].get('input') or st['text'], r['probabilities'])
                     delta(out.answer)
                 else:
                     out = await registry[agent](text, delta)
@@ -418,6 +478,23 @@ class Router:
             emit('answered', qid=qid, tid=tid, **answered)
             return answered
 
+        def blocked_by_dependency(st) -> dict:
+            tid = st['tid']
+            fields = {'agent': 'blocked', 'pick': 'blocked', 'reason': 'depends on a blocked step', 'probabilities': {},
+                      'confidence': 0.0, 'urgency': 0.0, 'unsafe': 1.0, 'clear': 0.0, 'jev_ms': 0, 'model': '',
+                      'examples': False}
+            stats['subtasks'] += 1
+            stats['by_agent']['blocked'] = stats['by_agent'].get('blocked', 0) + 1
+            by_tid[tid].update(fields)
+            emit('routed', qid=qid, tid=tid, **fields)
+            out = agent_registry.BLOCKED
+            emit('delta', qid=qid, tid=tid, text=out.answer)
+            answered = {'agent': 'blocked', 'agent_ms': 0, 'answer': out.answer, 'ok': out.ok, 'source': out.source,
+                        'engine': out.engine}
+            by_tid[tid].update(answered)
+            emit('answered', qid=qid, tid=tid, **answered)
+            return answered
+
         # Waves: everything whose dependencies have answered routes together, then runs together. Dependencies only
         # point backwards, so every wave has at least one subtask; independent subtasks all land in the first wave.
         results: dict[str, dict] = {}
@@ -425,14 +502,20 @@ class Router:
         while pending:
             ready = [st for st in pending if all(d in results for d in st['depends_on'])]
             pending = [st for st in pending if st not in ready]
+            # A step that builds on a blocked one is blocked too: its context would carry the harmful request on to
+            # the rewrite, Jev and the agent ("How do I make a pipe bomb, then list its components").
+            for st in [st for st in ready if any(results[d].get('agent') == 'blocked' for d in st['depends_on'])]:
+                ready.remove(st)
+                results[st['tid']] = blocked_by_dependency(st)
             inputs = await asyncio.gather(*(prepare(st) for st in ready))
-            routes = await asyncio.gather(*(route(st, text + ctx) for st, (text, ctx) in zip(ready, inputs)))
+            routes = await asyncio.gather(*(route(st, text, ctx) for st, (text, ctx) in zip(ready, inputs)))
             live = []
             for st, (text, ctx), r in zip(ready, inputs, routes):
                 if r is None:
                     results[st['tid']] = {'ok': False, 'answer': by_tid[st['tid']]['error']}
-                else:  # keyless agents parse places and amounts from the text, so they get the self-contained text alone
-                    live.append((st, r, text if r['agent'] in KEYLESS and 'input' in by_tid[st['tid']] else text + ctx))
+                else:  # keyless agents parse places and amounts from plain text: context would only be misread as the
+                    # step's own numbers ("convert that amount to EUR" + "100 USD = 8,400 INR" is not 100 USD to EUR)
+                    live.append((st, r, text if r['agent'] in KEYLESS else text + ctx))
             for st, a in zip([x[0] for x in live], await asyncio.gather(*(run(*x) for x in live))):
                 results[st['tid']] = a
 
