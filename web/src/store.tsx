@@ -21,30 +21,44 @@ export function useStore(): StoreCtx {
 
 export interface RunState { run: Run | undefined; loading: boolean; error: string | null; notFound: boolean }
 
-/** The live Run from the store when present, otherwise fetched once via GET /api/runs/:qid (with loading and error state). */
+/** The live Run from the store when present, otherwise fetched via GET /api/runs/:qid (with loading and error state). */
 export function useRunState(qid: number | null | undefined): RunState {
   const { store } = useStore()
   const live = qid == null ? undefined : store.runs.find(r => r.qid === qid)
   const [fetched, setFetched] = useState<{ qid: number; run?: Run; error?: string; notFound?: boolean } | null>(null)
-  const have = !!live && (!!live.text || live.order.length > 0)
+  const have = !!live?.text
+  const needsRefresh = !have || (!store.connected && !live?.done)
 
   useEffect(() => {
-    if (qid == null || !Number.isFinite(qid) || have) return
-    if (fetched?.qid === qid) return
+    if (qid == null || !Number.isFinite(qid) || !needsRefresh) return
     let alive = true
-    setFetched({ qid })
-    getRun(qid)
-      .then(r => { if (alive) setFetched({ qid, run: fromRecord(r) }) })
-      .catch(e => { if (alive) setFetched({ qid, error: e instanceof Error ? e.message : String(e), notFound: e instanceof ApiError && e.status === 404 }) })
-    return () => { alive = false }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [qid, have])
+    let timer: ReturnType<typeof setTimeout> | undefined
+    setFetched(prev => prev?.qid === qid ? prev : { qid })
+    const load = async () => {
+      try {
+        const run = fromRecord(await getRun(qid))
+        if (!alive) return
+        setFetched({ qid, run })
+        if (!run.done) timer = setTimeout(load, 3000)
+      } catch (e) {
+        if (!alive) return
+        setFetched(prev => ({ qid, run: prev?.qid === qid ? prev.run : undefined,
+          error: e instanceof Error ? e.message : String(e), notFound: e instanceof ApiError && e.status === 404 }))
+      }
+    }
+    void load()
+    return () => { alive = false; clearTimeout(timer) }
+  }, [qid, needsRefresh])
 
   if (qid == null) return { run: undefined, loading: false, error: null, notFound: false }
   const f = fetched?.qid === qid ? fetched : null
   // A live stub (joined mid-run) lacks the query text; fill it from the fetched record.
-  let run = have ? live : f?.run
-  if (have && live && f?.run && !live.text) run = { ...live, text: f.run.text, source: f.run.source, at: f.run.at }
+  let run = have && (store.connected || live?.done) ? live : f?.run ?? live
+  if (live && !live.text && f?.run && store.connected) {
+    run = f.run.done && !live.done ? f.run : { ...f.run, ...live, text: f.run.text, source: f.run.source, at: f.run.at,
+      plan: live.plan ?? f.run.plan, order: [...new Set([...f.run.order, ...live.order])],
+      tasks: { ...f.run.tasks, ...live.tasks } }
+  }
   return {
     run,
     loading: !run && (!f || (!f.run && !f.error)),

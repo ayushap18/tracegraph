@@ -6,7 +6,11 @@ export type Planner = string // engine name | 'heuristic'
 export type Engine = string // engine name | 'keyless'
 export type MergeEngine = string // engine name | 'concat' | 'single'
 
-export interface EngineInfo { name: string; label: string; billing: 'api' | 'subscription'; web: boolean; available: boolean; why: string }
+export interface EngineInfo {
+  name: string; label: string; billing: 'api' | 'subscription'; web: boolean; available: boolean; why: string
+  // Auto only: the order it tries engines in, the one it will try first, and engines skipped after a recent failure.
+  order?: string[]; lead?: string | null; cooling?: Record<string, string>
+}
 
 export interface ControlState { autopilot: boolean; interval: number }
 
@@ -140,7 +144,7 @@ export interface EvalCase { id: string; query: string; tags: string[]; pass: boo
 export interface EvalDetail extends EvalSummary { cases: EvalCase[] }
 
 export interface EngineTestResult { ok: boolean; ms: number; text?: string; error?: string }
-export interface ControlBody { autopilot?: boolean; interval?: number; engine?: string }
+export interface ControlBody { autopilot?: boolean; interval?: number; engine?: string; engine_order?: string[] }
 export interface ControlResponse extends ControlState { engine: string | null }
 
 export const MERGE_TID = 'merge'

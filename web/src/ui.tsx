@@ -22,7 +22,9 @@ export function navigate(path: string) {
 export function useHashPath() {
   const read = () => {
     const raw = location.hash.replace(/^#/, '') || '/'
-    const [path, query = ''] = raw.split('?')
+    const split = raw.indexOf('?')
+    const path = split < 0 ? raw : raw.slice(0, split)
+    const query = split < 0 ? '' : raw.slice(split + 1)
     return { path: path.startsWith('/') ? path : '/' + path, query: new URLSearchParams(query) }
   }
   const [loc, setLoc] = useState(read)

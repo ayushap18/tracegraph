@@ -1,0 +1,86 @@
+/* Tailwind v4 + shadcn/ui tokens, scoped to the marketing surfaces (About).
+   No preflight: the workspace keeps its hand-written CSS untouched. Utilities are
+   emitted unlayered so they beat the app's element rules (e.g. `button {}`), and
+   they are only generated for the files listed in @source below. */
+@layer theme;
+@import "tailwindcss/theme.css" layer(theme);
+@import "./tw-reset.css"; /* must precede utilities: same specificity, earlier source order loses */
+@import "tailwindcss/utilities.css" source(none);
+
+@source "./pages/About.tsx";
+@source "./pages/about";
+@source "./components/ui";
+
+/* shadcn semantic tokens mapped onto the app's own theme variables, so the About
+   page follows the System / Light / Dark switch with no extra dark-mode rules. */
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--ink);
+  --color-card: var(--panel);
+  --color-card-foreground: var(--ink);
+  --color-popover: var(--panel);
+  --color-popover-foreground: var(--ink);
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--on-accent);
+  --color-secondary: var(--soft);
+  --color-secondary-foreground: var(--ink);
+  --color-muted: var(--soft);
+  --color-muted-foreground: var(--muted);
+  --color-accent: var(--soft);
+  --color-accent-foreground: var(--ink);
+  --color-border: var(--line);
+  --color-input: var(--line);
+  --color-ring: var(--accent);
+  --color-edge: var(--edge);
+  --color-ok: var(--ok);
+  --color-destructive: var(--bad);
+
+  --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Geist Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* One radius system for the page: 8 controls, 12 tiles, 20 frames, pill for CTAs. */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 20px;
+}
+
+@theme {
+  /* The workspace sets html { font-size: 14px }, so rem-based scales would render at 87.5%.
+     Pin spacing and the text scale to px so the page renders at its designed size. */
+  --spacing: 4px;
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 14px;
+  --text-sm--line-height: 20px;
+  --text-base: 16px;
+  --text-base--line-height: 24px;
+  --text-lg: 18px;
+  --text-lg--line-height: 28px;
+  --container-2xl: 672px;
+  --container-4xl: 896px;
+  --container-5xl: 1024px;
+  --container-6xl: 1152px;
+
+  /* The app already owns --shadow / --shadow-lg; keep Tailwind's shadow scale out of its way. */
+  --shadow-*: initial;
+  --shadow-tile: 0 1px 0 color-mix(in srgb, var(--ink) 4%, transparent), 0 12px 32px -12px color-mix(in srgb, var(--ink) 14%, transparent);
+  --shadow-frame: 0 1px 0 color-mix(in srgb, var(--ink) 5%, transparent), 0 40px 80px -30px color-mix(in srgb, var(--accent) 28%, transparent), 0 24px 48px -24px color-mix(in srgb, var(--ink) 22%, transparent);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-marquee: marquee 38s linear infinite;
+}
+
+@keyframes marquee { to { transform: translateX(-50%); } }
+@keyframes accordion-down { from { height: 0; } to { height: var(--radix-accordion-content-height); } }
+@keyframes accordion-up { from { height: var(--radix-accordion-content-height); } to { height: 0; } }
+
+@theme {
+  --animate-accordion-down: accordion-down 0.26s var(--ease-out-expo);
+  --animate-accordion-up: accordion-up 0.2s var(--ease-out-expo);
+}
+
+/* `dark:` follows the app's theme switch (data-theme), falling back to the OS setting on "System". */
+@custom-variant dark {
+  &:where([data-theme="dark"], [data-theme="dark"] *) { @slot; }
+  @media (prefers-color-scheme: dark) { &:where(:root:not([data-theme="light"]) *) { @slot; } }
+}

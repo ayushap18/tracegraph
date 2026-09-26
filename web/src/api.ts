@@ -91,6 +91,8 @@ export const testEngine = (name: string) => post<EngineTestResult>(`/api/engines
 export const control = (body: ControlBody) => post<ControlResponse>('/control', body)
 /** Switch the active engine; 'none' means keyless. */
 export const setEngine = (name: string) => control({ engine: name })
+/** The order Auto tries engines in; engines left out keep their place after these. */
+export const setEngineOrder = (order: string[]) => control({ engine_order: order })
 
 /** Human-readable message for any thrown value. */
 export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e))

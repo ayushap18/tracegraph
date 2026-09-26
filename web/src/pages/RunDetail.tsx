@@ -54,7 +54,7 @@ export default function RunDetail({ params }: { params: Record<string, string> }
   const replay = async () => {
     setBusy('replay')
     try {
-      const res = await ask({ query: run.text, source: 'you', ...(run.engine ? { engine: run.engine } : {}), ...(run.files.length ? { files: run.files } : {}) })
+      const res = await ask({ query: run.text, source: 'you', engine: run.engine ?? 'none', ...(run.files.length ? { files: run.files } : {}) })
       toast.success(`Replaying as run #${res.qid}`)
       navigate('/runs/' + res.qid)
     } catch (e) { toast.error(`Could not replay: ${errorText(e)}`) } finally { setBusy(null) }
@@ -128,7 +128,7 @@ export default function RunDetail({ params }: { params: Record<string, string> }
 function AnswerTab({ run }: { run: Run }) {
   const toast = useToast()
   const tasks = run.order.map(t => run.tasks[t]).filter(Boolean)
-  const answer = run.merged?.answer || run.mergeStream || (tasks.length === 1 ? tasks[0].answered?.answer ?? tasks[0].stream : '')
+  const answer = run.merged?.answer || run.mergeStream || tasks.map(t => t.answered?.answer ?? t.stream).filter(Boolean).join('\n\n')
   const copy = async () => { (await copyText(answer)) ? toast.success('Answer copied') : toast.error('Could not copy') }
   return (
     <div className="rd-answer-grid">
@@ -165,6 +165,7 @@ function RawTab({ run }: { run: Run }) {
   const [err, setErr] = useState<string | null>(null)
   useEffect(() => {
     let alive = true
+    setRec(null); setErr(null)
     getRun(run.qid).then(r => alive && setRec(r), e => alive && setErr(errorText(e)))
     return () => { alive = false }
   }, [run.qid, run.done])

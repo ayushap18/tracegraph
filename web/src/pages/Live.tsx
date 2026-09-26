@@ -85,9 +85,9 @@ export default function Live() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement
-      const typing = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
-      if (e.key === 'Escape') { setSelected(null); if (typing) el.blur(); return }
-      if (typing || e.metaKey || e.ctrlKey || e.altKey) return
+      const typing = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable
+      if (e.key === 'Escape') { setFull(false); setSelected(null); if (typing) el.blur(); return }
+      if (typing || el.closest('button, a, [role=dialog]') || e.metaKey || e.ctrlKey || e.altKey) return
       if (e.key === '/') { e.preventDefault(); askRef.current?.focus() }
       else if (e.key === 'a') void post('/control', { autopilot: !autopilotRef.current })
       else if (e.key === 'f') toggleFull()

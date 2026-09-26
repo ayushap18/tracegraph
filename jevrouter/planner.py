@@ -86,13 +86,16 @@ async def plan_llm(query: str, engine, context=None, files=None) -> dict:
 
 
 # Words that mean a query might hold several requests or refer back to an earlier part ("...then the time there").
-MAYBE_MULTI = re.compile(r'[;,]|\b(?:and|then|also|plus|after|there|it|its|that|those|them|same|both)\b', re.I)
+# A comma only counts after two or more words, so "hey, how are you?" stays one request but "Paris weather, Tokyo
+# time" does not. A leading greeting ("hi there,") is ignored for the same reason.
+MAYBE_MULTI = re.compile(r';|\S+\s+\S+,|\b(?:and|then|also|plus|after|there|it|its|that|those|them|same|both)\b', re.I)
+GREETING = re.compile(r'^\s*(?:hi|hey|hello|yo|thanks|thank you|ok|okay)(?:\s+there)?\b[\s,!.]*', re.I)
 
 
 def worth_llm_plan(query: str, context=None) -> bool:
-    """An LLM plan costs seconds on a subscription CLI; single-clause queries don't need one, but a follow-up in a chat
-    session does, because only the LLM planner can resolve it against the earlier turns."""
-    return bool(context) or bool(MAYBE_MULTI.search(query)) or len(query.split()) > 14
+    """An LLM plan costs seconds on a subscription CLI (it runs before any agent can start); single-clause queries don't
+    need one, but a follow-up in a chat session does, because only the LLM planner can resolve it against earlier turns."""
+    return bool(context) or bool(MAYBE_MULTI.search(GREETING.sub('', query))) or len(query.split()) > 14
 
 
 async def plan(query: str, jev, engine=None, context=None, files=None) -> dict:

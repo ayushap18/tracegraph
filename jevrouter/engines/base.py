@@ -15,6 +15,7 @@ class Reply:
     output_tokens: int = 0
     source: str | None = None  # first cited URL, when the engine searched the web
     raw: list = field(default_factory=list)  # engine-specific final content, for debugging
+    engine: str | None = None  # the backend that actually answered, when Auto picked one
 
 
 class EngineError(Exception):
@@ -52,6 +53,9 @@ class Engine:
                      max_tokens: int = 2048, web: bool = False, schema: dict | None = None, exec: bool = False) -> Reply:
         """exec=True lets the engine write and run code in a sandbox; engines without supports_exec ignore it."""
         raise NotImplementedError
+
+    async def prewarm(self, *, system='', effort='medium', web=False, schema=None):
+        """Gets ready for calls with these settings before the first one arrives. Only CLI engines need to."""
 
     async def aclose(self):
         pass

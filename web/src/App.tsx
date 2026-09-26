@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { StoreProvider, useStore } from './store'
 import { ThemeProvider, useTheme } from './theme'
 import { ToastProvider, useHashPath, useToast } from './ui'
-import { matchRoute, type Match } from './routes'
+import { matchRoute, NAV, type Match } from './routes'
+import { setPageMeta } from './meta'
 import { BottomBar, Sidebar, SlotCtx, TopBar } from './components/Shell'
 import { Palette } from './components/Palette'
 import Chat from './pages/Chat'
@@ -10,10 +11,12 @@ import Live from './pages/Live'
 import Runs from './pages/Runs'
 import RunDetail from './pages/RunDetail'
 import Settings from './pages/Settings'
-import About from './pages/About'
 import Compare from './pages/Compare'
 import Evals from './pages/Evals'
 import Agents from './pages/Agents'
+
+// The About page carries its own stack (Tailwind, shadcn/ui, Motion, Geist); load it only when visited.
+const About = lazy(() => import('./pages/About'))
 
 export default function App() {
   return (
@@ -37,7 +40,7 @@ function Page({ match }: { match: Match }) {
     case 'evals': return <Evals params={params} />
     case 'agents': return <Agents params={params} />
     case 'settings': return <Settings />
-    case 'about': return <About />
+    case 'about': return <Suspense fallback={null}><About /></Suspense>
     default: return <Chat />
   }
 }
@@ -90,14 +93,18 @@ function AppShell() {
 
   useEffect(() => {
     const t = match.name === 'run' ? `Run #${match.params.qid}` : match.name === 'chat' ? 'Chat' : match.name[0].toUpperCase() + match.name.slice(1)
-    document.title = `${t} · TraceGraph`
+    const route = NAV.find(n => n.name === match.name)
+    const description = match.name === 'run'
+      ? `Trace of run #${match.params.qid}: how the question was planned, routed to agents and answered.`
+      : route?.description ?? NAV[0].description
+    setPageMeta(match.name === 'about' ? 'TraceGraph: every question has a path' : `${t} · TraceGraph`, description)
   }, [pageKey])
 
   if (match.name === 'about') {
     return (
       <>
         <a className="skip-link" href="#main" onClick={e => { e.preventDefault(); main.current?.focus() }}>Skip to content</a>
-        <main id="main" ref={main} tabIndex={-1} className="page-enter about-main" key={pageKey}><About /></main>
+        <main id="main" ref={main} tabIndex={-1} className="page-enter about-main" key={pageKey}><Suspense fallback={null}><About /></Suspense></main>
         <Palette open={palette} onClose={() => setPalette(false)} onToggleSidebar={toggleSidebar} />
       </>
     )

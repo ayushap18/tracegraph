@@ -63,9 +63,9 @@ function layout(width: number, p: GraphProps) {
   for (const t of tasks) {
     const a = t.routed?.agent
     if (!a) continue
-    const s: Status = !t.answered ? 'running' : t.answered.ok ? 'done' : 'warn'
+    const s: Status = t.error ? 'error' : !t.answered ? (run?.done ? 'warn' : 'running') : t.answered.ok ? 'done' : 'warn'
     const prev = used.get(a)
-    used.set(a, prev === 'running' || s === 'running' ? 'running' : prev === 'warn' || s === 'warn' ? 'warn' : 'done')
+    used.set(a, prev === 'running' || s === 'running' ? 'running' : prev === 'error' || s === 'error' ? 'error' : prev === 'warn' || s === 'warn' ? 'warn' : 'done')
   }
   const probs: Record<string, number> = {}
   for (const t of tasks) for (const [a, v] of Object.entries(t.routed?.probabilities ?? {})) probs[a] = Math.max(probs[a] ?? 0, v)
@@ -75,10 +75,10 @@ function layout(width: number, p: GraphProps) {
   const cards: Card[] = []
   const add = (c: Card) => { cards.push(c); return c }
 
-  const qStatus: Status = !run ? 'idle' : run.plan ? 'done' : 'running'
+  const qStatus: Status = !run ? 'idle' : run.plan ? 'done' : run.done ? 'error' : 'running'
   add({
     id: 'query', x: colX(0), y: midY - 38, w: colW[0], h: 76, color: 'var(--accent)', icon: ICONS.query, title: run ? `Query #${run.qid}` : 'Query',
-    lines: run ? [clip(run.text || '…', chars(0) + 5), run.plan ? `${run.plan.planner} plan · ${order.length} subtask${order.length === 1 ? '' : 's'}${run.plan.ms != null ? ' · ' + msf(run.plan.ms) : ''}` : 'planning…']
+    lines: run ? [clip(run.text || '…', chars(0) + 5), run.plan ? `${run.plan.planner} plan · ${order.length} subtask${order.length === 1 ? '' : 's'}${run.plan.ms != null ? ' · ' + msf(run.plan.ms) : ''}` : run.done ? 'planning stopped' : 'planning…']
       : ['waiting for a query', ''],
     status: qStatus,
   })
@@ -93,15 +93,15 @@ function layout(width: number, p: GraphProps) {
       id: 't:' + t.tid, x: colX(1), y: subY0 + i * (SUB_H + SUB_GAP), w: colW[1], h: SUB_H,
       color: r ? colorOf(r.agent) : 'var(--muted)', icon: t.tid.split('.')[1] ?? '·', title: clip(t.text || t.tid, chars(1) - 1),
       lines: [t.error ? 'routing failed' : r ? `→ ${r.agent} · ${pct(r.confidence)}` : waits.length ? `waits for ${waits.join(', ')}` : 'routing…'],
-      status: t.error ? 'error' : waits.length ? 'idle' : !r ? 'running' : !t.answered ? 'running' : t.answered.ok ? 'done' : 'warn',
+      status: t.error ? 'error' : run?.done && !t.answered ? 'warn' : waits.length ? 'idle' : !r || !t.answered ? 'running' : t.answered.ok ? 'done' : 'warn',
     })
   })
-  if (!tasks.length) add({ id: 'none', x: colX(1), y: midY - SUB_H / 2, w: colW[1], h: SUB_H, color: 'var(--line)', icon: '·', title: run ? 'planning…' : 'no subtasks', lines: [''], status: 'idle', dim: true })
+  if (!tasks.length) add({ id: 'none', x: colX(1), y: midY - SUB_H / 2, w: colW[1], h: SUB_H, color: 'var(--line)', icon: '·', title: run ? run.done ? 'no plan' : 'planning…' : 'no subtasks', lines: [''], status: 'idle', dim: true })
 
   add({
     id: 'jev', x: colX(2), y: midY - 46, w: colW[2], h: 92, color: 'var(--accent)', icon: ICONS.jev, title: 'Jev router',
     lines: [jev.model || 'typesafe system_one', `avg ${msf(jev.avgMs)} · ${pct(jev.avgConf)} conf`, anyUnrouted ? 'routing…' : run ? `${tasks.filter(t => t.routed).length}/${tasks.length} routed` : 'idle'],
-    status: !run ? 'idle' : anyUnrouted ? 'running' : 'done',
+    status: !run || !tasks.length ? 'idle' : anyUnrouted ? (run.done ? 'error' : 'running') : 'done',
   })
 
   const agY0 = midY - agentsH / 2
@@ -141,14 +141,14 @@ function layout(width: number, p: GraphProps) {
     const bulge = Math.min(46, 18 + Math.abs(y2 - y1) * 0.25)
     const dt = run!.tasks[d]
     edges.push({ id: `dep:${d}>${t.tid}`, from: 't:' + d, to: 't:' + t.tid, d: `M${x1},${y1} C${x1 - bulge},${y1} ${x2 - bulge},${y2} ${x2},${y2}`,
-      x2, y2, color: 'var(--accent2)', width: 1.4, state: dt?.answered ? 'done' : 'running', dep: true })
+      x2, y2, color: 'var(--accent2)', width: 1.4, state: dt?.answered || run?.done ? 'done' : 'running', dep: true })
   }
   if (tasks.length) for (const t of tasks) {
     const sid = 't:' + t.tid
     edge('query', sid, { state: 'done', color: 'var(--accent)', width: 1.5 })
-    edge(sid, 'jev', { state: t.routed || t.error ? 'done' : 'running', color: t.routed ? colorOf(t.routed.agent) : 'var(--accent)', width: 1.5 })
+    edge(sid, 'jev', { state: t.routed || t.error || run?.done ? 'done' : 'running', color: t.routed ? colorOf(t.routed.agent) : 'var(--accent)', width: 1.5 })
   } else {
-    edge('query', 'none', { state: run ? 'running' : 'idle', color: run ? 'var(--accent)' : null })
+    edge('query', 'none', { state: run && !run.done ? 'running' : 'idle', color: run ? 'var(--accent)' : null })
     edge('none', 'jev')
   }
   for (const a of agents) {
@@ -190,6 +190,10 @@ export default function Graph(props: GraphProps) {
   useEffect(() => {
     if (resetKey && svgRef.current && zoomRef.current) d3.select(svgRef.current).transition().duration(350).call(zoomRef.current.transform, d3.zoomIdentity)
   }, [resetKey])
+  useEffect(() => {
+    setHover(null)
+    if (svgRef.current && zoomRef.current) d3.select(svgRef.current).call(zoomRef.current.transform, d3.zoomIdentity)
+  }, [props.run?.qid])
   useEffect(() => {
     if (zoomBy.n && svgRef.current && zoomRef.current) d3.select(svgRef.current).transition().duration(250).call(zoomRef.current.scaleBy, zoomBy.k)
   }, [zoomBy])

@@ -24,7 +24,7 @@ function readHistory(): HistoryEntry[] {
   try {
     const raw = localStorage.getItem(HISTORY_KEY)
     const list = raw ? (JSON.parse(raw) as unknown) : []
-    return Array.isArray(list) ? (list as HistoryEntry[]).filter(h => h && typeof h.id === 'string') : []
+    return Array.isArray(list) ? (list as HistoryEntry[]).filter(h => h && typeof h.id === 'string' && typeof h.query === 'string' && Number.isFinite(h.at) && Array.isArray(h.runs) && h.runs.every(r => r && typeof r.engine === 'string' && Number.isFinite(r.qid))) : []
   } catch { return [] }
 }
 function writeHistory(list: HistoryEntry[]) {
@@ -92,7 +92,7 @@ function NewComparison({ onStarted, compact }: { onStarted: (h: HistoryEntry) =>
     setPicked(p => (p.includes(name) ? p.filter(n => n !== name) : p.length >= MAX_ENGINES ? p : [...p, name]))
 
   const q = query.trim()
-  const valid = q.length > 0 && picked.length >= MIN_ENGINES && picked.length <= MAX_ENGINES
+  const valid = q.length > 0 && picked.length >= MIN_ENGINES && picked.length <= MAX_ENGINES && picked.every(name => available.some(e => e.name === name))
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     if (!valid || busy) return

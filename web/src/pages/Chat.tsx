@@ -11,6 +11,7 @@ import { TraceView } from '../components/TraceView'
 import { Waterfall } from '../components/Viz'
 import { TopActions } from '../components/Shell'
 import { pct } from '../lib'
+import '../chat.css'
 
 // Chat home: sessions on the left, the conversation in the middle, the selected turn's live trace on the right.
 // Every message is a run with source "chat" and a session_id, so follow-ups reach the planner with context.
@@ -48,7 +49,7 @@ function pickSamples(samples: string[]): Array<{ text: string; kind: string }> {
   return out.slice(0, 6)
 }
 
-function readTraceOpen() { try { return localStorage.getItem(TRACE_KEY) !== '0' } catch { return true } }
+function readTraceOpen() { try { return localStorage.getItem(TRACE_KEY) === '1' } catch { return false } }
 
 export default function Chat() {
   const { store, subscribe } = useStore()
@@ -69,10 +70,11 @@ export default function Chat() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailErr, setDetailErr] = useState<string | null>(null)
   useEffect(() => {
-    if (!sessionId) { setDetail(null); setDetailErr(null); return }
-    if (detail?.id === sessionId) return
+    if (!sessionId) { setDetail(null); setDetailErr(null); setDetailLoading(false); return }
+    if (detail?.id === sessionId) { setDetailLoading(false); return }
     let alive = true
     setDetailLoading(true)
+    setDetailErr(null)
     getSession(sessionId)
       .then(r => { if (alive) { setDetail({ id: r.id, title: r.title, runs: r.runs.map(fromRecord) }); setDetailErr(null) } })
       .catch(e => { if (alive) { setDetail({ id: sessionId, title: '', runs: [] }); setDetailErr(errorText(e)) } })
@@ -165,9 +167,13 @@ export default function Chat() {
     }
   }
 
+  const sendLock = useRef(false)
   const send = useCallback(async (raw: string, sid: string | null) => {
+    if (sendLock.current || files.some(f => f.status === 'uploading')) return
     const q = raw.trim().slice(0, 500)
     if (!q) return
+    sendLock.current = true
+    const attached = files
     const ready = files.filter(f => f.status === 'ready' && f.info).map(f => f.info!)
     setSending({ text: q, files: ready.map(f => f.name) })
     setText('')
@@ -185,8 +191,10 @@ export default function Chat() {
       loadSessions()
     } catch (e) {
       toast.error(`Could not send: ${errorText(e)}`)
-      setText(q)
+      setText(current => current || q)
+      setFiles(current => [...attached, ...current])
     } finally {
+      sendLock.current = false
       setSending(null)
     }
   }, [files, loadSessions, toast])
@@ -338,7 +346,7 @@ export default function Chat() {
 
         <div className="composer-wrap">
           {dragging && <div className="drop-hint"><Icon name="upload" size={18} /> Drop files to attach</div>}
-          <form className="composer" onSubmit={e => { e.preventDefault(); if (!running) void send(text, sessionId) }}>
+          <form className="composer" onSubmit={e => { e.preventDefault(); if (!running && !uploading && !sending) void send(text, sessionId) }}>
             {files.length > 0 && (
               <ul className="file-chips" aria-label="Attached files">
                 {files.map(f => (
@@ -453,7 +461,7 @@ function Turn({ run, selected, onShowTrace, fileName }: { run: Run; selected: bo
         {answer ? (
           <div className={'bot-answer' + (streaming ? ' streaming' : '')}><Markdown text={answer} /></div>
         ) : !run.done ? (
-          <div className="thinking"><Spinner size={14} /><span>{phase}</span></div>
+          <div className="thinking" role="status"><Spinner size={14} /><span>{phase}<small>{!run.plan ? 'Breaking your request into clear steps.' : 'Your answer will appear here as it is ready.'}</small></span></div>
         ) : !finalFail ? <p className="muted">No answer.</p> : null}
         {run.error && <p className="bot-error"><Icon name="alert" size={14} />{run.error}</p>}
         {finalFail && !run.error && <p className="bot-error"><Icon name={run.status === 'cancelled' ? 'cancelled' : 'timeout'} size={14} />
@@ -470,8 +478,7 @@ function Turn({ run, selected, onShowTrace, fileName }: { run: Run; selected: bo
             {run.done && run.status !== 'done' && <StatusBadge status={run.status} />}
             {run.total_ms != null && <span className="num muted" title="Total time"><Icon name="latency" size={12} /> {secs(run.total_ms)}</span>}
             {answer && run.done && <IconButton icon="copy" label="Copy answer" size="sm" onClick={() => void copy()} />}
-            <IconButton icon="graph" label="Show trace in panel" size="sm" onClick={onShowTrace} active={selected} />
-            <a className="trace-link" href={`#/runs/${run.qid}`}>View trace <Icon name="arrow-right" size={12} /></a>
+            <button type="button" className="trace-link" onClick={onShowTrace} aria-pressed={selected}><Icon name="graph" size={13} />{selected ? 'Trace open' : 'View trace'}<Icon name="arrow-right" size={12} /></button>
           </span>
         </div>
       </div>

@@ -4,7 +4,10 @@ Run: .venv/bin/python server.py   then open http://localhost:8777 (PORT env var 
 Config comes from the environment or a .env file next to this script:
   TYPESAFE_API_KEY  required (Jev routing)
   TG_ENGINE         auto (default) | claude-code | codex | agy | anthropic | none
-                    auto uses the first installed subscription CLI, then ANTHROPIC_API_KEY, else keyless agents only.
+                    auto tries every installed subscription CLI, then ANTHROPIC_API_KEY, moving on when one fails;
+                    with none of them it runs the keyless agents only.
+  TG_ENGINE_ORDER   the order auto tries engines in, e.g. codex,claude-code,agy,anthropic (also settable in the UI)
+  TG_WARM_POOL      pre-started CLI processes kept per engine so calls skip start-up (default 3, 0 turns it off)
   TG_DB             SQLite file for runs, sessions, agents, files and evals (default data/tracegraph.db)
   TG_RUN_TIMEOUT    per-run deadline in seconds (default 300)
 Evals: .venv/bin/python -m jevrouter.evals [--engine NAME|none] [--save-baseline]
@@ -28,4 +31,6 @@ if __name__ == '__main__':
         print(f"  {'✓' if ok else '·'} {e.label:<14} {'available' if ok else why}")
     active = choose(engines)
     mode = f'{active.label} ({active.billing})' if active else 'keyless agents only'
+    if active and active.name == 'auto':
+        mode = 'Auto: ' + ' → '.join(e.label for e in active.chain())
     web.run_app(create_app(), host='127.0.0.1', port=port, print=lambda *_: print(f'TraceGraph on http://localhost:{port} · LLM engine: {mode}'))

@@ -1,12 +1,15 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+import { fileURLToPath, URL } from 'node:url'
 
 // Point the dev server at another backend (e.g. the mock on 8799): TG_TARGET=http://localhost:8799 npm run dev
 const target = process.env.TG_TARGET || 'http://localhost:8777'
 
 export default defineConfig({
   base: '/',
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
+  resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   build: { outDir: 'dist', emptyOutDir: true },
   server: {
     proxy: {

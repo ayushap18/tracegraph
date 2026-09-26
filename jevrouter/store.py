@@ -80,6 +80,9 @@ class Store:
     def list_runs(self, limit=50, before=None, q=None, source=None, status=None, engine=None) -> list[dict]:
         where, args = [], []
         for col, val in (('source', source), ('status', status), ('engine', engine)):
+            if col == 'engine' and val == 'none':
+                where.append('engine IS NULL')
+                continue
             if val:
                 where.append(f'{col} = ?')
                 args.append(val)
@@ -87,8 +90,13 @@ class Store:
             where.append('qid < ?')
             args.append(int(before))
         if q:
-            where.append('text LIKE ?')
-            args.append(f'%{q}%')
+            qid_text = q.lstrip('#')
+            if qid_text.isascii() and qid_text.isdigit() and len(qid_text) <= 18:
+                where.append('(text LIKE ? OR qid = ?)')
+                args.extend((f'%{q}%', int(qid_text)))
+            else:
+                where.append('text LIKE ?')
+                args.append(f'%{q}%')
         sql = 'SELECT record FROM runs' + (' WHERE ' + ' AND '.join(where) if where else '') + ' ORDER BY qid DESC LIMIT ?'
         return [json.loads(r['record']) for r in self.q(sql, *args, int(limit))]
 

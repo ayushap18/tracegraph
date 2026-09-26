@@ -297,3 +297,15 @@ async def test_codex_exec_uses_workspace_write_in_a_fresh_dir(tmp_path):
     a = call(path)['argv']
     assert a[a.index('-s') + 1] == 'read-only' and a[a.index('-C') + 1] == e.cwd()
     await e.aclose()
+
+
+def test_run_filters_find_ids_and_keyless_history():
+    store = Store()
+    for qid, text, engine in [(1, 'weather in Paris', None), (2, 'explain routing', 'codex'), (3, 'weather tomorrow', None)]:
+        store.save_run({'qid': qid, 'text': text, 'source': 'you', 'at': float(qid), 'status': 'done', 'engine': engine})
+    assert [r['qid'] for r in store.list_runs(q='#1')] == [1]
+    assert [r['qid'] for r in store.list_runs(q='2')] == [2]
+    assert [r['qid'] for r in store.list_runs(engine='none', limit=1)] == [3]
+    assert [r['qid'] for r in store.list_runs(engine='none', before=3)] == [1]
+    assert [r['qid'] for r in store.list_runs(q='weather', engine='codex')] == []
+    store.close()

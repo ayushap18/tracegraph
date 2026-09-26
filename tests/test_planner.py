@@ -79,6 +79,7 @@ async def test_claude_planner_falls_back(bad):
     ('How do I kill a Python process?', False), ('Who was Ada Lovelace?', False), ('18% of 2450', False),
     ('Convert 50 EUR to INR and then what time is it there', True), ("Who was Marks and Spencer's founder?", True),
     ('weather in Paris; 18% of 2450', True), ('What time is it there?', True),
+    ('hey, how are you?', False), ('hi there, what can you do?', False), ('Paris weather, Tokyo time', True),
 ])
 def test_worth_llm_plan(query, llm):
     from jevrouter.planner import worth_llm_plan

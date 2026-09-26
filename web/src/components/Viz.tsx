@@ -64,18 +64,19 @@ function spans(run: Run): { list: Span[]; total: number | null; live: boolean } 
   if (m.query != null) {
     const t0 = m.query
     const rel = (v: number | undefined) => (v == null ? null : v - t0)
-    const planEnd = rel(m.plan)
+    const terminal = run.done ? rel(m.done) ?? run.total_ms ?? 0 : null
+    const planEnd = rel(m.plan) ?? terminal
     list.push({ key: 'plan', label: `plan · ${run.plan?.planner ?? '…'}`, start: 0, end: planEnd, color: 'var(--accent)', kind: 'plan' })
     for (const tid of run.order) {
       const t = run.tasks[tid], r = rel(m.routed[tid]), a = rel(m.answered[tid])
       const agent = t?.routed?.agent
-      list.push({ key: 'r' + tid, label: `${tid} route`, start: planEnd ?? 0, end: r ?? (t?.error ? planEnd : null), color: 'var(--accent)', kind: 'route' })
-      if (r != null) list.push({ key: 'a' + tid, label: `${tid} ${agent ?? ''}`, start: r, end: a, color: colorOf(agent), kind: 'agent' })
+      list.push({ key: 'r' + tid, label: `${tid} route`, start: planEnd ?? 0, end: r ?? terminal ?? (t?.error ? planEnd : null), color: 'var(--accent)', kind: 'route' })
+      if (r != null) list.push({ key: 'a' + tid, label: `${tid} ${agent ?? ''}`, start: r, end: a ?? terminal, color: colorOf(agent), kind: 'agent' })
     }
     const answered = run.order.map(tid => rel(m.answered[tid])).filter((v): v is number => v != null)
-    if (run.merged || m.merged != null || (run.done && run.order.length > 1)) {
+    if (run.merged || m.merged != null || (run.order.length > 1 && answered.length === run.order.length)) {
       const s = answered.length ? Math.max(...answered) : planEnd ?? 0
-      list.push({ key: 'merge', label: `merge · ${run.merged?.engine ?? '…'}`, start: s, end: rel(m.merged) ?? (run.done ? s : null), color: 'var(--warn)', kind: 'merge' })
+      list.push({ key: 'merge', label: `merge · ${run.merged?.engine ?? '…'}`, start: s, end: rel(m.merged) ?? terminal, color: 'var(--warn)', kind: 'merge' })
     }
     return { list, total: rel(m.done), live: !run.done }
   }
@@ -126,7 +127,7 @@ export function Waterfall({ run }: { run: Run | undefined }) {
             const bw = Math.max(3, x(end(s)) - x(s.start))
             return (
               <g key={s.key} className={'wf-row' + (open ? ' open' : '')}>
-                <text className="wf-lbl" x={0} y={y + rowH / 2 + 4}>{s.label}</text>
+                <text className="wf-lbl" x={0} y={y + rowH / 2 + 4}><title>{s.label}</title>{s.label.length > Math.floor(labelW / 6.5) ? s.label.slice(0, Math.max(1, Math.floor(labelW / 6.5) - 2)) + '…' : s.label}</text>
                 <rect x={x(s.start)} y={y + 4} width={bw} height={rowH - 8} rx={4} fill={s.color} opacity={s.kind === 'route' ? 0.55 : 0.9} />
                 {!open && s.end! - s.start >= 1 && (() => {
                   // No room after the bar near the right edge: write the duration inside its end instead.

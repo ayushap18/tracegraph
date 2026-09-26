@@ -43,7 +43,7 @@ function EvalList() {
   // clear it once that eval is no longer running (a late progress event after Cancel would otherwise stick).
   useEffect(() => {
     const running = evals?.find(e => e.status === 'running')
-    if (running && !progress) setProgress({ eval_id: running.eval_id, done: running.done ?? 0, total: running.total, passed: running.passed })
+    if (running) setProgress({ eval_id: running.eval_id, done: running.done ?? 0, total: running.total, passed: running.passed })
     else if (progress && evals?.some(e => e.eval_id === progress.eval_id && e.status !== 'running')) setProgress(null)
   }, [evals]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -62,7 +62,7 @@ function EvalList() {
     setStarting(true)
     try {
       const res = await runEval(engine || undefined)
-      setProgress({ eval_id: res.eval_id, done: 0, total: 0, passed: 0 })
+      setProgress(p => p?.eval_id === res.eval_id ? p : { eval_id: res.eval_id, done: 0, total: 0, passed: 0 })
       void load()
     } catch (err) {
       toast.error(`Could not start the eval: ${errText(err)}`)
@@ -73,6 +73,12 @@ function EvalList() {
     try { await cancelEval(progress.eval_id); setProgress(null); void load() }
     catch (err) { toast.error(`Could not cancel: ${errText(err)}`) }
   }
+
+  useEffect(() => {
+    if (!progress) return
+    const timer = window.setInterval(() => void load(), 3000)
+    return () => clearInterval(timer)
+  }, [!!progress, load])
 
   const sorted = useMemo(() => (evals ?? []).slice().sort((a, b) => b.at - a.at), [evals])
   const trend = useMemo(() => sorted.filter(e => e.status === 'done' && e.total > 0).map(e => e.accuracy).reverse(), [sorted])
@@ -93,7 +99,7 @@ function EvalList() {
             <label className="sr-only" htmlFor="ev-engine">Engine</label>
             <select id="ev-engine" className="ev-select" value={engine} onChange={e => setEngine(e.target.value)} disabled={!!progress}>
               <option value="none">Keyless (no engine)</option>
-              {store.engines.map(e => (
+              {store.engines.filter(e => e.name !== 'none').map(e => (
                 <option key={e.name} value={e.name} disabled={!e.available}>{e.label}{e.available ? '' : ' (unavailable)'}</option>
               ))}
             </select>
@@ -199,6 +205,12 @@ function EvalDetailPage({ id }: { id: string }) {
   useEffect(() => subscribe(e => {
     if ((e.type === 'eval_progress' || e.type === 'eval_done') && e.eval_id === id) void load()
   }), [subscribe, id, load])
+
+  useEffect(() => {
+    if (data?.status !== 'running') return
+    const timer = window.setInterval(() => void load(), 3000)
+    return () => clearInterval(timer)
+  }, [data?.status, load])
 
   const cases = data?.cases ?? []
   const tags = useMemo(() => [...new Set(cases.flatMap(c => c.tags ?? []))].sort(), [cases])

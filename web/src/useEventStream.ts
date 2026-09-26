@@ -236,8 +236,9 @@ export function useEventStream(url = '/events') {
     // rAF is paused in background tabs, so fall back to a timer there rather than buffer without limit.
     const schedule = () => {
       if (raf || timer) return
-      if (document.hidden) timer = window.setTimeout(flush, 250)
-      else raf = requestAnimationFrame(flush)
+      // Keep a timer even when visible: the tab may be hidden before its frame fires.
+      timer = window.setTimeout(flush, 250)
+      if (!document.hidden) raf = requestAnimationFrame(flush)
     }
     const connect = () => {
       retry = 0

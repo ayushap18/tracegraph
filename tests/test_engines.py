@@ -58,6 +58,7 @@ CLAUDE_OK = '''
 async def test_claude_code_streams_with_slim_flags_and_scrubbed_env(tmp_path):
     path = fake(tmp_path, 'claude', CLAUDE_OK)
     e = ClaudeCodeEngine(path)
+    e.warm = 0  # the cold path: flags and prompt exactly as a one-shot `claude -p` gets them
     chunks = []
     r = await e.stream(system='Be brief.', prompt='capital of France?', effort='low', emit_delta=chunks.append)
     assert chunks == ['Par', 'is'] and r.text == 'Paris' and (r.input_tokens, r.output_tokens) == (450, 2)
@@ -144,7 +145,9 @@ async def test_agy_stream_json(tmp_path):
         out({'type': 'result', 'status': 'SUCCESS', 'response': 'Paris', 'usage': {'input_tokens': 90, 'output_tokens': 2}})
     ''')
     chunks = []
-    r = await AgyEngine(path).stream(system='Be brief.', prompt='capital?', effort='medium', emit_delta=chunks.append)
+    e = AgyEngine(path)
+    e.warm = 0
+    r = await e.stream(system='Be brief.', prompt='capital?', effort='medium', emit_delta=chunks.append)
     assert chunks == ['Pa', 'ris'] and r.text == 'Paris' and (r.input_tokens, r.output_tokens) == (90, 2)
     a = call(path)['argv']
     assert a[0] == '-p' and a[1].endswith('capital?') and a[a.index('--output-format') + 1] == 'stream-json'
@@ -220,9 +223,11 @@ def test_choose_prefers_subscriptions(monkeypatch, tmp_path):
         monkeypatch.delenv(var, raising=False)
     engines = catalog()
     monkeypatch.setenv('TG_ENGINE', 'auto')
-    assert choose(engines).name == 'codex'  # claude missing, so the next subscription CLI
+    auto = choose(engines)
+    assert auto.name == 'auto' and auto.lead().name == 'codex'  # claude missing, so the next subscription CLI
+    assert [e.name for e in auto.chain()] == ['codex', 'agy', 'anthropic']  # the API key is the last resort
     assert choose(engines, 'agy').name == 'agy'
-    assert choose(engines, 'claude-code').name == 'codex'  # unavailable explicit choice falls back to auto
+    assert choose(engines, 'claude-code').name == 'auto'  # unavailable explicit choice falls back to auto
     assert choose(engines, 'anthropic').name == 'anthropic'  # ANTHROPIC_API_KEY is set by the fixture
     assert choose(engines, 'none') is None
     installed.clear()
@@ -248,3 +253,122 @@ async def test_agy_real_nested_event_shape(tmp_path):
     chunks = []
     r = await AgyEngine(path).stream(system='s', prompt='p', emit_delta=chunks.append)
     assert r.text == 'pong' and chunks == ['pong', '\n'] and (r.input_tokens, r.output_tokens) == (12241, 30)
+
+
+# ---------- warm starts ----------
+
+WARM_AGY = '''
+    msg = json.loads(stdin)
+    assert msg['event'] == 'user'
+    out({'event': 'result', 'result': {'status': 'SUCCESS', 'response': f"{os.getpid()}:{msg['message']['content']}"}})
+'''
+
+
+async def test_warm_process_is_started_before_the_next_call(tmp_path):
+    path = fake(tmp_path, 'agy', WARM_AGY)
+    e = AgyEngine(path)
+    first = await e.stream(system='s', prompt='one', effort='low')
+    await asyncio.gather(*e.refills)
+    assert len(e.idle) == 1  # a replacement is waiting for the next call with the same flags
+    waiting = e.idle[0][2].pid
+    second = await e.stream(system='s', prompt='two', effort='low')
+    assert second.text == f'{waiting}:s\n\n---\n\ntwo' and first.text.split(':')[0] != str(waiting)
+    a = call(path)['argv']
+    assert '--input-format' in a and a[-1] == '-p=' and '--print-timeout' not in a
+    await asyncio.gather(*e.refills)
+    await e.aclose()
+    assert e.idle == []
+
+
+async def test_warm_pool_is_keyed_by_flags_and_capped(tmp_path):
+    path = fake(tmp_path, 'agy', WARM_AGY)
+    e = AgyEngine(path)
+    e.warm = 2
+    for effort in ('low', 'medium', 'high'):
+        await e.prewarm(effort=effort)
+    assert len(e.idle) == 2 and [k[k.index('--effort') + 1] for k, _, _ in e.idle] == ['medium', 'high']
+    await e.prewarm(effort='high')  # already warm: no second process
+    assert len(e.idle) == 2
+    waiting = next(p.pid for k, _, p in e.idle if 'high' in k)
+    r = await e.stream(system='s', prompt='p', effort='high')
+    assert r.text.startswith(f'{waiting}:')  # the idle process answered
+    await asyncio.gather(*e.refills)
+    await e.aclose()
+
+
+async def test_claude_code_warm_call_sends_the_prompt_as_a_stream_json_line(tmp_path):
+    path = fake(tmp_path, 'claude', '''
+        msg = json.loads(stdin)
+        out({'type': 'result', 'is_error': False, 'result': msg['message']['content'], 'usage': {}})
+    ''')
+    e = ClaudeCodeEngine(path)
+    r = await e.stream(system='Be brief.', prompt='capital?')
+    a = call(path)['argv']
+    assert r.text == 'capital?' and a[a.index('--input-format') + 1] == 'stream-json' and a[a.index('--system-prompt') + 1] == 'Be brief.'
+    await e.aclose()
+
+
+# ---------- auto fallback ----------
+
+class Stub:
+    def __init__(self, name, fail=None, web=False, exec=False):
+        self.name, self.label, self.billing, self.fail = name, name.title(), 'subscription', fail
+        self.supports_web, self.supports_exec, self.calls = web, exec, 0
+
+    def available(self):
+        return True, ''
+
+    async def stream(self, **kw):
+        self.calls += 1
+        if self.fail:
+            if kw.get('emit_delta'):
+                kw['emit_delta']('half')
+            raise EngineError(self.fail, 'half')
+        from jevrouter.engines import Reply
+        return Reply(f'{self.name} ok')
+
+    async def prewarm(self, **kw):
+        pass
+
+
+async def test_auto_falls_through_and_cools_down_a_used_up_plan():
+    from jevrouter.engines import AutoEngine
+    claude, codex, api = Stub('claude-code'), Stub('codex', fail="You've hit your usage limit"), Stub('anthropic')
+    auto = AutoEngine({'codex': codex, 'claude-code': claude, 'anthropic': api}, order=['codex', 'claude-code', 'anthropic'])
+    chunks = []
+    r = await auto.stream(system='s', prompt='p', emit_delta=chunks.append)
+    assert r.text == 'claude-code ok' and r.engine == 'claude-code' and 'switching to Claude-Code' in ''.join(chunks)
+    await auto.stream(system='s', prompt='p')
+    assert codex.calls == 1  # skipped while cooling down, not retried on every call
+    assert 'usage limit' in auto.info()['cooling']['codex'] and auto.lead().name == 'claude-code'
+    auto.set_order(['anthropic'])
+    assert auto.order == ['anthropic', 'codex', 'claude-code'] and auto.info()['cooling'] == {}
+
+
+async def test_auto_picks_an_engine_that_can_do_the_call():
+    from jevrouter.engines import AutoEngine
+    agy, codex = Stub('agy'), Stub('codex', web=True, exec=True)
+    auto = AutoEngine({'agy': agy, 'codex': codex})
+    assert (await auto.stream(system='s', prompt='p')).engine == 'agy'
+    assert (await auto.stream(system='s', prompt='p', web=True)).engine == 'codex'
+    assert auto.supports_web and auto.supports_exec
+
+
+async def test_auto_reports_every_failure():
+    from jevrouter.engines import AutoEngine
+    auto = AutoEngine({'a': Stub('a', fail='timed out after 180s'), 'b': Stub('b', fail='not logged in')})
+    with pytest.raises(EngineError, match='A: timed out after 180s; B: not logged in'):
+        await auto.stream(system='s', prompt='p')
+
+
+async def test_auto_warms_the_engine_that_takes_over():
+    from jevrouter.engines import AutoEngine
+    warmed = []
+    codex, agy = Stub('codex', fail='usage limit'), Stub('agy')
+    agy.prewarm = lambda **kw: asyncio.sleep(0, warmed.append(kw))
+    auto = AutoEngine({'codex': codex, 'agy': agy})
+    await auto.prewarm(system='plan', effort='low')  # codex leads and has nothing to warm
+    assert warmed == []
+    await auto.stream(system='s', prompt='p')
+    await asyncio.gather(*auto.tasks)
+    assert warmed == [{'system': 'plan', 'effort': 'low'}]

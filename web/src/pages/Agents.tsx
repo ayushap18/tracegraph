@@ -84,7 +84,7 @@ export default function Agents(_props: { params: Record<string, string> }) {
           {!store.engine && <p className="muted small">Custom agents run on an LLM engine; they are offered to Jev only while one is active.</p>}
         </div>
         <div className="ag-custom-grid">
-          <CreateForm agents={agents ?? []} disabled={loading} onCreated={a => { setAgents(list => [...(list ?? []), a]); toast.success(`Created agent "${a.name}"`) }} />
+          <CreateForm agents={agents ?? []} disabled={agents == null} onCreated={a => { setAgents(list => [...(list ?? []).filter(x => x.name !== a.name), a]); toast.success(`Created agent "${a.name}"`) }} />
           <div className="ag-custom-list">
             {loading ? <SkeletonCards n={2} />
               : groups.custom.length === 0
@@ -181,7 +181,7 @@ function CreateForm({ agents, disabled, onCreated }: { agents: AgentInfo[]; disa
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     setSubmitted(true)
-    if (!valid || busy) return
+    if (!valid || busy || disabled) return
     setBusy(true)
     try {
       const a = await createAgent({ name: d.name.trim(), description: d.description.trim(), prompt: d.prompt.trim(), web: d.web })

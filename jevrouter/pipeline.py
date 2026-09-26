@@ -7,17 +7,29 @@ import time
 from collections import deque
 
 from . import agents as agent_registry
+from .agents.llm import COMMON
 from .config import AGENTS, GUARDS, HISTORY, KEYLESS, PRICES, REPORT, RESEARCH, RUN, RUN_TIMEOUT, SAMPLES
 from .events import Broadcaster
 from .files import FILE_AGENTS, file_agents
 from .jev import route_one
 from .merger import merge
-from .planner import plan, resolve_step
+from .planner import SCHEMA as PLAN_SCHEMA, SYSTEM as PLAN_SYSTEM, plan, resolve_step
 from .store import Store
 
 ROUTED_KEYS = ('agent', 'pick', 'reason', 'probabilities', 'confidence', 'urgency', 'unsafe', 'clear', 'jev_ms', 'model')
 USE_ACTIVE = object()  # a run's engine argument: the engine active at submit time (None means keyless)
 CONTEXT_CHARS = 500
+
+
+async def warm_up(engine):
+    """Starts the CLI processes a run is most likely to need, so the first query doesn't wait for a cold start."""
+    if engine is None:
+        return
+    for call in [dict(system=PLAN_SYSTEM, effort='low', schema=PLAN_SCHEMA), *(dict(system=s, effort=e) for s, e in COMMON)]:
+        try:
+            await engine.prewarm(**call)
+        except Exception:
+            pass  # warming is only an optimisation
 
 
 def ms_since(t: float) -> int:

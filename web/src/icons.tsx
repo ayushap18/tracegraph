@@ -4,7 +4,7 @@ import {
   MessagesSquare, Minimize2, Monitor, Moon, Pause, Play, Radio, Scan, ScrollText, Search, SendHorizontal, ShieldBan,
   Split, Sun, Target, Timer, Wallet, Waypoints, Workflow, X, Zap, ZoomIn, ZoomOut, type LucideIcon,
   Braces, Check, ChevronDown, Cpu, KeyRound, PlugZap, Rocket, SquareTerminal,
-  ArrowRight, ArrowUp, Ban, Blocks, CircleAlert, CircleX, Command, Copy, CornerDownLeft, Database, Ellipsis, ExternalLink, Eye,
+  ArrowDown, ArrowRight, ArrowUp, Ban, Blocks, CircleAlert, CircleX, Command, Copy, CornerDownLeft, Database, Ellipsis, ExternalLink, Eye,
   File, FileJson, FileSpreadsheet, FileText, Filter, FlaskConical, GitCompareArrows, Hash, History, Hourglass, House, Info, Layers,
   Link, LoaderCircle, Lock, Menu, PanelLeftClose, PanelLeftOpen, Paperclip, Plus, RefreshCw, RotateCcw, Server, Settings, Share2,
   Shield, Sparkles, Square, SquarePen, Table, Tag, Trash2, TriangleAlert, Trophy, TrendingUp, Upload, Gauge, Download,
@@ -36,7 +36,7 @@ export const UI_ICONS = {
   trash: Trash2, delete: Trash2, plus: Plus, add: Plus, new: SquarePen, external: ExternalLink, file: File, 'file-text': FileText,
   'file-csv': FileSpreadsheet, 'file-json': FileJson, menu: Menu, 'sidebar-close': PanelLeftClose, 'sidebar-open': PanelLeftOpen,
   refresh: RefreshCw, replay: RotateCcw, retry: RotateCcw, download: Download, filter: Filter, warning: TriangleAlert, alert: CircleAlert,
-  error: CircleX, success: CircleCheck, more: Ellipsis, 'arrow-right': ArrowRight, 'arrow-up': ArrowUp, sparkles: Sparkles,
+  error: CircleX, success: CircleCheck, more: Ellipsis, 'arrow-right': ArrowRight, 'arrow-up': ArrowUp, 'arrow-down': ArrowDown, sparkles: Sparkles,
   database: Database, command: Command, enter: CornerDownLeft, shield: Shield, guard: Shield, trophy: Trophy, tag: Tag, lock: Lock,
   spinner: LoaderCircle, table: Table, eye: Eye, code: CodeXml, layers: Layers, hash: Hash, server: Server, blocks: Blocks,
   timeout: Hourglass, cancelled: Ban, trend: TrendingUp, gauge: Gauge, engine: Cpu, web: Globe, clock: Clock,
@@ -46,7 +46,7 @@ export type UiIconName = keyof typeof UI_ICONS
 
 // LLM engines: subscription CLIs and the pay-per-token API, plus keyless mode.
 export const ENGINE_ICONS: Record<string, LucideIcon> = {
-  'claude-code': SquareTerminal, codex: Braces, agy: Rocket, anthropic: KeyRound, none: PlugZap,
+  auto: Zap, 'claude-code': SquareTerminal, codex: Braces, agy: Rocket, anthropic: KeyRound, none: PlugZap,
 }
 
 export function EngineIcon({ name, size = 15, strokeWidth = 1.9 }: { name: string; size?: number; strokeWidth?: number }) {

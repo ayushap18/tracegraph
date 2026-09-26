@@ -9,12 +9,19 @@ ABOUT = ('You are one specialist agent inside TraceGraph, where a classifier (Je
 
 
 def result(engine: Engine, reply: Reply, source: str | None = None) -> AgentResult:
-    return AgentResult(reply.text, bool(reply.text), source or reply.source, engine.name, reply.input_tokens, reply.output_tokens)
+    return AgentResult(reply.text, bool(reply.text), source or reply.source, reply.engine or engine.name,
+                       reply.input_tokens, reply.output_tokens)
+
+
+CODE = ABOUT + ' You are the code agent: a short explanation plus a minimal example in a fenced code block, under 200 words.'
+KNOWLEDGE = ABOUT + ' You are the knowledge agent: answer factually in 2-4 sentences, preferring the reference when given.'
+CHAT = ABOUT + ' You are the chat agent: reply warmly in 1-3 sentences.'
+# (system, effort) of the calls most runs make, so a CLI engine can start their processes early.
+COMMON = [(CHAT, 'low'), (KNOWLEDGE, 'medium'), (CODE, 'medium')]
 
 
 async def code(engine, http, q: str, emit_delta) -> AgentResult:
-    system = ABOUT + ' You are the code agent: a short explanation plus a minimal example in a fenced code block, under 200 words.'
-    return result(engine, await engine.stream(system=system, prompt=q, effort='medium', emit_delta=emit_delta))
+    return result(engine, await engine.stream(system=CODE, prompt=q, effort='medium', emit_delta=emit_delta))
 
 
 async def knowledge(engine, http, q: str, emit_delta) -> AgentResult:
@@ -24,13 +31,11 @@ async def knowledge(engine, http, q: str, emit_delta) -> AgentResult:
     except Exception:
         abstract, url = '', None
     prompt = q if not abstract else f'{q}\n\nReference (Wikipedia abstract via DuckDuckGo):\n{abstract}'
-    system = ABOUT + ' You are the knowledge agent: answer factually in 2-4 sentences, preferring the reference when given.'
-    return result(engine, await engine.stream(system=system, prompt=prompt, effort='medium', emit_delta=emit_delta), url)
+    return result(engine, await engine.stream(system=KNOWLEDGE, prompt=prompt, effort='medium', emit_delta=emit_delta), url)
 
 
 async def chat(engine, http, q: str, emit_delta) -> AgentResult:
-    system = ABOUT + ' You are the chat agent: reply warmly in 1-3 sentences.'
-    return result(engine, await engine.stream(system=system, prompt=q, effort='low', emit_delta=emit_delta, max_tokens=1024))
+    return result(engine, await engine.stream(system=CHAT, prompt=q, effort='low', emit_delta=emit_delta, max_tokens=1024))
 
 
 async def research(engine, http, q: str, emit_delta) -> AgentResult:

@@ -33,10 +33,11 @@ export default function Runs() {
   const [fallback, setFallback] = useState(false) // server has no /api/runs: show the in-memory history
   const search = useRef<HTMLInputElement>(null)
   const [nonce, setNonce] = useState(0)
+  const requestVersion = useRef(0)
 
   useEffect(() => { const t = window.setTimeout(() => setDebounced(q.trim()), 250); return () => clearTimeout(t) }, [q])
 
-  const params = useMemo(() => ({ q: debounced || undefined, source: source || undefined, status: status || undefined, engine: engine && engine !== 'default' ? engine : undefined }), [debounced, source, status, engine])
+  const params = useMemo(() => ({ q: debounced || undefined, source: source || undefined, status: status || undefined, engine: engine || undefined }), [debounced, source, status, engine])
 
   const load = useCallback(async (before?: number) => {
     const res = await listRuns({ limit: PAGE, before, ...params })
@@ -45,6 +46,9 @@ export default function Runs() {
 
   useEffect(() => {
     let alive = true
+    requestVersion.current += 1
+    setLoadingMore(false)
+    setError(null)
     setLoading(true)
     load().then(
       runs => { if (!alive) return; setPages(runs); setMore(runs.length >= PAGE); setError(null); setFallback(false) },
@@ -56,19 +60,22 @@ export default function Runs() {
   const loadMore = async () => {
     const oldest = pages[pages.length - 1]
     if (!oldest) return
+    if (loading || loadingMore) return
+    const version = requestVersion.current
     setLoadingMore(true)
     try {
       const runs = await load(oldest.qid)
+      if (version !== requestVersion.current) return
       setPages(p => [...p, ...runs.filter(r => !p.some(x => x.qid === r.qid))])
       setMore(runs.length >= PAGE)
-    } catch (e) { setError(errorText(e)) } finally { setLoadingMore(false) }
+    } catch (e) { if (version === requestVersion.current) setError(errorText(e)) } finally { if (version === requestVersion.current) setLoadingMore(false) }
   }
 
   // Server filters are advisory; the same filters apply client-side so live runs and older servers agree.
   const matches = useCallback((r: Run) => {
     if (source && r.source !== source) return false
     if (status && (r.done ? r.status : 'running') !== status) return false
-    if (engine && (r.engine ?? 'default') !== engine) return false
+    if (engine && (r.engine ?? 'none') !== engine) return false
     if (debounced && !r.text.toLowerCase().includes(debounced.toLowerCase()) && String(r.qid) !== debounced.replace('#', '')) return false
     return true
   }, [source, status, engine, debounced])
@@ -104,11 +111,12 @@ export default function Runs() {
         </label>
         <Select label="Source" value={source} onChange={setSource} options={SOURCES} />
         <Select label="Status" value={status} onChange={setStatus} options={STATUSES} />
-        <Select label="Engine" value={engine} onChange={setEngine} options={['default', ...engines]} />
+        <Select label="Engine" value={engine} onChange={setEngine} options={[...new Set(['none', ...engines])]} />
         {filtered && <Button variant="ghost" size="sm" icon="close" onClick={clear}>Clear</Button>}
       </div>
       {fallback && <p className="notice"><Icon name="info" size={14} />This server does not list stored runs yet, so only the runs in memory are shown.</p>}
 
+      {error && rows.length > 0 && <p className="notice" role="alert"><Icon name="alert" size={14} />{error}</p>}
       <Card flush className="runs-card">
         {loading && !rows.length ? (
           <div className="table-skel">{Array.from({ length: 8 }, (_, i) => <Skeleton key={i} height={18} />)}</div>
@@ -140,7 +148,7 @@ export default function Runs() {
                       </td>
                       <td className="hide-sm"><span className="src-tag">{r.source}</span></td>
                       <td><StatusBadge status={r.done ? r.status : 'running'} /></td>
-                      <td className="hide-md">{r.engine ? <span className="eng"><EngineIcon name={r.engine} size={13} />{r.engine}</span> : <span className="muted">default</span>}</td>
+                      <td className="hide-md">{r.engine ? <span className="eng"><EngineIcon name={r.engine} size={13} />{r.engine}</span> : <span className="muted">keyless</span>}</td>
                       <td className="hide-sm"><span className="chips">{agents.slice(0, 3).map(a => <Chip key={a} agent={a} />)}{agents.length > 3 && <span className="muted small">+{agents.length - 3}</span>}</span></td>
                       <td className="num hide-xs">{r.done ? secs(r.total_ms) : '…'}</td>
                       <td className="num hide-md" title={new Date(r.at * 1000).toLocaleString()}>{timeAgo(r.at, now)}</td>
@@ -151,7 +159,7 @@ export default function Runs() {
             </table>
           </div>
         )}
-        {more && !fallback && rows.length > 0 && (
+        {more && !fallback && !loading && (
           <div className="load-more"><Button variant="secondary" loading={loadingMore} onClick={() => void loadMore()} icon="chevron-down">Load more</Button></div>
         )}
       </Card>
@@ -165,7 +173,7 @@ function Select({ label, value, onChange, options }: { label: string; value: str
       <span className="sr-only">{label}</span>
       <select value={value} onChange={e => onChange(e.target.value)} aria-label={label}>
         <option value="">{label}: all</option>
-        {options.map(o => <option key={o} value={o}>{label}: {o}</option>)}
+        {options.map(o => <option key={o} value={o}>{label}: {o === 'none' ? 'keyless' : o}</option>)}
       </select>
       <Icon name="chevron-down" size={14} />
     </label>

@@ -67,5 +67,16 @@ class AgyEngine(CliEngine):
             args += ['--model', os.environ['TG_AGY_MODEL']]
         return args, ''
 
+    def persistent(self, *, system, prompt, effort, web, schema):
+        # agy has no system-prompt flag, so the flags depend only on effort and schema: a handful of warm processes
+        # covers every call. No --print-timeout here: it would count the time spent waiting idle.
+        args = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--effort', EFFORT.get(effort, 'medium')]
+        if schema:
+            args += ['--json-schema', json.dumps(schema)]
+        if os.environ.get('TG_AGY_MODEL'):
+            args += ['--model', os.environ['TG_AGY_MODEL']]
+        line = json.dumps({'event': 'user', 'message': {'role': 'user', 'content': f'{system}\n\n---\n\n{prompt}'}})
+        return args + ['-p='], line + '\n'
+
     def parser(self):
         return AgyParser()

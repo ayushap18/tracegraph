@@ -68,6 +68,14 @@ class ClaudeCodeEngine(CliEngine):
         Path(workdir, 'mcp.json').write_text('{"mcpServers": {}}')
 
     def command(self, *, system, prompt, effort, web, schema):
+        return self.flags(system, effort, web, schema), prompt
+
+    def persistent(self, *, system, prompt, effort, web, schema):
+        # The system prompt is a flag, so each distinct one (planner, merger, each agent) gets its own warm process.
+        line = json.dumps({'type': 'user', 'message': {'role': 'user', 'content': prompt}}) + '\n'
+        return self.flags(system, effort, web, schema) + ['--input-format', 'stream-json'], line
+
+    def flags(self, system, effort, web, schema):
         args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
                 '--no-session-persistence', '--strict-mcp-config', '--mcp-config', str(Path(self.cwd(), 'mcp.json')),
                 '--setting-sources', '', '--disable-slash-commands', '--system-prompt', system,
@@ -80,7 +88,7 @@ class ClaudeCodeEngine(CliEngine):
             args += ['--json-schema', json.dumps(schema)]
         if os.environ.get('TG_CLAUDE_CODE_MODEL'):
             args += ['--model', os.environ['TG_CLAUDE_CODE_MODEL']]
-        return args, prompt
+        return args
 
     def parser(self):
         return ClaudeCodeParser()

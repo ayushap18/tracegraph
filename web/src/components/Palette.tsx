@@ -53,7 +53,7 @@ export function Palette({ open, onClose, onToggleSidebar }: { open: boolean; onC
     out.push({ id: 'a:theme', group: 'Actions', label: `Toggle theme (now ${THEME_LABEL[theme]})`, icon: 'moon', keywords: 'dark light', run: cycle })
     out.push({ id: 'a:sidebar', group: 'Actions', label: 'Toggle sidebar', icon: 'sidebar-close', keywords: 'collapse expand', run: onToggleSidebar })
     const cur = store.engine?.name ?? 'none'
-    for (const e of [...store.engines, { name: 'none', label: 'Keyless', available: true, why: '' }]) {
+    for (const e of [...store.engines.filter(e => e.name !== 'none'), { name: 'none', label: 'Keyless', available: true, why: '' }]) {
       if (e.name === cur) continue
       out.push({
         id: 'e:' + e.name, group: 'Engines', label: `Switch engine: ${e.label}`, hint: e.available ? undefined : e.why, engine: e.name, keywords: 'llm model',

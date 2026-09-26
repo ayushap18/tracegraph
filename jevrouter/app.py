@@ -16,12 +16,14 @@ from .config import AGENTS, DIST, GUARDS, LEGACY_PAGE, REPORT, RESEARCH, RUN
 from .engines import EngineError, catalog, choose
 from .events import sse
 from .files import FILE_AGENTS, MAX_BYTES, FileError, extract
-from .pipeline import USE_ACTIVE, Router
+from .pipeline import USE_ACTIVE, Router, warm_up
 from .store import DEFAULT_DB, Store
 
 ROUTER = web.AppKey('router', Router)
 HTTP = web.AppKey('http', aiohttp.ClientSession)
 AUTOPILOT = web.AppKey('autopilot', asyncio.Task)
+WARMUP = web.AppKey('warmup', asyncio.Task)
+WARMING: set[asyncio.Task] = set()
 
 
 async def read_json(request) -> dict:
@@ -333,6 +335,12 @@ async def test_engine(request):
     return web.json_response({'ok': bool(r.text), 'ms': ms(), 'text': r.text[:200]})
 
 
+def background(coro):
+    task = asyncio.create_task(coro)
+    WARMING.add(task)
+    task.add_done_callback(WARMING.discard)
+
+
 async def control(request):
     body, router = await read_json(request), request.app[ROUTER]
     try:
@@ -342,6 +350,17 @@ async def control(request):
             router.state['interval'] = max(1.0, min(15.0, float(body['interval'])))
     except (TypeError, ValueError):
         return web.json_response({'error': 'interval must be a number'}, status=400)
+    if 'engine_order' in body:
+        auto = router.engines.get('auto')
+        if auto is None or not isinstance(body['engine_order'], list):
+            return web.json_response({'error': 'engine_order must be a list of engine names'}, status=400)
+        try:
+            auto.set_order(body['engine_order'])
+        except ValueError as e:
+            return web.json_response({'error': str(e)}, status=400)
+        if router.engine is auto:
+            background(warm_up(auto))
+        router.bus.emit('config', **router.config())
     if 'engine' in body:
         name = str(body['engine'] or 'none')
         if name == 'none':
@@ -354,6 +373,7 @@ async def control(request):
             if not ok:
                 return web.json_response({'error': f'{engine.label} is not available: {why}'}, status=409)
             router.use_engine(engine)
+            background(warm_up(engine))
         # Agents, prices and the engine badge all change, so every browser gets the new config (older clients ignore it).
         router.bus.emit('config', **router.config())
     router.bus.emit('state', state=router.state)
@@ -423,10 +443,13 @@ def create_app(router_factory=None) -> web.Application:
             engines = catalog()
             store = Store(os.environ.get('TG_DB') or DEFAULT_DB)
             app[ROUTER] = Router(AsyncTypeSafeClient(), app[HTTP], choose(engines), engines=engines, store=store)
+            app[WARMUP] = asyncio.create_task(warm_up(app[ROUTER].engine))
         app[AUTOPILOT] = asyncio.create_task(app[ROUTER].autopilot())
 
     async def cleanup(app):
         app[AUTOPILOT].cancel()
+        if WARMUP in app:
+            app[WARMUP].cancel()
         router = app[ROUTER]
         # Cancel through the same path as a user cancel, and wait, so each run is saved with its final status.
         pending = [*router.evals.values(), *router.tasks]
