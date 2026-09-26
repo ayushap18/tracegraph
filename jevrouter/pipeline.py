@@ -1,10 +1,12 @@
 """handle(query): plan -> (route -> run) in dependency waves -> merge, emitting the SSE protocol in PLAN.md and docs/PLAN-v4.md."""
 import asyncio
+import copy
 import itertools
 import os
 import random
 import time
-from collections import OrderedDict, deque
+import uuid
+from collections import deque
 
 from . import agents as agent_registry
 from .agents.llm import COMMON
@@ -14,6 +16,7 @@ from .files import FILE_AGENTS, file_agents
 from .jev import route_one
 from .merger import merge
 from .planner import SCHEMA as PLAN_SCHEMA, SYSTEM as PLAN_SYSTEM, plan, resolve_step
+from .sandbox import DEFAULT_TTL, MAX_SANDBOXES, TURNS as SANDBOX_TURNS, Sandboxes, SandboxError
 from .store import Store
 
 ROUTED_KEYS = ('agent', 'pick', 'reason', 'probabilities', 'confidence', 'urgency', 'unsafe', 'clear', 'jev_ms', 'model')
@@ -22,8 +25,7 @@ CONTEXT_CHARS = 500
 # Sandbox runs are never stored. Their qids come from a separate range so they can't collide with
 # (or leave gaps in) the persisted run numbers, and they're forgotten when they finish.
 SANDBOX_QID0 = 1_000_000_000
-SANDBOX_SESSIONS = 200  # most sandbox conversations kept in memory for follow-up context
-SANDBOX_TURNS = 3       # turns of context a sandbox follow-up sees (same as a saved chat)
+SANDBOX_SESSIONS = MAX_SANDBOXES  # most sandbox conversations kept in memory (jevrouter/sandbox.py)
 
 
 async def warm_up(engine):
@@ -63,11 +65,12 @@ class Router:
         self.tasks: set[asyncio.Task] = set()
         self.evals: dict[str, asyncio.Task] = {}  # eval_id -> running eval (jevrouter/evals.py)
         self.run_timeout = float(os.environ.get('TG_RUN_TIMEOUT', RUN_TIMEOUT))
-        # Sandbox: qid -> sandbox id for runs in flight, their scratch stats, and recent turns per sandbox (memory only).
+        # Sandbox: qid -> sandbox id for runs in flight, their scratch stats, and each sandbox's memory (never on disk).
         self.sandbox: dict[int, str] = {}
         self.sandbox_stats: dict[int, dict] = {}
-        self.sandbox_turns: OrderedDict[str, deque] = OrderedDict()
+        self.sandboxes = Sandboxes()
         self.sandbox_ids = itertools.count(SANDBOX_QID0)
+        self.sandbox_ttl = float(os.environ.get('TG_SANDBOX_TTL', DEFAULT_TTL))
 
     # ---------- agents and engines ----------
 
@@ -142,11 +145,14 @@ class Router:
         return [self.inflight.get(r['qid'], r) for r in self.store.runs_where(col, value)]
 
     def submit(self, query: str, source: str, *, session_id=None, engine=USE_ACTIVE, files=(), compare_id=None,
-               sandbox: str | None = None) -> int:
+               sandbox: str | None = None, extras: dict | None = None) -> int:
         """Allocates the qid now (so POST /ask can return it) and runs the query in the background.
         With `sandbox` (a sandbox id) the run is ephemeral: nothing is stored, it doesn't count towards stats or
-        history, and its events only reach that sandbox's event stream."""
+        history, and its events only reach that sandbox's event stream. A sandbox run's `extras` (all optional):
+        `draft` (an unsaved custom agent dict), `files` ([(meta, text)] from sandbox memory), `replaces` (qid of the
+        turn this edits) and `remember` (default True: read and write the sandbox's follow-up memory)."""
         if sandbox:
+            self.sandboxes.get(sandbox, create=True)  # marks it used, so the sweeper leaves it alone
             qid = next(self.sandbox_ids)
             self.sandbox[qid] = sandbox
             self.sandbox_stats[qid] = {'queries': 0, 'subtasks': 0, 'errors': 0, 'jev_input_tokens': 0,
@@ -154,7 +160,7 @@ class Router:
         else:
             qid = next(self.ids)
         task = asyncio.create_task(self.handle(query, source, qid, session_id=session_id, engine=engine, files=files,
-                                               compare_id=compare_id))
+                                               compare_id=compare_id, extras=extras))
         self.tasks.add(task)
         self.running[qid] = task
         task.add_done_callback(lambda t: (self.tasks.discard(t), self.running.pop(qid, None)))
@@ -169,9 +175,10 @@ class Router:
         return 'finished' if self.get_run(qid) else 'unknown'
 
     async def handle(self, query: str, source: str, qid: int | None = None, *, session_id=None, engine=USE_ACTIVE,
-                     files=(), compare_id=None):
+                     files=(), compare_id=None, extras: dict | None = None):
         qid = qid or next(self.ids)
         sandbox = self.sandbox.get(qid)
+        extras = extras or {}
         engine = self.engine if engine is USE_ACTIVE else engine
         registry = self.registry if engine is self.engine else self.registry_for(engine)
         t0 = time.perf_counter()
@@ -188,7 +195,7 @@ class Router:
         emit = self.bus.emit
         try:
             async with asyncio.timeout(self.run_timeout):
-                status = await self._handle(query, source, qid, t0, rec, engine, registry)
+                status = await self._handle(query, source, qid, t0, rec, engine, registry, extras)
         except asyncio.CancelledError:
             # Cancelling the task already cancelled every agent under it (and killed any CLI child); report and finish.
             status = 'cancelled'
@@ -211,29 +218,66 @@ class Router:
         emit('done', qid=qid, total_ms=rec['total_ms'], stats=stats, status=status, tokens=rec['tokens'])
         self.inflight.pop(qid, None)
         if sandbox:
-            self.remember_sandbox_turn(sandbox, rec)
+            self.remember_sandbox_turn(sandbox, rec, extras, status)
             self.sandbox.pop(qid, None)
             self.sandbox_stats.pop(qid, None)
         else:
             self.history.append(rec)
             self.store.save_run(rec)
 
-    def remember_sandbox_turn(self, sid: str, rec: dict):
-        """Keeps the last few turns of a sandbox conversation in memory, for follow-up context only."""
-        turns = self.sandbox_turns.pop(sid, None) or deque(maxlen=SANDBOX_TURNS)
-        turns.append({'query': rec['text'], 'answer': (rec.get('merged') or {}).get('answer') or rec.get('error') or ''})
-        self.sandbox_turns[sid] = turns  # most recently used last
-        while len(self.sandbox_turns) > SANDBOX_SESSIONS:
-            self.sandbox_turns.popitem(last=False)
+    def remember_sandbox_turn(self, sid: str, rec: dict, extras: dict | None = None, status: str = 'done'):
+        """Adds a finished sandbox run to its thread (in place of the turn it replaces, if any). Cancelled runs and
+        `remember: false` runs leave the memory alone, and a sandbox forgotten meanwhile isn't brought back."""
+        extras = extras or {}
+        mem = self.sandboxes.get(sid) if sid in self.sandboxes else None
+        if mem is None or status == 'cancelled' or not extras.get('remember', True):
+            return
+        mem.record(rec, extras.get('replaces'))
 
     def clear_sandbox(self, sid: str) -> int:
-        """Forgets a sandbox: cancels its running queries and drops its remembered turns. Returns runs cancelled."""
+        """Forgets a sandbox: cancels its running queries and drops its thread and files. Returns runs cancelled."""
         n = 0
         for qid, owner in list(self.sandbox.items()):
             if owner == sid and self.cancel(qid) == 'ok':
                 n += 1
-        self.sandbox_turns.pop(sid, None)
+        self.sandboxes.drop(sid)
         return n
+
+    def sweep_sandboxes(self, now: float | None = None) -> list[str]:
+        """Forgets sandboxes idle longer than the TTL that have no running queries. Returns the ids forgotten."""
+        return self.sandboxes.sweep(time.time() if now is None else now, self.sandbox_ttl, set(self.sandbox.values()))
+
+    async def sweeper(self, every: float = 60.0):
+        while True:
+            await asyncio.sleep(every)
+            self.sweep_sandboxes()
+
+    def keep_sandbox(self, sid: str, qids: list[int] | None = None) -> tuple[str, list[int]]:
+        """Copies finished sandbox turns into a new saved chat (the sandbox is unchanged): new qids from the normal
+        counter, tids rewritten to match, source 'chat', a new session, and no file references (sandbox files are never
+        saved). `qids` defaults to the whole thread; turns keep their thread order. Returns (session_id, new qids)."""
+        mem = self.sandboxes.get(sid) if sid in self.sandboxes else None
+        thread = mem.thread if mem else []
+        if not thread:
+            raise SandboxError('this sandbox has no finished turns to keep')
+        known = {t['qid'] for t in thread}
+        if qids is not None:
+            if missing := [q for q in qids if q not in known]:
+                raise SandboxError(f'{missing[0]} is not a finished turn in this sandbox')
+            if not qids:
+                raise SandboxError('qids must list at least one turn')
+        wanted = set(known if qids is None else qids)
+        session_id = uuid.uuid4().hex[:12]
+        new_qids = []
+        for turn in [t for t in thread if t['qid'] in wanted]:
+            rec = renumber(copy.deepcopy(turn['record']), next(self.ids))
+            rec.update(source='chat', session_id=session_id, compare_id=None, files=[])
+            if not new_qids:
+                self.store.touch_session(session_id, rec['text'])
+            self.store.save_run(rec)
+            self.history.append(rec)
+            new_qids.append(rec['qid'])
+        return session_id, new_qids
 
     def unfinished(self, qid: int, rec: dict, why: str):
         """Subtasks that never answered get an error, so no card is left spinning."""
@@ -242,20 +286,30 @@ class Router:
                 t['error'] = f'{why} before it answered'
                 self.bus.emit('error', qid=qid, tid=t['tid'], message=t['error'])
 
-    async def _handle(self, query, source, qid, t0, rec, engine, registry) -> str:
+    async def _handle(self, query, source, qid, t0, rec, engine, registry, extras) -> str:
         emit = self.bus.emit
         emit('query', qid=qid, text=query, source=source, session_id=rec['session_id'], compare_id=rec['compare_id'],
              engine=rec['engine'], files=rec['files'])
         stats = self.stats_for(qid)
         stats['queries'] += 1
 
-        attached = self.store.list_files(rec['files']) if rec['files'] else []
+        sandbox = self.sandbox.get(qid)
+        if sandbox:  # sandbox files come from memory (snapshotted at submit); nothing is read from the store
+            attached = [meta for meta, _ in extras.get('files', ())]
+            texts = {meta['id']: text for meta, text in extras.get('files', ())}
+        else:
+            attached = self.store.list_files(rec['files']) if rec['files'] else []
+            texts = {f['id']: self.store.file_text(f['id']) for f in attached}
         agents = self.offered(engine, with_files=bool(attached))
         if attached:  # the file agents exist only for this run, bound to its files
-            registry = {**file_agents(attached, {f['id']: self.store.file_text(f['id']) for f in attached}, engine), **registry}
-        sandbox = self.sandbox.get(qid)
+            registry = {**file_agents(attached, texts, engine), **registry}
+        draft = extras.get('draft')
+        if draft and engine is not None:  # an unsaved custom agent: offered to Jev and runnable for this run only
+            agents = {**agents, draft['name']: draft['description']}
+            registry = {**registry, draft['name']: agent_registry.extras(self.http, engine, [draft])[draft['name']]}
         if sandbox:
-            context = list(self.sandbox_turns.get(sandbox, ())) or None
+            mem = self.sandboxes.peek(sandbox) if extras.get('remember', True) else None
+            context = (mem.context(extras.get('replaces')) if mem else None) or None
         else:
             context = self.store.turns(rec['session_id'], qid, 3) if rec['session_id'] else None
         p = await plan(query, self.jev, engine, context, [f['name'] for f in attached])
@@ -365,3 +419,16 @@ class Router:
             await asyncio.sleep(self.state['interval'])
             if self.state['autopilot'] and self.bus.subscribers:
                 self.submit(random.choice(SAMPLES), 'autopilot')
+
+
+def renumber(rec: dict, qid: int) -> dict:
+    """Moves a run record to a new qid: its tids (`<qid>.<n>`, also in depends_on and the plan) follow."""
+    old = f"{rec['qid']}."
+    tid = lambda t: f'{qid}.{t[len(old):]}' if isinstance(t, str) and t.startswith(old) else t
+    for t in [*(rec.get('tasks') or []), *((rec.get('plan') or {}).get('subtasks') or [])]:
+        if 'tid' in t:
+            t['tid'] = tid(t['tid'])
+        if 'depends_on' in t:
+            t['depends_on'] = [tid(d) for d in t['depends_on']]
+    rec['qid'] = qid
+    return rec

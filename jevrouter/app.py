@@ -17,11 +17,13 @@ from .engines import EngineError, catalog, choose
 from .events import sse
 from .files import FILE_AGENTS, MAX_BYTES, FileError, extract
 from .pipeline import USE_ACTIVE, Router, warm_up
+from .sandbox import MAX_FILES as MAX_SANDBOX_FILES, SandboxError
 from .store import DEFAULT_DB, Store
 
 ROUTER = web.AppKey('router', Router)
 HTTP = web.AppKey('http', aiohttp.ClientSession)
 AUTOPILOT = web.AppKey('autopilot', asyncio.Task)
+SWEEPER = web.AppKey('sweeper', asyncio.Task)
 WARMUP = web.AppKey('warmup', asyncio.Task)
 WARMING: set[asyncio.Task] = set()
 
@@ -79,27 +81,119 @@ async def ask(request):
             raise Bad('session_id must be a short string')
         if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
             raise Bad('files must be a list of file ids')
-        known = {f['id'] for f in router.store.list_files()}
-        if missing := [f for f in files if f not in known]:
-            raise Bad(f'unknown file id {missing[0]!r}')
+        if source != 'sandbox':
+            known = {f['id'] for f in router.store.list_files()}
+            if missing := [f for f in files if f not in known]:
+                raise Bad(f'unknown file id {missing[0]!r}')
         engine = pick_engine(router, body['engine']) if body.get('engine') else USE_ACTIVE
         sandbox = body.get('sandbox_id') if source == 'sandbox' else None
+        extras = None
         if source == 'sandbox':
-            # Nothing from the sandbox is stored, so it can't use stored files or a saved chat session.
+            # Nothing from the sandbox is stored, so it can't use a saved chat session (or stored files).
             if not (isinstance(sandbox, str) and SANDBOX_ID.match(sandbox)):
                 raise Bad('sandbox_id must be 8-64 letters, digits, - or _')
-            if files or session_id:
-                raise Bad('sandbox runs take no files or session_id')
+            if session_id:
+                raise Bad('sandbox runs take no session_id')
+            engine, extras = sandbox_extras(router, sandbox, body, engine, list(dict.fromkeys(files)))
     except Bad as e:
         return err(str(e), e.status)
     if source == 'chat' and not session_id:
         session_id = uuid.uuid4().hex[:12]
-    qid = router.submit(text, source, session_id=session_id, engine=engine, files=list(dict.fromkeys(files)), sandbox=sandbox)
+    qid = router.submit(text, source, session_id=session_id, engine=engine, files=list(dict.fromkeys(files)), sandbox=sandbox,
+                        extras=extras)
     return web.json_response({'ok': True, 'qid': qid, 'session_id': session_id, **({'sandbox_id': sandbox} if sandbox else {})})
 
 
+def sandbox_extras(router, sid: str, body: dict, engine, files: list[str]):
+    """Validates a sandbox run's own fields (files, draft_agent, replaces, remember). Returns (engine, extras)."""
+    mem = router.sandboxes.peek(sid)
+    held = mem.files if mem else {}
+    if missing := [f for f in files if f not in held]:
+        raise Bad(f'unknown sandbox file id {missing[0]!r}')
+    remember = body.get('remember', True)
+    if not isinstance(remember, bool):
+        raise Bad('remember must be true or false')
+    replaces = body.get('replaces')
+    if replaces is not None:
+        if type(replaces) is not int:
+            raise Bad('replaces must be a qid')
+        if not mem or replaces not in mem.qids():
+            raise Bad(f'{replaces} is not a finished turn in this sandbox')
+    draft = body.get('draft_agent')
+    if draft is not None:
+        if not isinstance(draft, dict):
+            raise Bad('draft_agent must be an object')
+        draft = validate_agent(router, draft, draft=True)
+        # Resolve the engine now, so the run can't start keyless after the check if the active engine changes.
+        if engine is USE_ACTIVE:
+            engine = router.engine
+        if engine is None:
+            raise Bad('the draft agent needs an LLM engine', 409)
+    extras = {'files': [held[f] for f in files], 'remember': remember}
+    if replaces is not None:
+        extras['replaces'] = replaces
+    if draft is not None:
+        extras['draft'] = draft
+    return engine, extras
+
+
+def sandbox_id(request) -> str:
+    sid = request.match_info['id']
+    if not SANDBOX_ID.match(sid):
+        raise Bad('bad sandbox id')
+    return sid
+
+
+async def keep_sandbox(request):
+    """Save sandbox turns as a new normal chat, on request. The sandbox itself is unchanged."""
+    router = request.app[ROUTER]
+    try:
+        sid = sandbox_id(request)
+        body = await read_json(request) if request.can_read_body else {}
+        qids = body.get('qids')
+        if qids is not None and not (isinstance(qids, list) and all(type(q) is int for q in qids)):
+            raise Bad('qids must be a list of qids')
+        session_id, new = router.keep_sandbox(sid, None if qids is None else list(dict.fromkeys(qids)))
+    except (Bad, SandboxError) as e:
+        return err(str(e), e.status)
+    return web.json_response({'session_id': session_id, 'qids': new})
+
+
+async def upload_sandbox_file(request):
+    """A temporary attachment: extracted and kept in the sandbox's memory only, never written to disk."""
+    router = request.app[ROUTER]
+    try:
+        sid = sandbox_id(request)
+    except Bad as e:
+        return err(str(e), e.status)
+    mem = router.sandboxes.get(sid, create=True)
+    try:
+        if len(mem.files) >= MAX_SANDBOX_FILES:  # refuse before reading the upload
+            raise SandboxError(f'at most {MAX_SANDBOX_FILES} files per sandbox')
+        got = await read_upload(request)
+        if isinstance(got, web.Response):
+            return got
+        meta, _ = got
+        mem.add_file(*got)
+    except SandboxError as e:
+        return err(str(e), e.status)
+    return web.json_response(meta, status=201)
+
+
+async def delete_sandbox_file(request):
+    router = request.app[ROUTER]
+    try:
+        sid = sandbox_id(request)
+    except Bad as e:
+        return err(str(e), e.status)
+    mem = router.sandboxes.get(sid)
+    if mem is None or mem.files.pop(request.match_info['fid'], None) is None:
+        return err('no such file', 404)
+    return web.json_response({'ok': True})
+
+
 async def clear_sandbox(request):
-    """Forget a sandbox: cancel its running queries and drop the turns kept for follow-up context."""
+    """Forget a sandbox: cancel its running queries and drop its thread and files."""
     sid = request.match_info['id']
     if not SANDBOX_ID.match(sid):
         return err('bad sandbox id')
@@ -190,7 +284,9 @@ def custom_info(router, a: dict) -> dict:
             'available': router.engine is not None, 'prompt': a['prompt'], 'web': a['web']}
 
 
-def validate_agent(router, body: dict) -> dict:
+def validate_agent(router, body: dict, draft: bool = False) -> dict:
+    """A custom agent from a request body. A sandbox `draft` is checked the same way but is never stored, so it
+    doesn't count against MAX_CUSTOM."""
     name, desc, prompt = (body.get(k) for k in ('name', 'description', 'prompt'))
     if not isinstance(name, str) or not NAME.match(name):
         raise Bad('name must be 2-24 characters: lowercase letters, digits, - or _, starting with a letter')
@@ -202,7 +298,7 @@ def validate_agent(router, body: dict) -> dict:
         raise Bad('description must be 10-200 characters')
     if not isinstance(prompt, str) or not 10 <= len(prompt.strip()) <= 4000:
         raise Bad('prompt must be 10-4000 characters')
-    if len(router.customs) >= MAX_CUSTOM:
+    if not draft and len(router.customs) >= MAX_CUSTOM:
         raise Bad(f'at most {MAX_CUSTOM} custom agents')
     return {'name': name, 'description': desc.strip(), 'prompt': prompt.strip(), 'web': bool(body.get('web', False))}
 
@@ -235,8 +331,9 @@ async def delete_agent(request):
 
 # ---------- files ----------
 
-async def upload_file(request):
-    router = request.app[ROUTER]
+async def read_upload(request, keep_raw: bool = False):
+    """The multipart "file" field, extracted: (meta, text), or (meta, text, raw) with keep_raw; an error response
+    when the upload is missing, too large or unreadable."""
     try:
         reader = await request.multipart()
     except (AssertionError, ValueError, KeyError):
@@ -254,9 +351,17 @@ async def upload_file(request):
             meta, text = await asyncio.to_thread(extract, name, bytes(buf))  # PDF parsing is CPU-bound
         except FileError as e:
             return err(str(e))
-        router.store.add_file(meta, bytes(buf), text)
-        return web.json_response(meta, status=201)
+        return (meta, text, bytes(buf)) if keep_raw else (meta, text)
     return err('no "file" field in the upload')
+
+
+async def upload_file(request):
+    got = await read_upload(request, keep_raw=True)
+    if isinstance(got, web.Response):
+        return got
+    meta, text, raw = got
+    request.app[ROUTER].store.add_file(meta, raw, text)
+    return web.json_response(meta, status=201)
 
 
 async def list_files(request):
@@ -476,9 +581,11 @@ def create_app(router_factory=None) -> web.Application:
             app[ROUTER] = Router(AsyncTypeSafeClient(), app[HTTP], choose(engines), engines=engines, store=store)
             app[WARMUP] = asyncio.create_task(warm_up(app[ROUTER].engine))
         app[AUTOPILOT] = asyncio.create_task(app[ROUTER].autopilot())
+        app[SWEEPER] = asyncio.create_task(app[ROUTER].sweeper())
 
     async def cleanup(app):
         app[AUTOPILOT].cancel()
+        app[SWEEPER].cancel()
         if WARMUP in app:
             app[WARMUP].cancel()
         router = app[ROUTER]
@@ -504,6 +611,8 @@ def create_app(router_factory=None) -> web.Application:
         web.get('/api/runs', list_runs), web.get('/api/runs/{qid}', get_run), web.post('/api/runs/{qid}/cancel', cancel_run),
         web.get('/api/sessions', list_sessions), web.get('/api/sessions/{id}', get_session),
         web.delete('/api/sessions/{id}', delete_session), web.delete('/api/sandbox/{id}', clear_sandbox),
+        web.post('/api/sandbox/{id}/files', upload_sandbox_file), web.delete('/api/sandbox/{id}/files/{fid}', delete_sandbox_file),
+        web.post('/api/sandbox/{id}/keep', keep_sandbox),
         web.get('/api/agents', list_agents), web.post('/api/agents', create_agent), web.delete('/api/agents/{name}', delete_agent),
         web.get('/api/files', list_files), web.post('/api/files', upload_file), web.delete('/api/files/{id}', delete_file),
         web.post('/api/compare', compare), web.get('/api/compare/{id}', get_compare),

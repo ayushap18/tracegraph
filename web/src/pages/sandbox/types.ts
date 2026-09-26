@@ -70,6 +70,7 @@ export interface TurnGroupViewProps {
   onShowTrace: (qid: number) => void
   onEdit: (group: TurnGroup, text: string) => void  // re-run an edited question (adds a version)
   onSelectVersion: (group: TurnGroup, index: number) => void
+  fileName?: (id: string) => string  // attachment id -> file name (sandbox files live only in page state)
 }
 
 // ---------- FE-C: agents, files, keep ----------
