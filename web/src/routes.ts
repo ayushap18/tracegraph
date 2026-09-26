@@ -1,11 +1,12 @@
 import type { UiIconName } from './icons'
 
-export type RouteName = 'chat' | 'live' | 'runs' | 'run' | 'compare' | 'evals' | 'agents' | 'settings' | 'about'
+export type RouteName = 'chat' | 'sandbox' | 'live' | 'runs' | 'run' | 'compare' | 'evals' | 'agents' | 'settings' | 'about'
 
 export interface NavItem { name: RouteName; path: string; label: string; icon: UiIconName; title: string; subtitle: string; description: string; keywords?: string }
 
 export const NAV: NavItem[] = [
   { name: 'chat', path: '/', label: 'Chat', icon: 'chat', title: 'Chat', subtitle: 'Ask anything; follow-ups keep context', description: 'Ask several things at once and follow up with context. Every TraceGraph answer links to the trace of how it was planned and routed.', keywords: 'home conversation ask' },
+  { name: 'sandbox', path: '/sandbox', label: 'Sandbox', icon: 'sandbox', title: 'Sandbox', subtitle: 'Try anything; nothing here is saved', description: 'A private scratch space in TraceGraph: ask anything and watch it get planned and routed. Nothing is saved, counted or shown anywhere else.', keywords: 'scratch private ephemeral temporary test playground' },
   { name: 'live', path: '/live', label: 'Live', icon: 'live', title: 'Live', subtitle: 'Every run as it streams through the router', description: 'Watch every TraceGraph run live: the plan, each routing decision, agent timings and the merged answer, as a graph and a timeline.', keywords: 'dashboard realtime analytics graph' },
   { name: 'runs', path: '/runs', label: 'Runs', icon: 'runs', title: 'Runs', subtitle: 'Search and inspect past runs', description: 'Search and inspect past TraceGraph runs, with the full trace, stage timings and routing confidence for each one.', keywords: 'history table traces' },
   { name: 'compare', path: '/compare', label: 'Compare', icon: 'compare', title: 'Compare', subtitle: 'One question, several engines, side by side', description: 'Send one question to Claude Code, Codex, Antigravity or the Anthropic API and compare the answers side by side.', keywords: 'engines side by side' },
@@ -26,7 +27,7 @@ export function matchRoute(path: string): Match {
   if (!a) return { name: 'chat', params: {} }
   if (a === 'runs' && b && seg.length === 2) return { name: 'run', params: { qid: b } }
   if ((a === 'compare' || a === 'evals') && seg.length <= 2) return { name: a, params: b ? { id: b } : {} }
-  if (seg.length === 1 && ['live', 'runs', 'agents', 'settings', 'about'].includes(a)) return { name: a as RouteName, params: {} }
+  if (seg.length === 1 && ['sandbox', 'live', 'runs', 'agents', 'settings', 'about'].includes(a)) return { name: a as RouteName, params: {} }
   return { name: 'chat', params: {} }
 }
 

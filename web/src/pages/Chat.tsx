@@ -138,6 +138,7 @@ export default function Chat() {
     if (!el) return
     el.style.height = 'auto'
     el.style.height = Math.min(220, el.scrollHeight) + 'px'
+    el.style.overflowY = el.scrollHeight > 220 ? 'auto' : 'hidden' // no scrollbar until it's actually needed
   }, [text])
   useEffect(() => { ta.current?.focus() }, [sessionId])
 
@@ -485,7 +486,8 @@ function UserMessage({ text, files }: { text: string; files: string[] }) {
 const STEP_TONE: Record<string, string> = { done: 'text-ok', running: 'text-primary', warn: 'text-warn', error: 'text-warn', wait: 'text-muted-foreground' }
 const STREAM_CURSOR = "[&>.md>:last-child]:after:ml-px [&>.md>:last-child]:after:text-primary [&>.md>:last-child]:after:content-['▍'] [&>.md>:last-child]:after:animate-[blink_1s_steps(2)_infinite]"
 
-function Turn({ run, selected, onShowTrace, fileName }: { run: Run; selected: boolean; onShowTrace: () => void; fileName: (id: string) => string }) {
+/** One question and its answer. Also used by the Sandbox page. */
+export function Turn({ run, selected, onShowTrace, fileName }: { run: Run; selected: boolean; onShowTrace: () => void; fileName: (id: string) => string }) {
   const toast = useToast()
   const tasks = run.order.map(t => run.tasks[t]).filter(Boolean)
   const answer = answerOf(run)

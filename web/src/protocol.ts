@@ -1,6 +1,6 @@
 // Mirrors the SSE protocol table in PLAN.md. Server -> browser, `data: <json>\n\n` on GET /events.
 
-export type Source = 'you' | 'autopilot' | 'chat' | 'compare' | 'eval'
+export type Source = 'you' | 'autopilot' | 'chat' | 'compare' | 'eval' | 'sandbox'
 // Planner, answer and merge engines carry the LLM engine's name (claude-code, codex, agy, anthropic) or a built-in mode.
 export type Planner = string // engine name | 'heuristic'
 export type Engine = string // engine name | 'keyless'
@@ -122,8 +122,8 @@ export type ConfigBody = Omit<HelloEvent, 'type' | 'history'>
 
 // ---------- REST payloads (§1) ----------
 
-export interface AskBody { query: string; session_id?: string; engine?: string; files?: string[]; source?: 'you' | 'chat' | 'compare' | 'eval' }
-export interface AskResponse { ok: true; qid: number; session_id: string | null }
+export interface AskBody { query: string; session_id?: string; engine?: string; files?: string[]; source?: 'you' | 'chat' | 'compare' | 'eval' | 'sandbox'; sandbox_id?: string }
+export interface AskResponse { ok: true; qid: number; session_id: string | null; sandbox_id?: string }
 
 export interface SessionSummary { id: string; title: string; created: number; updated: number; turns: number }
 export interface SessionDetail { id: string; title: string; runs: RunRecord[] }

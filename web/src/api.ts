@@ -46,6 +46,10 @@ const enc = encodeURIComponent
 // ---------- runs ----------
 export const ask = (body: AskBody) => post<AskResponse>('/ask', body)
 export const cancelRun = (qid: number) => post<{ ok: true }>(`/api/runs/${qid}/cancel`)
+/** Forget a sandbox on the server (cancel its runs, drop its follow-up context). keepalive so it also works while
+ *  the page is unloading; failures are ignored because the server forgets idle sandboxes on its own. */
+export const clearSandbox = (id: string) =>
+  fetch(`/api/sandbox/${encodeURIComponent(id)}`, { method: 'DELETE', keepalive: true }).then(() => undefined, () => undefined)
 
 export interface ListRunsParams { limit?: number; before?: number; q?: string; source?: string; status?: string; engine?: string }
 /** GET /api/runs → newest first. `before` is a qid cursor for "Load more". */

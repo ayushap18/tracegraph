@@ -4,7 +4,7 @@ import itertools
 import os
 import random
 import time
-from collections import deque
+from collections import OrderedDict, deque
 
 from . import agents as agent_registry
 from .agents.llm import COMMON
@@ -19,6 +19,11 @@ from .store import Store
 ROUTED_KEYS = ('agent', 'pick', 'reason', 'probabilities', 'confidence', 'urgency', 'unsafe', 'clear', 'jev_ms', 'model')
 USE_ACTIVE = object()  # a run's engine argument: the engine active at submit time (None means keyless)
 CONTEXT_CHARS = 500
+# Sandbox runs are never stored. Their qids come from a separate range so they can't collide with
+# (or leave gaps in) the persisted run numbers, and they're forgotten when they finish.
+SANDBOX_QID0 = 1_000_000_000
+SANDBOX_SESSIONS = 200  # most sandbox conversations kept in memory for follow-up context
+SANDBOX_TURNS = 3       # turns of context a sandbox follow-up sees (same as a saved chat)
 
 
 async def warm_up(engine):
@@ -58,6 +63,11 @@ class Router:
         self.tasks: set[asyncio.Task] = set()
         self.evals: dict[str, asyncio.Task] = {}  # eval_id -> running eval (jevrouter/evals.py)
         self.run_timeout = float(os.environ.get('TG_RUN_TIMEOUT', RUN_TIMEOUT))
+        # Sandbox: qid -> sandbox id for runs in flight, their scratch stats, and recent turns per sandbox (memory only).
+        self.sandbox: dict[int, str] = {}
+        self.sandbox_stats: dict[int, dict] = {}
+        self.sandbox_turns: OrderedDict[str, deque] = OrderedDict()
+        self.sandbox_ids = itertools.count(SANDBOX_QID0)
 
     # ---------- agents and engines ----------
 
@@ -99,15 +109,20 @@ class Router:
 
     def hello(self) -> dict:
         # history fills in completion order; replay wants qid order, with in-flight runs included
-        records = sorted([*self.history, *self.inflight.values()], key=lambda r: r['qid'])
+        records = sorted([*self.history, *(r for q, r in self.inflight.items() if q not in self.sandbox)], key=lambda r: r['qid'])
         return {'type': 'hello', **self.config(), 'history': records[-HISTORY:]}
+
+    def stats_for(self, qid: int) -> dict:
+        """The stats a run counts towards: the global ones, or a throwaway copy for a sandbox run."""
+        return self.sandbox_stats.get(qid, self.stats)
 
     def usage(self, rec: dict | None, d: dict):
         """Adds planner/agent/merger token counts to the global stats and to this run's own `tokens`."""
         jev, llm_in, llm_out = d.get('jev_tokens', 0), d.get('claude_in', 0), d.get('claude_out', 0)
-        self.stats['jev_input_tokens'] += jev
-        self.stats['claude_input_tokens'] += llm_in
-        self.stats['claude_output_tokens'] += llm_out
+        stats = self.stats_for(rec['qid']) if rec is not None else self.stats
+        stats['jev_input_tokens'] += jev
+        stats['claude_input_tokens'] += llm_in
+        stats['claude_output_tokens'] += llm_out
         if rec is not None:
             t = rec['tokens']
             t['jev_in'] += jev
@@ -126,9 +141,18 @@ class Router:
         """Session or compare runs in qid order, with in-flight ones taken from memory (the DB copy is the start state)."""
         return [self.inflight.get(r['qid'], r) for r in self.store.runs_where(col, value)]
 
-    def submit(self, query: str, source: str, *, session_id=None, engine=USE_ACTIVE, files=(), compare_id=None) -> int:
-        """Allocates the qid now (so POST /ask can return it) and runs the query in the background."""
-        qid = next(self.ids)
+    def submit(self, query: str, source: str, *, session_id=None, engine=USE_ACTIVE, files=(), compare_id=None,
+               sandbox: str | None = None) -> int:
+        """Allocates the qid now (so POST /ask can return it) and runs the query in the background.
+        With `sandbox` (a sandbox id) the run is ephemeral: nothing is stored, it doesn't count towards stats or
+        history, and its events only reach that sandbox's event stream."""
+        if sandbox:
+            qid = next(self.sandbox_ids)
+            self.sandbox[qid] = sandbox
+            self.sandbox_stats[qid] = {'queries': 0, 'subtasks': 0, 'errors': 0, 'jev_input_tokens': 0,
+                                       'claude_input_tokens': 0, 'claude_output_tokens': 0, 'by_agent': {}}
+        else:
+            qid = next(self.ids)
         task = asyncio.create_task(self.handle(query, source, qid, session_id=session_id, engine=engine, files=files,
                                                compare_id=compare_id))
         self.tasks.add(task)
@@ -147,6 +171,7 @@ class Router:
     async def handle(self, query: str, source: str, qid: int | None = None, *, session_id=None, engine=USE_ACTIVE,
                      files=(), compare_id=None):
         qid = qid or next(self.ids)
+        sandbox = self.sandbox.get(qid)
         engine = self.engine if engine is USE_ACTIVE else engine
         registry = self.registry if engine is self.engine else self.registry_for(engine)
         t0 = time.perf_counter()
@@ -155,9 +180,11 @@ class Router:
             'total_ms': None, 'error': None, 'status': 'running', 'engine': engine.name if engine else None,
             'session_id': session_id, 'compare_id': compare_id, 'files': list(files),
             'tokens': {'jev_in': 0, 'llm_in': 0, 'llm_out': 0}}
-        if session_id:
-            self.store.touch_session(session_id, query)
-        self.store.save_run(rec)
+        if not sandbox:
+            if session_id:
+                self.store.touch_session(session_id, query)
+            self.store.save_run(rec)
+        stats = self.stats_for(qid)
         emit = self.bus.emit
         try:
             async with asyncio.timeout(self.run_timeout):
@@ -169,21 +196,44 @@ class Router:
             emit('cancelled', qid=qid)
         except TimeoutError:
             status = 'timeout'
-            self.stats['errors'] += 1
+            stats['errors'] += 1
             self.unfinished(qid, rec, 'timed out')
             rec['error'] = f'The run timed out after {self.run_timeout:.0f}s.'
             emit('error', qid=qid, tid=None, message=rec['error'])
         except Exception as e:
             # Keep the browser's run from hanging: whatever broke, the query still ends with done.
             status = 'error'
-            self.stats['errors'] += 1
+            stats['errors'] += 1
             self.unfinished(qid, rec, 'failed')
             rec['error'] = str(e)[:200]
             emit('error', qid=qid, tid=None, message=rec['error'])
         rec['status'], rec['total_ms'] = status, ms_since(t0)
-        emit('done', qid=qid, total_ms=rec['total_ms'], stats=self.stats, status=status, tokens=rec['tokens'])
-        self.history.append(self.inflight.pop(qid))
-        self.store.save_run(rec)
+        emit('done', qid=qid, total_ms=rec['total_ms'], stats=stats, status=status, tokens=rec['tokens'])
+        self.inflight.pop(qid, None)
+        if sandbox:
+            self.remember_sandbox_turn(sandbox, rec)
+            self.sandbox.pop(qid, None)
+            self.sandbox_stats.pop(qid, None)
+        else:
+            self.history.append(rec)
+            self.store.save_run(rec)
+
+    def remember_sandbox_turn(self, sid: str, rec: dict):
+        """Keeps the last few turns of a sandbox conversation in memory, for follow-up context only."""
+        turns = self.sandbox_turns.pop(sid, None) or deque(maxlen=SANDBOX_TURNS)
+        turns.append({'query': rec['text'], 'answer': (rec.get('merged') or {}).get('answer') or rec.get('error') or ''})
+        self.sandbox_turns[sid] = turns  # most recently used last
+        while len(self.sandbox_turns) > SANDBOX_SESSIONS:
+            self.sandbox_turns.popitem(last=False)
+
+    def clear_sandbox(self, sid: str) -> int:
+        """Forgets a sandbox: cancels its running queries and drops its remembered turns. Returns runs cancelled."""
+        n = 0
+        for qid, owner in list(self.sandbox.items()):
+            if owner == sid and self.cancel(qid) == 'ok':
+                n += 1
+        self.sandbox_turns.pop(sid, None)
+        return n
 
     def unfinished(self, qid: int, rec: dict, why: str):
         """Subtasks that never answered get an error, so no card is left spinning."""
@@ -196,13 +246,18 @@ class Router:
         emit = self.bus.emit
         emit('query', qid=qid, text=query, source=source, session_id=rec['session_id'], compare_id=rec['compare_id'],
              engine=rec['engine'], files=rec['files'])
-        self.stats['queries'] += 1
+        stats = self.stats_for(qid)
+        stats['queries'] += 1
 
         attached = self.store.list_files(rec['files']) if rec['files'] else []
         agents = self.offered(engine, with_files=bool(attached))
         if attached:  # the file agents exist only for this run, bound to its files
             registry = {**file_agents(attached, {f['id']: self.store.file_text(f['id']) for f in attached}, engine), **registry}
-        context = self.store.turns(rec['session_id'], qid, 3) if rec['session_id'] else None
+        sandbox = self.sandbox.get(qid)
+        if sandbox:
+            context = list(self.sandbox_turns.get(sandbox, ())) or None
+        else:
+            context = self.store.turns(rec['session_id'], qid, 3) if rec['session_id'] else None
         p = await plan(query, self.jev, engine, context, [f['name'] for f in attached])
         self.usage(rec, p)
         subtasks = [{'tid': f'{qid}.{n}', 'text': s, 'depends_on': [f'{qid}.{d + 1}' for d in deps]}
@@ -238,13 +293,13 @@ class Router:
             try:
                 d = await route_one(self.jev, text + files_note, agents)
             except Exception as e:
-                self.stats['errors'] += 1
+                stats['errors'] += 1
                 by_tid[st['tid']]['error'] = f'Jev: {str(e)[:200]}'
                 emit('error', qid=qid, tid=st['tid'], message=by_tid[st['tid']]['error'])
                 return None
             self.usage(rec, {'jev_tokens': d['input_tokens']})
-            self.stats['subtasks'] += 1
-            self.stats['by_agent'][d['agent']] = self.stats['by_agent'].get(d['agent'], 0) + 1
+            stats['subtasks'] += 1
+            stats['by_agent'][d['agent']] = stats['by_agent'].get(d['agent'], 0) + 1
             fields = {k: d[k] for k in ROUTED_KEYS}
             by_tid[st['tid']].update(fields)
             extra = {'input': by_tid[st['tid']]['input']} if 'input' in by_tid[st['tid']] else {}

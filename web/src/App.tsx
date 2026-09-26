@@ -9,6 +9,7 @@ import { setPageMeta } from './meta'
 import { BottomBar, Sidebar, SlotCtx, TopBar } from './components/Shell'
 import { Palette } from './components/Palette'
 import Chat from './pages/Chat'
+import Sandbox from './pages/Sandbox'
 import Live from './pages/Live'
 import Runs from './pages/Runs'
 import RunDetail from './pages/RunDetail'
@@ -47,6 +48,7 @@ function Page({ match }: { match: Match }) {
     case 'evals': return <Evals params={params} />
     case 'agents': return <Agents params={params} />
     case 'settings': return <Settings />
+    case 'sandbox': return <Sandbox />
     case 'about': return <Suspense fallback={null}><About /></Suspense>
     default: return <Chat />
   }
@@ -130,8 +132,8 @@ function AppShell() {
           <TopBar route={match.name} onPalette={() => setPalette(true)} onSlot={setSlot} />
           <main id="main" ref={main} tabIndex={-1} key={pageKey} className={cn(
             'page page-enter min-w-0 outline-none',
-            // Chat owns its scrolling: a fixed-height page between the top bar and (on phones) the tab bar.
-            match.name === 'chat'
+            // Chat and Sandbox own their scrolling: a fixed-height page between the top bar and (on phones) the tab bar.
+            match.name === 'chat' || match.name === 'sandbox'
               ? 'h-[calc(100dvh-var(--topbar-h))] flex-none overflow-hidden max-md:h-[calc(100dvh-var(--topbar-h)-var(--bottombar-h)-env(safe-area-inset-bottom,0px))]'
               : 'flex-1 max-md:pb-[calc(var(--bottombar-h)+env(safe-area-inset-bottom,0px))]',
           )}>

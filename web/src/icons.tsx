@@ -7,7 +7,7 @@ import {
   ArrowDown, ArrowRight, ArrowUp, Ban, Blocks, CircleAlert, CircleX, Command, Copy, CornerDownLeft, Database, Ellipsis, ExternalLink, Eye,
   File, FileJson, FileSpreadsheet, FileText, Filter, FlaskConical, GitCompareArrows, Hash, History, Hourglass, House, Info, Layers,
   Link, LoaderCircle, Lock, Menu, PanelLeftClose, PanelLeftOpen, Paperclip, Plus, RefreshCw, RotateCcw, Server, Settings, Share2,
-  Shield, Sparkles, Square, SquarePen, Table, Tag, Trash2, TriangleAlert, Trophy, TrendingUp, Upload, Gauge, Download,
+  Shield, Sparkles, Box, Square, SquarePen, Table, Tag, Trash2, TriangleAlert, Trophy, TrendingUp, Upload, Gauge, Download,
 } from 'lucide-react'
 import { useId, type SVGProps } from 'react'
 import { colorOf } from './protocol'
@@ -39,7 +39,7 @@ export const UI_ICONS = {
   error: CircleX, success: CircleCheck, more: Ellipsis, 'arrow-right': ArrowRight, 'arrow-up': ArrowUp, 'arrow-down': ArrowDown, sparkles: Sparkles,
   database: Database, command: Command, enter: CornerDownLeft, shield: Shield, guard: Shield, trophy: Trophy, tag: Tag, lock: Lock,
   spinner: LoaderCircle, table: Table, eye: Eye, code: CodeXml, layers: Layers, hash: Hash, server: Server, blocks: Blocks,
-  timeout: Hourglass, cancelled: Ban, trend: TrendingUp, gauge: Gauge, engine: Cpu, web: Globe, clock: Clock,
+  timeout: Hourglass, cancelled: Ban, trend: TrendingUp, gauge: Gauge, engine: Cpu, web: Globe, clock: Clock, sandbox: Box,
 } satisfies Record<string, LucideIcon>
 
 export type UiIconName = keyof typeof UI_ICONS

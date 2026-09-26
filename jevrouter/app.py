@@ -60,7 +60,8 @@ def pick_engine(router, name):
     return engine
 
 
-SOURCES = ('you', 'chat', 'compare', 'eval')
+SOURCES = ('you', 'chat', 'compare', 'eval', 'sandbox')
+SANDBOX_ID = re.compile(r'^[A-Za-z0-9_-]{8,64}$')
 
 
 async def ask(request):
@@ -82,12 +83,27 @@ async def ask(request):
         if missing := [f for f in files if f not in known]:
             raise Bad(f'unknown file id {missing[0]!r}')
         engine = pick_engine(router, body['engine']) if body.get('engine') else USE_ACTIVE
+        sandbox = body.get('sandbox_id') if source == 'sandbox' else None
+        if source == 'sandbox':
+            # Nothing from the sandbox is stored, so it can't use stored files or a saved chat session.
+            if not (isinstance(sandbox, str) and SANDBOX_ID.match(sandbox)):
+                raise Bad('sandbox_id must be 8-64 letters, digits, - or _')
+            if files or session_id:
+                raise Bad('sandbox runs take no files or session_id')
     except Bad as e:
         return err(str(e), e.status)
     if source == 'chat' and not session_id:
         session_id = uuid.uuid4().hex[:12]
-    qid = router.submit(text, source, session_id=session_id, engine=engine, files=list(dict.fromkeys(files)))
-    return web.json_response({'ok': True, 'qid': qid, 'session_id': session_id})
+    qid = router.submit(text, source, session_id=session_id, engine=engine, files=list(dict.fromkeys(files)), sandbox=sandbox)
+    return web.json_response({'ok': True, 'qid': qid, 'session_id': session_id, **({'sandbox_id': sandbox} if sandbox else {})})
+
+
+async def clear_sandbox(request):
+    """Forget a sandbox: cancel its running queries and drop the turns kept for follow-up context."""
+    sid = request.match_info['id']
+    if not SANDBOX_ID.match(sid):
+        return err('bad sandbox id')
+    return web.json_response({'ok': True, 'cancelled': request.app[ROUTER].clear_sandbox(sid)})
 
 
 # ---------- runs ----------
@@ -385,12 +401,27 @@ async def config(request):
 
 
 async def events(request):
+    """The SSE stream. The main stream never carries sandbox runs; `?sandbox=<id>` streams only that sandbox's runs
+    (plus run-independent events such as config and state), and its hello carries no history."""
     router = request.app[ROUTER]
+    sid = request.query.get('sandbox')
+    if sid is not None and not SANDBOX_ID.match(sid):
+        return err('bad sandbox id')
+    if sid:
+        def accept(e):
+            qid = e.get('qid')
+            return qid is None or router.sandbox.get(qid) == sid
+    else:
+        def accept(e):
+            return e.get('qid') not in router.sandbox
     resp = web.StreamResponse(headers={'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     await resp.prepare(request)
-    q = router.bus.subscribe()
+    q = router.bus.subscribe(accept)
     try:
-        await resp.write(sse(router.hello()))
+        hello = router.hello()
+        if sid:  # a sandbox starts empty: only its own in-flight runs (after a reconnect) are replayed
+            hello['history'] = [r for qid, r in sorted(router.inflight.items()) if router.sandbox.get(qid) == sid]
+        await resp.write(sse(hello))
         while True:
             try:
                 msg = await asyncio.wait_for(q.get(), 15)
@@ -472,7 +503,7 @@ def create_app(router_factory=None) -> web.Application:
         web.get('/api/config', config),
         web.get('/api/runs', list_runs), web.get('/api/runs/{qid}', get_run), web.post('/api/runs/{qid}/cancel', cancel_run),
         web.get('/api/sessions', list_sessions), web.get('/api/sessions/{id}', get_session),
-        web.delete('/api/sessions/{id}', delete_session),
+        web.delete('/api/sessions/{id}', delete_session), web.delete('/api/sandbox/{id}', clear_sandbox),
         web.get('/api/agents', list_agents), web.post('/api/agents', create_agent), web.delete('/api/agents/{name}', delete_agent),
         web.get('/api/files', list_files), web.post('/api/files', upload_file), web.delete('/api/files/{id}', delete_file),
         web.post('/api/compare', compare), web.get('/api/compare/{id}', get_compare),
