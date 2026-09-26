@@ -13,6 +13,7 @@
 @import "./pages/agents.css" layer(legacy);
 @import "./pages/compare.css" layer(legacy);
 @import "./pages/evals.css" layer(legacy);
+@import "./viz.css" layer(legacy);
 @import "./tw-reset.css" layer(reset);
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @import "tw-animate-css";
@@ -24,6 +25,17 @@
 @source "./components/ui";
 @source "./ui.tsx";
 @source "./components/app";
+@source "./App.tsx";
+@source "./components/Shell.tsx";
+@source "./components/EnginePicker.tsx";
+@source "./components/Palette.tsx";
+@source "./components/Panels.tsx";
+@source "./components/TraceView.tsx";
+@source "./components/Graph.tsx";
+@source "./components/Viz.tsx";
+@source "./components/Charts.tsx";
+@source "./components/Markdown.tsx";
+@source "./pages";
 
 /* shadcn semantic tokens mapped onto the app's own theme variables, so every
    surface follows the System / Light / Dark switch with no extra dark-mode rules. */

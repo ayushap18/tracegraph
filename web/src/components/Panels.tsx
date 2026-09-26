@@ -4,13 +4,15 @@ import type { Run, Store, Task } from '../useEventStream'
 import { post } from '../useEventStream'
 import { clock, costs, latency, money, ms, pct, rows, safeHref } from '../lib'
 import Markdown from './Markdown'
-import { AgentIcon, Icon, type UiIconName } from '../icons'
+import { Icon, type UiIconName } from '../icons'
 import { Sparkline, useCountUp } from './Viz'
+import { AgentBadge } from './app'
 
 const cvar = (c: string) => ({ '--c': c }) as CSSProperties
 
-export function Chip({ agent }: { agent: string | undefined }) {
-  return <span className="chip" style={cvar(colorOf(agent))}>{agent && <AgentIcon agent={agent} size={12} strokeWidth={2.25} />}{agent ?? '…'}</span>
+/** An agent label. Kept as `Chip` for existing call sites; renders the shared AgentBadge. */
+export function Chip({ agent, pct }: { agent: string | undefined; pct?: number | string }) {
+  return <AgentBadge agent={agent} pct={pct} />
 }
 
 export function Bars({ probs, max = 5 }: { probs: Record<string, number>; max?: number }) {

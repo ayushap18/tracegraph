@@ -3,6 +3,7 @@ import { StoreProvider, useStore } from './store'
 import { ThemeProvider, useTheme } from './theme'
 import { ToastProvider, useHashPath, useToast } from './ui'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 import { matchRoute, NAV, type Match } from './routes'
 import { setPageMeta } from './meta'
 import { BottomBar, Sidebar, SlotCtx, TopBar } from './components/Shell'
@@ -18,6 +19,9 @@ import Agents from './pages/Agents'
 
 // The About page carries its own stack (Tailwind, shadcn/ui, Motion, Geist); load it only when visited.
 const About = lazy(() => import('./pages/About'))
+
+// Visually hidden until focused; the first stop for keyboard users.
+const SKIP = 'fixed -top-16 left-3 z-[100] rounded-md bg-primary px-3.5 py-2 text-sm font-semibold text-primary-foreground no-underline transition-[top] focus:top-3'
 
 export default function App() {
   return (
@@ -106,8 +110,8 @@ function AppShell() {
   if (match.name === 'about') {
     return (
       <>
-        <a className="skip-link" href="#main" onClick={e => { e.preventDefault(); main.current?.focus() }}>Skip to content</a>
-        <main id="main" ref={main} tabIndex={-1} className="page-enter about-main" key={pageKey}><Suspense fallback={null}><About /></Suspense></main>
+        <a className={SKIP} href="#main" onClick={e => { e.preventDefault(); main.current?.focus() }}>Skip to content</a>
+        <main id="main" ref={main} tabIndex={-1} className="page-enter outline-none" key={pageKey}><Suspense fallback={null}><About /></Suspense></main>
         <Palette open={palette} onClose={() => setPalette(false)} onToggleSidebar={toggleSidebar} />
       </>
     )
@@ -115,12 +119,22 @@ function AppShell() {
 
   return (
     <SlotCtx.Provider value={slot}>
-      <a className="skip-link" href="#main" onClick={e => { e.preventDefault(); main.current?.focus() }}>Skip to content</a>
-      <div className={'app' + (collapsed ? ' sb-collapsed' : '') + ' route-' + match.name}>
+      <a className={SKIP} href="#main" onClick={e => { e.preventDefault(); main.current?.focus() }}>Skip to content</a>
+      <div className={cn(
+        'app grid min-h-dvh transition-[grid-template-columns] duration-200',
+        collapsed ? 'md:grid-cols-[var(--sidebar-w-c)_minmax(0,1fr)]' : 'md:grid-cols-[var(--sidebar-w)_minmax(0,1fr)]',
+        'route-' + match.name,
+      )}>
         <Sidebar route={match.name} collapsed={collapsed} onToggle={toggleSidebar} />
-        <div className="app-main">
+        <div className="flex min-w-0 flex-col">
           <TopBar route={match.name} onPalette={() => setPalette(true)} onSlot={setSlot} />
-          <main id="main" ref={main} tabIndex={-1} className="page page-enter" key={pageKey}>
+          <main id="main" ref={main} tabIndex={-1} key={pageKey} className={cn(
+            'page page-enter min-w-0 outline-none',
+            // Chat owns its scrolling: a fixed-height page between the top bar and (on phones) the tab bar.
+            match.name === 'chat'
+              ? 'h-[calc(100dvh-var(--topbar-h))] flex-none overflow-hidden max-md:h-[calc(100dvh-var(--topbar-h)-var(--bottombar-h)-env(safe-area-inset-bottom,0px))]'
+              : 'flex-1 max-md:pb-[calc(var(--bottombar-h)+env(safe-area-inset-bottom,0px))]',
+          )}>
             <Page match={match} />
           </main>
         </div>
