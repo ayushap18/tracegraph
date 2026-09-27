@@ -704,6 +704,11 @@ class Router:
                 if (d['agent'] == 'clarify' and pick in KEYLESS and pick in registry
                         and d['probabilities'].get(pick, 0) >= CONFIRM_AT and gate.confirmed(pick, text)):
                     d['agent'], d['reason'] = pick, f"{d['reason']}, but the {pick} parser found all it needs"
+                # "the total in this spreadsheet" reads as vague to Jev, which sees only the text; the attached file is
+                # the missing context, so a confident file-agent pick stands.
+                if (d['agent'] == 'clarify' and attached and pick in (*FILE_AGENTS, *SQL_AGENT) and pick in agents
+                        and d['probabilities'].get(pick, 0) >= CONFIRM_AT and d['unsafe'] < BLOCK_AT):
+                    d['agent'], d['reason'] = pick, f"{d['reason']}, but a file is attached"
                 try:
                     ask = None if d['agent'] in GUARDS else gate.question(d['agent'], text) or tool_question(d['agent'], text)
                 except Exception:  # a parser bug must not fail the whole run; the step's agent reports its own error

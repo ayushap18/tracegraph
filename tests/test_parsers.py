@@ -83,3 +83,17 @@ def test_currency_ignores_sentence_punctuation():
     known = {'USD', 'JPY', 'EUR', 'INR'}
     assert parse_currency('Convert 20 USD to JPY.', known) == (20.0, 'USD', 'JPY')
     assert parse_currency('Convert 12.5 EUR to INR.', known) == (12.5, 'EUR', 'INR')
+
+
+@pytest.mark.parametrize('q, want', [("what's €75 in £", (75.0, 'EUR', 'GBP')), ('$20 to ₹', (20.0, 'USD', 'INR')),
+                                     ('A$50 in USD', (50.0, 'AUD', 'USD')), ('how much is 1.5k $ in EUR', (1500.0, 'USD', 'EUR'))])
+def test_currency_signs(q, want):
+    from jevrouter.agents.tools import ECB_CODES, parse_currency
+    assert parse_currency(q, ECB_CODES) == want
+
+
+@pytest.mark.parametrize('q, place', [('Berlin weather', 'Berlin'), ('New York weather tomorrow', 'New York'),
+                                      ('Tokyo time now', 'Tokyo'), ('What weather', None), ('Current weather', None)])
+def test_leading_place_names(q, place):
+    from jevrouter.agents.tools import find_place
+    assert find_place(q) == place

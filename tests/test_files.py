@@ -118,3 +118,22 @@ async def test_run_with_files_offers_file_agents():
     await run(router, 'hey friend')
     assert 'data' not in jev.criteria[-1]  # without attachments the file agents aren't offered
     assert store.list_files()[0]['rows'] == 4 and store.delete_file(meta['id']) and not store.list_files()
+
+
+async def test_a_confident_file_pick_is_not_gated_as_unclear():
+    """Jev scores clarity from text alone: "the total in this spreadsheet" looks vague without the file."""
+    store = Store()
+    meta, text = extract('sales.csv', CSV.encode())
+    store.add_file(meta, CSV.encode(), text)
+    # Jev only offers the file agents with a file attached; without one it leans to knowledge
+    router = Router(FakeJev(route_for=lambda t: ('data', 0.99) if 'Attached files' in t else ('knowledge', 0.99),
+                            clear=0.22), store=store)
+    events = []
+    router.bus.taps.append(events.append)
+    await router.handle("What's the total in this spreadsheet?", 'you', files=[meta['id']])
+    r = next(e for e in events if e['type'] == 'routed')
+    assert r['agent'] == 'data' and 'a file is attached' in r['reason']
+    # with nothing attached the same unclear score still asks
+    await router.handle("What's the total in this spreadsheet?", 'you')
+    routed = [e for e in events if e['type'] == 'routed']
+    assert len(routed) == 2 and routed[-1]['agent'] == 'clarify'

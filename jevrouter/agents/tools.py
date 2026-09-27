@@ -189,6 +189,12 @@ def find_place(q: str) -> str | None:
     if place := place_in(q):
         return place
     caps = re.findall(r"(?<!^)(?<![.?!]\s)\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)", q)
+    # "Berlin weather", "New York weather": a leading name right before the thing asked about. It wins unless another
+    # name comes later ("Paris weather please, tell me London"); "York" alone is only part of "New York".
+    lead = r"(?!(?:What|Which|Whats|How|Is|Are|Any|The|Current|Local|Today|Tomorrow|Tonight|Now|My|Your|Our)\b)"
+    m = re.match(r"\s*" + lead + r"([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)(?:'s)?\s+(?:weather|forecast|temperature|time)\b", q)
+    if m and all(c in m.group(1) for c in caps):
+        return m.group(1)
     return caps[-1] if caps else None
 
 
@@ -340,8 +346,16 @@ CRYPTO = {'bitcoin': 'BTC', 'bitcoins': 'BTC', 'btc': 'BTC', 'ethereum': 'ETH', 
 AMOUNT = re.compile(r'\d+(?:\.\d+)?')
 
 
+# Currency signs become codes before punctuation is dropped: "€75 in £" is 75 EUR to GBP. Prefixed dollars first.
+SIGNS = [(r'(?i)\bUS\$', ' USD '), (r'(?i)\bA\$', ' AUD '), (r'(?i)\bC\$', ' CAD '), (r'(?i)\bNZ\$', ' NZD '),
+         (r'(?i)\bHK\$', ' HKD '), (r'(?i)\bS\$', ' SGD '), (r'\$', ' USD '), ('€', ' EUR '), ('£', ' GBP '),
+         ('¥', ' JPY '), ('₹', ' INR '), ('₩', ' KRW '), ('₺', ' TRY '), ('₽', ' RUB '), ('₱', ' PHP '), ('฿', ' THB ')]
+
+
 def currency_words(q: str) -> list[str]:
     # Keep decimal points in amounts but drop sentence dots: an LLM planner writes "Convert 20 USD to JPY."
+    for sign, code in SIGNS:
+        q = re.sub(sign, code, q)
     text = normalize_numbers(q.replace(',', ''), money=True)
     return [w for w in (w.strip('.') for w in re.sub(r'[^\w.\s]', ' ', text).split()) if w]
 
