@@ -593,3 +593,21 @@ async def test_an_unsafe_request_is_never_planned_from_an_llm_rewrite():
     # no single part is unsafe on its own, but the whole is: one step, blocked
     p = await plan('weather in Paris and the other thing', UnsafeFor('Paris and the other'), engine)
     assert p['subtasks'] == ['weather in Paris and the other thing']
+
+
+@pytest.mark.parametrize('q, want', [
+    ('Turn these release notes into a short summary file', True), ('Save this as a PDF', True),
+    ('Export the table to Excel', True), ('Convert this document to markdown', True),
+    ('Turn this sales data into an Excel sheet with a chart', True),
+    ('What does this file say?', False), ('Convert 100 USD to EUR', False), ('Write a report on the Eiffel Tower', False),
+    ('How do I convert a docx to pdf?', False), ('summarize the attached document', False),
+    ('how to save a file as PDF in Word', False)])
+def test_wants_file(q, want):
+    assert gate.wants_file(q) is want
+
+
+async def test_a_file_request_goes_to_create_even_when_jev_picks_the_document_agent():
+    router = Router(FakeJev(route_for=lambda t: ('knowledge', 0.9)))
+    events = await run(router, 'Turn these notes into a short summary file')
+    r = routed(events)['1.1']
+    assert r['agent'] == 'create' and 'request is for a file' in r['reason']

@@ -285,7 +285,13 @@ async def make(job: Job, engine=None, jev=None, mode: str = 'balanced') -> Made:
     # the latest earlier turn that answered something (a turn that only made a file has no answer of its own here)
     prev = next((t for t in reversed(job.context) if (t.get('answer') or '').strip()), None)
     notes, source, spec = [], None, None
-    if job.deps:
+    if job.deps and job.tables and fmt == 'xlsx':
+        # "turn this data into an Excel sheet with a chart": the table is the content; an earlier analysis step's
+        # answer rides along as notes rather than replacing the data
+        spec, source = from_tables(job.tables), 'table'
+        if (extra := from_answers(job.deps)) is not None:
+            spec['sections'] += extra['sections']
+    elif job.deps:
         spec, source = from_answers(job.deps), 'answer'
         if spec is None:
             return Made('No file was made: the step it was to be made from has no answer to put in it.', False)

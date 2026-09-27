@@ -760,6 +760,12 @@ class Router:
                     notes[tid] = agent_registry.AgentResult(cant[1], True)
                     return
                 pick = d['pick']
+                # "turn these release notes into a summary file": Jev may pick the document Q&A agent; the request is
+                # for a file, so the create agent makes it (from the attachment, an answer, or the engine)
+                if ('create' in agents and d['agent'] not in (*GUARDS, 'create') and gate.wants_file(text)
+                        and d['unsafe'] < BLOCK_AT):
+                    d['agent'], d['reason'] = 'create', f"{d['reason']}, but the request is for a file"
+                    return
                 if (d['agent'] == 'clarify' and pick in KEYLESS and pick in registry
                         and d['probabilities'].get(pick, 0) >= CONFIRM_AT and gate.confirmed(pick, text)):
                     d['agent'], d['reason'] = pick, f"{d['reason']}, but the {pick} parser found all it needs"

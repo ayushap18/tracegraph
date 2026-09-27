@@ -308,3 +308,21 @@ def resolve_there(text: str, earlier: list[str]) -> str | None:
         return None
     place = referent_place(earlier)
     return THERE.sub(f'in {place}', text, count=1) if place else None
+
+
+# ---------- asking for a file ----------
+
+FILE_INTENT = re.compile(
+    r"\b(?:turn|make|create|export|save|put|write|generate|convert|build)\b[^.?!]{0,80}?\b(?:into|as|in(?:to)?|to)\s+"
+    r"(?:an?\s+|the\s+)?(?:[\w-]+\s+){0,3}?(?:file|document|doc|pdf|docx|word\s+(?:file|doc(?:ument)?)|pptx|slides?|"
+    r"slide\s*deck|deck|presentation|powerpoint|xlsx|excel(?:\s+(?:file|sheet|workbook))?|spreadsheet|workbook|"
+    r"markdown|md)\b", re.I)
+
+
+def wants_file(text: str) -> bool:
+    """A request to produce a file ("turn these notes into a summary file", "save this as a PDF"), as opposed to a
+    question about one ("what does this file say?")."""
+    if re.match(r"\s*(?:how\s+(?:do|can|would|should)\s+(?:i|you|we|one)|how\s+to|what(?:'s| is)\s+the\s+best\s+way)\b",
+                text, re.I):
+        return False  # "how do I convert a docx to pdf?" asks for steps, not a file
+    return bool(FILE_INTENT.search(text))

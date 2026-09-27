@@ -228,7 +228,8 @@ def test_read_created_uses_the_store_by_id(tmp_path):
 async def test_run_eval_scores_created_files(monkeypatch):
     """A fake create step: the run record carries created_files (as the pipeline stores them) and the store serves the
     bytes. The harness reopens them per turn and fails the turn whose file misses. The step runs on an agent Jev is
-    already offered (math), so this test does not depend on how the create agent is registered."""
+    already offered (math), and its queries don't read as file requests (gate.wants_file), so this test does not depend
+    on how the create agent is registered or routed."""
     blobs = {'f1': pdf(pages=('TCP and UDP', 'UDP has no handshake')), 'f2': b'# Notes\n\nnothing about it\n'}
 
     async def create(text, emit):
@@ -253,10 +254,10 @@ async def test_run_eval_scores_created_files(monkeypatch):
         return out
     monkeypatch.setattr(r, 'get_run', with_files)
     case = {'id': 'cr', 'tags': ['create'], 'turns': [
-        {'query': 'Put TCP vs UDP in a PDF', 'expect_agents': ['math'],
+        {'query': 'TCP vs UDP, pdf please', 'expect_agents': ['math'],
          'expect_file': {'format': 'pdf', 'contains': ['handshake'], 'min_pages': 2}},
         {'query': 'now as markdown', 'expect_file': {'format': 'md', 'contains': ['TCP']}}]}
-    single = {'id': 'none', 'tags': ['create'], 'query': 'Put that in a PDF', 'expect_file': False}
+    single = {'id': 'none', 'tags': ['create'], 'query': 'that one, pdf please', 'expect_file': False}
     s = await run(r, [case, single])
     c, n = s['cases']
     assert [t['pass'] for t in c['turns']] == [True, False] and not c['pass']

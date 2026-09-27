@@ -698,3 +698,21 @@ async def test_convert_endpoint_makes_a_pdf_of_a_table_with_huge_rows(client):
     src = stored(client.router.store, spec=spec, fmt='xlsx', source='table')
     pdf = await json_of(await client.post(f'/api/created/{src["id"]}/convert', json={'format': 'pdf'}), 201)
     assert pdf['format'] == 'pdf' and pdf['pages'] >= 1
+
+
+async def test_excel_from_an_attached_table_keeps_the_data_after_an_analysis_step():
+    """"Turn this sales data into an Excel sheet with a chart": the planner may add an analysis step first; the sheet
+    still holds the table (with a chart), and the analysis rides along as notes."""
+    import io
+    import openpyxl
+    meta = {'id': 'f1', 'name': 'sales.csv', 'columns': ['region', 'product', 'revenue']}
+    rows = [['North', 'Widget', 1200], ['West', 'Gadget', 900], ['South', 'Widget', 700]]
+    job = create_agent.Job('Turn this sales data into an Excel sheet with a chart of revenue by region',
+                           deps=[('analyze the sales data', 'North leads with 1,200 in revenue.')],
+                           tables=[(meta, meta['columns'], rows)])
+    out = await create_agent.make(job, None, None)
+    assert out.ok and out.file['format'] == 'xlsx' and out.file['source'] == 'table' and out.file['tokens'] == 0
+    wb = openpyxl.load_workbook(io.BytesIO(out.data))
+    cells = {str(c.value) for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.value is not None}
+    assert {'North', 'West', 'Widget'} <= cells and any('North leads' in c for c in cells)
+    assert any(ws._charts for ws in wb.worksheets)
