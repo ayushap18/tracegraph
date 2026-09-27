@@ -46,7 +46,7 @@ _CELL = {'anyOf': [_STR, {'type': 'number'}, {'type': 'null'}, _obj({'formula': 
 DOCSPEC_SCHEMA = _obj({
     'title': _STR, 'subtitle': _STR,
     'sections': {'type': 'array', 'items': _obj({
-        'heading': _STR, 'level': {'type': 'integer', 'enum': [1, 2, 3]}, 'notes': _STR,
+        'heading': _STR, 'level': {'type': 'integer', 'minimum': 1, 'maximum': 3}, 'notes': _STR,
         'blocks': {'type': 'array', 'items': {'anyOf': [
             _obj({'type': {'type': 'string', 'enum': ['paragraph']}, 'text': _STR}),
             _obj({'type': {'type': 'string', 'enum': ['bullets']}, 'items': _STRS, 'ordered': {'type': 'boolean'}}),

@@ -301,6 +301,10 @@ async def plan(query: str, jev, engine=None, context=None, files=None, mode: str
             except Exception as e:
                 llm = e
         p = None if isinstance(llm, BaseException) else llm  # refusal, API error, bad JSON: the heuristic still works
+        if not isinstance(safety, BaseException) and safety[0] >= BLOCK_AT:
+            # Never let an LLM rephrase an unsafe request: its rewrite ("slides on defending against phishing") can
+            # route around the block. Plan from the literal text instead, so Jev judges each part as the user wrote it.
+            return await literal_plan(query, jev, safety[1] + (heuristic or {}).get('jev_tokens', 0))
         if p is not None and not isinstance(safety, BaseException):  # without Jev's check, keep every part as written
             # a step that points back ("what time is it there") but was planned as independent waits for the one before
             p['deps'] = [d or ([i - 1] if i and refers_back(t) else []) for i, (t, d) in enumerate(zip(p['subtasks'], p['deps']))]
@@ -316,6 +320,27 @@ async def plan(query: str, jev, engine=None, context=None, files=None, mode: str
                 return {**p, 'subtasks': p['subtasks'] + missing, 'deps': p['deps'] + [[] for _ in missing]}
             # no room, or Jev couldn't check: the keyless plan keeps every part of the query as written
     return with_deps(heuristic or await plan_heuristic(query, jev, scores))
+
+
+async def literal_plan(query: str, jev, tokens: int = 0) -> dict:
+    """The plan for a query Jev found unsafe as a whole: its parts exactly as written, so the safe ones are answered and
+    the harmful ones blocked. If no single part scores unsafe (the harm is in how they combine), the whole query is one
+    step, and it is blocked."""
+    # Split finer than candidate_split: sentences too, and short fragments ("also build bombs") count, since Jev
+    # judges every piece anyway.
+    pieces = re.split(r'(?<=[.?!])\s+', query.strip())
+    parts = [q for piece in pieces for q in (LEAD.sub('', x.strip(' ,.')).strip() for x in SEP.split(piece)) if q]
+    parts = [p for p in parts if not re.fullmatch(r'(?i)(?:and|then|also|plus)\W*', p)][:MAX_SUBTASKS]
+    if len(parts) > 1:
+        try:
+            scored = await asyncio.gather(*(unsafe_score(jev, t) for t in parts))
+        except Exception:
+            scored = []
+        tokens += sum(n for _, n in scored)
+        if not any(sc >= BLOCK_AT for sc, _ in scored):
+            parts = [query]
+    return {'planner': 'heuristic', 'subtasks': parts, 'deps': [[] for _ in parts], 'multi': None, 'jev_tokens': tokens,
+            'claude_in': 0, 'claude_out': 0, 'literal': True}
 
 
 def with_deps(out: dict) -> dict:

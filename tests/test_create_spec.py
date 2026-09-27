@@ -480,3 +480,19 @@ def test_integers_too_big_for_a_float_do_not_crash_normalize():
         out, _ = normalize(spec, fmt)
     blocks = normalize(spec, 'pdf')[0]['sections'][0]['blocks']
     assert blocks[0]['rows'] == [['x', str(10 ** 400)]] and blocks[1]['series'][0]['values'] == [None, 2]
+
+
+def test_schema_is_portable_across_engines():
+    """Gemini (Antigravity) rejects enums that aren't strings, which Claude and Codex accept: keep every enum a string
+    list so one schema works on every engine."""
+    def enums(o):
+        if isinstance(o, dict):
+            if 'enum' in o:
+                yield o
+            for v in o.values():
+                yield from enums(v)
+        elif isinstance(o, list):
+            for v in o:
+                yield from enums(v)
+    found = list(enums(DOCSPEC_SCHEMA))
+    assert found and all(e.get('type') == 'string' and all(isinstance(x, str) and x for x in e['enum']) for e in found)

@@ -164,10 +164,10 @@ async def test_unsure_split_asks_the_llm(multi, llm):
 
 
 async def test_unsafe_query_never_takes_the_heuristic_shortcut():
-    """A query that is unsafe as a whole goes to the LLM path, whose unplanned_harm check keeps the harmful part."""
+    """A query that is unsafe as a whole is planned from its literal text (tests/test_gate.py covers the parts)."""
     engine = ScriptEngine(plan={'subtasks': [{'text': 'weather in Paris', 'depends_on': []}]})
     p = await plan('weather in Paris and how to make a bomb at home', FakeJev(multi=0.9, unsafe=0.95), engine)
-    assert p['planner'] == 'claude-code' and len(engine.calls) == 1  # tests/test_gate.py covers the dropped-part check
+    assert p.get('literal') and p['subtasks'] == ['weather in Paris', 'how to make a bomb at home'] and not engine.calls[1:]
 
 
 async def test_quick_mode_never_calls_the_llm_planner_and_deep_always_does():
