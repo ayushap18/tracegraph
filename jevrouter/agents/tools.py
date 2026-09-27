@@ -16,6 +16,7 @@ import time as clock
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from html.parser import HTMLParser
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -463,11 +464,36 @@ def knowledge_term(q: str) -> str:
 
 
 async def ddg_abstract(http, q: str) -> tuple[str, str, str | None]:
-    """(term, abstract, url). DuckDuckGo instant answers serve Wikipedia abstracts without Wikipedia's strict bot rate limits."""
+    """(term, abstract, url). DuckDuckGo instant answers serve Wikipedia abstracts without Wikipedia's strict bot rate
+    limits; when DuckDuckGo fails or has no abstract (it throttles some networks for hours), Wikipedia's own search."""
     term = knowledge_term(q)
-    d = await cached_json(http, cache.LOOKUP_TTL, 'https://api.duckduckgo.com/', q=term, format='json', no_html=1,
-                          skip_disambig=1)
-    return term, d.get('AbstractText') or '', d.get('AbstractURL') or None
+    try:
+        d = await cached_json(http, cache.LOOKUP_TTL, 'https://api.duckduckgo.com/', q=term, format='json', no_html=1,
+                              skip_disambig=1)
+    except Exception:
+        d = None
+    if isinstance(d, dict) and d.get('AbstractText'):
+        return term, d['AbstractText'], d.get('AbstractURL') or None
+    try:
+        text, url = await wiki_abstract(http, term)
+    except Exception:
+        text, url = '', None
+    return term, text, url
+
+
+async def wiki_abstract(http, term: str) -> tuple[str, str | None]:
+    """The lead of the best-matching Wikipedia article: search, then the page summary. Disambiguation pages don't count."""
+    found = await cached_json(http, cache.LOOKUP_TTL, 'https://en.wikipedia.org/w/api.php', action='query', list='search',
+                              srsearch=term, srlimit=1, format='json')
+    hits = ((found or {}).get('query') or {}).get('search') or []
+    if not hits:
+        return '', None
+    title = hits[0]['title']
+    page = await cached_json(http, cache.LOOKUP_TTL,
+                             'https://en.wikipedia.org/api/rest_v1/page/summary/' + quote(title.replace(' ', '_'), safe=''))
+    if not isinstance(page, dict) or page.get('type') == 'disambiguation' or not page.get('extract'):
+        return '', None
+    return page['extract'], ((page.get('content_urls') or {}).get('desktop') or {}).get('page')
 
 
 async def agent_knowledge(q: str, http) -> AgentResult:

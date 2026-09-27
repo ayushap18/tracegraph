@@ -391,6 +391,8 @@ async def test_failed_or_empty_lookups_are_not_cached(monkeypatch):
     replies = [{}, {'AbstractText': 'A mathematician.', 'AbstractURL': 'https://en.wikipedia.org/wiki/Ada_Lovelace'}]
 
     async def fake_get_json(http, url, **params):
+        if 'wikipedia' in url:
+            raise OSError('Wikipedia unreachable too')
         return replies.pop(0)
     monkeypatch.setattr(tools, 'get_json', fake_get_json)
     assert not (await tools.agent_knowledge('Who was Ada Lovelace?', None)).ok  # throttled: an empty answer
@@ -439,3 +441,33 @@ async def test_multi_score_is_cached_by_query_text():
     for _ in range(2):
         await router.handle('weather in Paris and convert 100 EUR to INR', 'eval')
     assert [c[1] for c in jev.calls].count(['multi']) == 3  # evals always ask Jev
+
+
+async def test_knowledge_falls_back_to_wikipedia_when_duckduckgo_fails(monkeypatch):
+    seen = []
+
+    async def fake_get_json(http, url, **params):
+        seen.append(url)
+        if 'duckduckgo' in url:
+            raise TimeoutError  # throttled network
+        if 'api.php' in url:
+            assert params['srsearch'] == 'Ada Lovelace'
+            return {'query': {'search': [{'title': 'Ada Lovelace'}]}}
+        assert url.endswith('/page/summary/Ada_Lovelace')
+        return {'type': 'standard', 'extract': 'Ada Lovelace was a mathematician. She wrote the first program.',
+                'content_urls': {'desktop': {'page': 'https://en.wikipedia.org/wiki/Ada_Lovelace'}}}
+    monkeypatch.setattr(tools, 'get_json', fake_get_json)
+    r = await tools.agent_knowledge('Who was Ada Lovelace?', None)
+    assert r.ok and r.answer.startswith('Ada Lovelace was a mathematician') and r.source.endswith('/Ada_Lovelace')
+    assert len(seen) == 3
+
+
+async def test_knowledge_wikipedia_fallback_skips_disambiguation(monkeypatch):
+    async def fake_get_json(http, url, **params):
+        if 'duckduckgo' in url:
+            return {}
+        if 'api.php' in url:
+            return {'query': {'search': [{'title': 'Mercury'}]}}
+        return {'type': 'disambiguation', 'extract': 'Mercury may refer to:'}
+    monkeypatch.setattr(tools, 'get_json', fake_get_json)
+    assert not (await tools.agent_knowledge('Mercury', None)).ok

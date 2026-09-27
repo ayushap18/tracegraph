@@ -95,3 +95,10 @@ async def test_single_clause_skips_llm_planner():
     engine.stream = lambda **kw: calls.append(kw)  # would blow up if awaited
     p = await plan('Who was Ada Lovelace?', FakeJev(), engine)
     assert p['planner'] == 'heuristic' and p['subtasks'] == ['Who was Ada Lovelace?'] and not calls
+
+
+def test_a_comma_splits_only_before_a_new_question():
+    assert candidate_split("What time is it in Paris, what's 10% of 90, and how do I make a bomb?") == [
+        'What time is it in Paris', "what's 10% of 90", 'how do I make a bomb?']
+    for whole in ('Weather in Paris, France', 'Hi, what is the time in Tokyo?', 'I like salt, pepper and cumin'):
+        assert candidate_split(whole) == [whole]

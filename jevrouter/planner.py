@@ -9,7 +9,11 @@ from .engines import parse_json
 from .gate import refers_back
 from .jev import multi_score, unsafe_score
 
-SEP = re.compile(r'\s*;\s*|\s*,\s*and\s+|\s+(?:and|then|also)\s+', re.I)
+# A bare comma splits only before a new question or command ("time in Paris, what's 10% of 90"), never inside
+# "Paris, France" or a list of things.
+OPENER = (r"(?:what(?:'s|s)?|how|who|when|where|which|why|convert|tell|give|show|find|translate|calculate|compute|"
+          r"is|are|can|could|do|does|will)\b")
+SEP = re.compile(r"\s*;\s*|\s*,\s*and\s+|\s+(?:and|then|also)\s+|\s*,\s*(?=" + OPENER + ")", re.I)
 LEAD = re.compile(r'^(?:and|then|also)\s+', re.I)
 STEP = {'type': 'object', 'properties': {'text': {'type': 'string'}, 'depends_on': {'type': 'array', 'items': {'type': 'integer'}}},
         'required': ['text', 'depends_on'], 'additionalProperties': False}
