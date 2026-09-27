@@ -611,3 +611,16 @@ async def test_a_file_request_goes_to_create_even_when_jev_picks_the_document_ag
     events = await run(router, 'Turn these notes into a short summary file')
     r = routed(events)['1.1']
     assert r['agent'] == 'create' and 'request is for a file' in r['reason']
+
+
+async def test_create_without_a_file_asked_for_goes_to_the_runner_up():
+    """Jev leans to create for "write an email" or "plan a trip"; with no format or file named the runner-up answers,
+    and "send an email" still gets its honest "can't"."""
+    probs = lambda t: ('create', 0.7)
+    router = Router(FakeJev(route_for=probs))
+    r = routed(await run(router, 'Plan a 3 day trip to Kyoto on a moderate budget'))['1.1']
+    assert r['agent'] not in ('create', 'clarify') and 'no file was asked for' in r['reason']
+    r = routed(await run(router, 'Send an email to my boss saying I am sick today'))['2.1']
+    assert r['agent'] == 'chat' and "can't" in r['reason']
+    r = routed(await run(router, 'Make slides about solid-state batteries'))['3.1']
+    assert r['agent'] == 'create'

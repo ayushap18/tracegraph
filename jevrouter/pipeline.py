@@ -18,6 +18,7 @@ from .agents.llm import COMMON
 from .agents.tools import dates_question, sql_agent, sql_in, units_question
 from .config import (AGENTS, BLOCK_AT, CONFIRM_AT, DEEP_MIN_OK, EASY_AT, GUARDS, HARD_AT, HISTORY, KEYLESS, PRICES, REPORT,
                      RESEARCH, RUN, RUN_TIMEOUT, SAMPLES, SQL_AGENT, STRONGEST, env_flag)
+from . import create as cf
 from .engines.auto import Steered
 from .engines.health import Health, instrument_all, pct
 from .events import Broadcaster
@@ -754,6 +755,14 @@ class Router:
             try:
                 if d['agent'] == 'blocked':
                     return
+                # Jev leans to create for "write an email" or "plan a trip"; without a format or a file asked for, the
+                # text answer is what's wanted, so the runner-up takes it (and "send an email" still gets its "can't")
+                if d['pick'] == 'create' and not gate.wants_file(text) and not cf.detect_format(text):
+                    runner = next((a for a in d['probabilities'] if a not in ('create', *GUARDS) and a in agents), None)
+                    if runner:
+                        d['pick'] = runner
+                        if d['agent'] == 'create':
+                            d['agent'], d['reason'] = runner, f"{d['reason']}, but no file was asked for"
                 # "Remind me at 5pm": an honest "I can't", not the current time
                 if cant := gate.cant_do(text, d['pick'], d['probabilities'].get(d['pick'], 0)):
                     d['agent'], d['reason'] = 'chat', f"can't {cant[0]}"
