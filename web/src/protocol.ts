@@ -52,6 +52,7 @@ export interface AnsweredFields {
   source: string | null
   engine: Engine
   checks?: AnswerChecks // speed plan: verify result, cache hit, effort used
+  created_files?: CreatedFile[] // files plan: files the create agent made in this step
 }
 
 // One entry of `hello.history`, ascending qid, max 60; queries still in flight have total_ms null.
@@ -258,3 +259,24 @@ export interface EvalCaseExtra {
   judge?: JudgeScore | null; judge_error?: string // judge_error: the judge failed, so the rubric wasn't checked
   max_ms?: number | null; over_budget?: boolean
 }
+
+// ---------- created files (docs/PLAN-files.md, docs/RULES-files.md) ----------
+export type FileFormat = 'pdf' | 'docx' | 'pptx' | 'xlsx' | 'md'
+export type RuleSeverity = 'block' | 'fix' | 'warn'
+/** One ruleset check on one file; ok false with severity fix means it was corrected. */
+export interface RuleResult { id: string; severity: RuleSeverity; ok: boolean; note: string }
+export interface RuleInfo { id: string; group: string; text: string; severity: RuleSeverity | null; enforced: boolean }
+export interface CreatedFile {
+  id: string; name: string; format: FileFormat; size: number; created: number; qid: number | null
+  title: string
+  pages?: number | null; slides?: number | null; sheets?: string[] | null
+  tokens: number          // LLM tokens the spec cost; 0 for zero-token paths and conversions
+  source: 'llm' | 'answer' | 'table' | 'convert'  // where the content came from
+  from_id?: string | null // convert: the file it was converted from
+  rules: RuleResult[]     // every check run; warnings shown on the card
+  sandbox?: string | null // sandbox id when the file lives only in that sandbox's memory
+}
+export type FilePreview =
+  | { kind: 'markdown'; text: string }
+  | { kind: 'outline'; items: Array<{ level: number; text: string }>; pages?: number | null; slides?: number | null }
+  | { kind: 'sheets'; sheets: Array<{ name: string; columns: string[]; rows: Array<Array<string | number | null>>; total_rows: number }> }

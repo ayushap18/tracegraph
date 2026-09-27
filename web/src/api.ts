@@ -4,6 +4,7 @@ import type {
   EvalDetail, EvalSummary, FileInfo, NewAgent, RunRecord, SessionDetail, SessionSummary,
   AgentExamples, EngineHealth, EvalCompare, Label, NewLabel, ReviewItem, ShakyReason, Verdict,
   RunEvalBody, TimingsSummary,
+  CreatedFile, FileFormat, FilePreview, RuleInfo,
 } from './protocol'
 
 export class ApiError extends Error {
@@ -139,6 +140,19 @@ export const promoteLabel = (id: string) => post<{ case_id: string; created: boo
 export const listReview = (limit = 50, reason?: ShakyReason) =>
   get<{ items: ReviewItem[]; scanned: number }>(`/api/review?limit=${limit}` + (reason ? `&reason=${enc(reason)}` : ''))
 export const agentExamples = () => get<{ enabled: boolean; agents: AgentExamples[] }>('/api/agents/examples')
+
+// ---------- created files (docs/PLAN-files.md) ----------
+export const listCreated = (limit = 50, before?: number) =>
+  get<{ files: CreatedFile[] }>(`/api/created?limit=${limit}` + (before ? `&before=${before}` : ''))
+export const getCreated = (id: string) => get<CreatedFile>(`/api/created/${enc(id)}`)
+export const deleteCreated = (id: string) => del<{ ok: true }>(`/api/created/${enc(id)}`)
+/** Re-render from the stored spec in another format; costs no LLM tokens. */
+export const convertCreated = (id: string, format: FileFormat) => post<CreatedFile>(`/api/created/${enc(id)}/convert`, { format })
+/** Download and preview URLs; sandbox files are served from the sandbox's memory. */
+export const createdUrl = (f: Pick<CreatedFile, 'id' | 'sandbox'>, what: 'download' | 'preview') =>
+  f.sandbox ? `/api/sandbox/${enc(f.sandbox)}/created/${enc(f.id)}/${what}` : `/api/created/${enc(f.id)}/${what}`
+export const previewCreated = (f: Pick<CreatedFile, 'id' | 'sandbox'>) => get<FilePreview>(createdUrl(f, 'preview'))
+export const listRules = () => get<{ rules: RuleInfo[] }>('/api/rules')
 
 /** Human-readable message for any thrown value. */
 export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e))
