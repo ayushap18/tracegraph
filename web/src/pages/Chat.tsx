@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { ask, cancelRun, chooseRun, deleteSession, errorText, getSession, listFiles, listSessions, uploadFile } from '../api'
-import type { AskBody, FileInfo, SessionSummary } from '../protocol'
+import type { AskBody, CreatedFile, FileInfo, RunRecord, SessionSummary } from '../protocol'
 import { useStore } from '../store'
 import { fromRecord, type Run } from '../useEventStream'
 import { Button, EmptyState, IconButton, Kbd, Skeleton, Spinner, buttonClass, navigate, timeAgo, useHashPath, useNow, useToast } from '../ui'
@@ -14,8 +14,9 @@ import { BotHead, Turn, UserMessage, answerOf } from '../components/chat/Turn'
 import { AnswerGroup, RetryMenu } from '../components/chat/AnswerGroup'
 import { CompareMenu, ModeSwitch, PresetMenu, PresetRow, StyleMenu } from '../components/chat/ChatOptions'
 import { AgentChip, MentionList, useMention } from '../components/chat/AgentMention'
+import { CreatedFiles, filesOfTasks } from '../components/chat/CreatedFiles'
 import {
-  engineLabel, extrasOf, pickableEngines, readCompare, readOpts, researchReason, takeAgent, writeCompare, writeOpts,
+  PRESETS, engineLabel, extrasOf, pickableEngines, readCompare, readOpts, researchReason, takeAgent, writeCompare, writeOpts,
   type ChatOpts, type Preset, type RunExtras,
 } from '../components/chat/options'
 
@@ -28,6 +29,21 @@ export { Turn }
 // Runs that share a group_id (several engines, or "Try another engine") show as one question with tabbed answers.
 
 const ACCEPT = '.txt,.md,.csv,.json,.pdf'
+
+// Presets that ask for a file (docs/PLAN-files.md). "...from this" reuses the last answer or attached table, so these
+// usually cost no model tokens. Added to the shared list once, so the preset row and menu both show them.
+const FILE_PRESETS: Preset[] = [
+  { id: 'file-pdf', label: 'PDF report', icon: 'file-pdf', template: 'Make a PDF report of this{}', mode: 'balanced', style: 'default' },
+  { id: 'file-slides', label: 'Slides from this', icon: 'file-pptx', template: 'Make slides from this{}', mode: 'balanced', style: 'default' },
+  { id: 'file-xlsx', label: 'Excel from this table', icon: 'file-xlsx', template: 'Turn this table into an Excel sheet{}', mode: 'quick', style: 'default' },
+  { id: 'file-md', label: 'Markdown notes', icon: 'file-md', template: 'Make Markdown notes of this{}', mode: 'quick', style: 'default' },
+]
+for (const p of FILE_PRESETS) if (!PRESETS.some(x => x.id === p.id)) PRESETS.push(p)
+
+// Files a saved run's steps created. Runs loaded from a session keep them here, since the client Run built from a
+// saved record carries only the answer; live runs carry them on each task's `answered` event.
+const savedFilesOf = (runs: RunRecord[]): Array<[number, CreatedFile[]]> =>
+  runs.map(r => [r.qid, filesOfTasks(r.tasks ?? [])] as [number, CreatedFile[]]).filter(([, f]) => f.length > 0)
 const MAX_FILE = 10 * 1024 * 1024
 const TRACE_KEY = 'tg-chat-trace'
 // Agents the server offers only for a run with files attached (jevrouter/files.py FILE_AGENTS), and the one that also
@@ -80,6 +96,16 @@ export default function Chat() {
     if (list.length) setExtras(prev => { const out = { ...prev }; for (const [q, x] of list) out[q] = { ...out[q], ...x }; return out })
   }, [])
 
+  const [savedFiles, setSavedFiles] = useState<Record<number, CreatedFile[]>>({})
+  const addSavedFiles = useCallback((runs: RunRecord[]) => {
+    const list = savedFilesOf(runs)
+    if (list.length) setSavedFiles(prev => { const out = { ...prev }; for (const [q, f] of list) out[q] = f; return out })
+  }, [])
+  const filesOf = useCallback((r: Run): CreatedFile[] => {
+    const live = filesOfTasks(r.order.map(t => r.tasks[t]).filter(Boolean))
+    return live.length ? live : savedFiles[r.qid] ?? []
+  }, [savedFiles])
+
   const [detail, setDetail] = useState<{ id: string; runs: Run[]; title: string } | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailErr, setDetailErr] = useState<string | null>(null)
@@ -90,7 +116,7 @@ export default function Chat() {
     setDetailLoading(true)
     setDetailErr(null)
     getSession(sessionId)
-      .then(r => { if (alive) { setDetail({ id: r.id, title: r.title, runs: r.runs.map(fromRecord) }); addExtras(r.runs.map(x => [x.qid, extrasOf(x)])); setDetailErr(null) } })
+      .then(r => { if (alive) { setDetail({ id: r.id, title: r.title, runs: r.runs.map(fromRecord) }); addExtras(r.runs.map(x => [x.qid, extrasOf(x)])); addSavedFiles(r.runs); setDetailErr(null) } })
       .catch(e => { if (alive) { setDetail({ id: sessionId, title: '', runs: [] }); setDetailErr(errorText(e)) } })
       .finally(() => { if (alive) setDetailLoading(false) })
     return () => { alive = false }
@@ -132,8 +158,8 @@ export default function Chat() {
   sidRef.current = sessionId
   const refreshExtras = useCallback(() => {
     const sid = sidRef.current
-    if (sid) getSession(sid).then(r => addExtras(r.runs.map(x => [x.qid, extrasOf(x)])), () => {})
-  }, [addExtras])
+    if (sid) getSession(sid).then(r => { addExtras(r.runs.map(x => [x.qid, extrasOf(x)])); addSavedFiles(r.runs) }, () => {})
+  }, [addExtras, addSavedFiles])
 
   // Keep the session list fresh as runs in this browser start and finish.
   useEffect(() => {
@@ -500,17 +526,26 @@ export default function Chat() {
                   ? <RetryMenu engines={extras[r.qid]?.mode === 'research' ? webOnly(allPickable) : allPickable} current={runEngine(r)} disabled={retrying != null} onPick={e => void retry(r, e)} />
                   : null
                 if (group.length === 1) {
+                  const made = filesOf(run)
                   return (
-                    <Turn key={run.qid} run={run} selected={traceOpen && selected?.qid === run.qid} fileName={fileName} extras={extras[run.qid]}
-                      engineLabel={run.engine ? engineLabel(store.engines, run.engine) : undefined} actions={actionsFor(run)}
-                      onShowTrace={() => showTrace(run.qid)} />
+                    <div key={run.qid} className="flex min-w-0 flex-col gap-3">
+                      <Turn run={run} selected={traceOpen && selected?.qid === run.qid} fileName={fileName} extras={extras[run.qid]}
+                        engineLabel={run.engine ? engineLabel(store.engines, run.engine) : undefined} actions={actionsFor(run)}
+                        onShowTrace={() => showTrace(run.qid)} />
+                      {made.length > 0 && <CreatedFiles files={made} className="pl-[18px]" />}
+                    </div>
                   )
                 }
                 const chosen = group.find(r => extras[r.qid]?.chosen)?.qid ?? run.qid
+                // Several answers: the files every answer made, under the group.
+                const made = group.flatMap(filesOf)
                 return (
-                  <AnswerGroup key={run.qid} runs={group} extras={extras} chosen={chosen} selectedQid={traceOpen ? selected?.qid ?? null : null}
-                    fileName={fileName} engineOf={engineOf} onShowTrace={showTrace} onChoose={qid => void choose(qid, group)} choosing={choosing}
-                    actionsFor={actionsFor} />
+                  <div key={run.qid} className="flex min-w-0 flex-col gap-3">
+                    <AnswerGroup runs={group} extras={extras} chosen={chosen} selectedQid={traceOpen ? selected?.qid ?? null : null}
+                      fileName={fileName} engineOf={engineOf} onShowTrace={showTrace} onChoose={qid => void choose(qid, group)} choosing={choosing}
+                      actionsFor={actionsFor} />
+                    {made.length > 0 && <CreatedFiles files={made} className="pl-[18px]" />}
+                  </div>
                 )
               })}
               {sending && (

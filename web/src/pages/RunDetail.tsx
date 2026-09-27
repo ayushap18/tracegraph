@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { ask, cancelRun, errorText, getRun } from '../api'
-import type { RunRecord, RunTimings } from '../protocol'
+import type { CreatedFile, RunRecord, RunTimings } from '../protocol'
 import { useRunState, useStore } from '../store'
-import type { Run } from '../useEventStream'
+import type { Run, Task } from '../useEventStream'
 import { Badge, Button, Card, EmptyState, Skeleton, StatusBadge, Tabs, copyText, navigate, timeAgo, useHashPath, useToast } from '../ui'
 import { EngineIcon, Icon } from '../icons'
 import { TaskCard } from '../components/Panels'
@@ -12,6 +12,7 @@ import { RouteFeedback, canLabel, useRunLabels } from '../components/RouteFeedba
 import { Waterfall } from '../components/Viz'
 import { Timings } from '../components/Timings'
 import { AgentBadge, BackLink, PageBody } from '../components/app'
+import { CreatedFiles, filesOfTasks } from '../components/chat/CreatedFiles'
 import { cn } from '@/lib/utils'
 import { pct } from '../lib'
 
@@ -24,6 +25,12 @@ const TABS = [
   { id: 'subtasks', label: 'Subtasks', icon: 'subtasks' as const },
   { id: 'raw', label: 'Raw', icon: 'code' as const },
 ]
+
+// Files a step created (docs/PLAN-files.md): from the live `answered` event, else from the stored record, since a run
+// loaded from history carries only the answer.
+function filesOfTask(t: Task, rec: RunRecord | null): CreatedFile[] {
+  return t.answered?.created_files?.length ? t.answered.created_files : filesOfTasks(rec?.tasks.filter(x => x.tid === t.tid) ?? [])
+}
 
 // Same format as the Runs table: whole milliseconds under a second, one decimal above.
 const secs = (v: number | null | undefined) => (v == null ? '-' : v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
@@ -133,7 +140,7 @@ export default function RunDetail({ params }: { params: Record<string, string> }
         <Tabs tabs={TABS.map(t => (t.id === 'subtasks' ? { ...t, count: tasks.length } : t))} value={tab} onChange={setTab} aria-label="Run views" />
 
         <div className="min-w-0" role="tabpanel" aria-label={TABS.find(t => t.id === tab)?.label}>
-          {tab === 'answer' && <AnswerTab run={run} />}
+          {tab === 'answer' && <AnswerTab run={run} rec={stored.rec} />}
           {tab === 'trace' && <Card flush className="overflow-hidden"><TraceView run={run} store={store} /></Card>}
           {tab === 'timeline' && (
             <div className="flex flex-col gap-4">
@@ -148,7 +155,7 @@ export default function RunDetail({ params }: { params: Record<string, string> }
             </div>
           )}
           {tab === 'subtasks' && (
-            tasks.length ? <SubtasksTab run={run} /> : <Card><EmptyState icon="subtasks" title={run.done ? 'No subtasks' : 'Planning…'} text={run.done ? 'This run finished without a plan.' : 'Subtasks appear as soon as the planner splits the query.'} /></Card>
+            tasks.length ? <SubtasksTab run={run} rec={stored.rec} /> : <Card><EmptyState icon="subtasks" title={run.done ? 'No subtasks' : 'Planning…'} text={run.done ? 'This run finished without a plan.' : 'Subtasks appear as soon as the planner splits the query.'} /></Card>
           )}
           {tab === 'raw' && <RawTab run={run} rec={stored.rec} err={stored.err} />}
         </div>
@@ -158,7 +165,7 @@ export default function RunDetail({ params }: { params: Record<string, string> }
 }
 
 // One card per subtask; saved runs get route feedback under each routing decision.
-function SubtasksTab({ run }: { run: Run }) {
+function SubtasksTab({ run, rec }: { run: Run; rec: RunRecord | null }) {
   const tasks = run.order.map(t => run.tasks[t]).filter(Boolean)
   const [labels, setLabel] = useRunLabels(run.qid, run.done && run.source !== 'sandbox')
   return (
@@ -171,6 +178,7 @@ function SubtasksTab({ run }: { run: Run }) {
             </p>
           )}
           <TaskCard task={t} bare />
+          <StepFiles files={filesOfTask(t, rec)} />
           {run.done && canLabel(run.source, t) && (
             <RouteFeedback qid={run.qid} task={t} label={labels[t.tid]} onLabel={setLabel} className="border-t border-border pt-3" />
           )}
@@ -194,11 +202,22 @@ function StatItem({ label, children, className }: { label: string; children: Rea
 // Blinking caret after the last block while the answer streams in (opacity only).
 const STREAMING = "[&>.md>:last-child]:after:ml-0.5 [&>.md>:last-child]:after:animate-pulse [&>.md>:last-child]:after:text-primary [&>.md>:last-child]:after:content-['▍']"
 
-function AnswerTab({ run }: { run: Run }) {
+function StepFiles({ files }: { files: CreatedFile[] }) {
+  if (!files.length) return null
+  return (
+    <div className="flex min-w-0 flex-col gap-2 border-t border-border pt-3">
+      <p className="m-0 flex items-center gap-1.5 text-xs font-medium text-muted-foreground"><Icon name="files" size={13} />Created {files.length === 1 ? 'a file' : `${files.length} files`}</p>
+      <CreatedFiles files={files} />
+    </div>
+  )
+}
+
+function AnswerTab({ run, rec }: { run: Run; rec: RunRecord | null }) {
   const toast = useToast()
   const tasks = run.order.map(t => run.tasks[t]).filter(Boolean)
   const answer = run.merged?.answer || run.mergeStream || tasks.map(t => t.answered?.answer ?? t.stream).filter(Boolean).join('\n\n')
   const copy = async () => { (await copyText(answer)) ? toast.success('Answer copied') : toast.error('Could not copy') }
+  const made = tasks.flatMap(t => filesOfTask(t, rec)).filter((f, i, all) => all.findIndex(x => x.id === f.id) === i)
   return (
     <div className="grid items-start gap-4 lg:grid-cols-3">
       <Card className={tasks.length > 0 ? 'lg:col-span-2' : 'lg:col-span-3'} title="Answer" icon="answer" actions={answer ? <Button variant="ghost" size="sm" icon="copy" onClick={() => void copy()}>Copy</Button> : undefined}
@@ -208,8 +227,13 @@ function AnswerTab({ run }: { run: Run }) {
           : <Skeleton lines={4} />}
         {run.error && answer && <p className="m-0 mt-3 flex items-start gap-1.5 text-[13px] text-warn"><Icon name="alert" size={14} className="mt-0.5 shrink-0" />{run.error}</p>}
       </Card>
+      {made.length > 0 && (
+        <Card className="lg:col-span-2 lg:row-start-2" title="Created files" icon="files" subtitle="Download, preview or convert. Converting reuses the stored content, so it costs no model tokens.">
+          <CreatedFiles files={made} />
+        </Card>
+      )}
       {tasks.length > 0 && (
-        <Card title="Steps" icon="subtasks">
+        <Card title="Steps" icon="subtasks" className={made.length > 0 ? 'lg:row-span-2 lg:row-start-1 lg:col-start-3' : undefined}>
           <ol className="m-0 flex list-none flex-col p-0">
             {tasks.map(t => (
               <li key={t.tid} className="flex min-w-0 flex-col gap-1.5 border-b border-border py-2.5 first:pt-0 last:border-0 last:pb-0">
@@ -220,6 +244,7 @@ function AnswerTab({ run }: { run: Run }) {
                 <div className="flex flex-wrap items-center gap-2">
                   {t.routed ? <AgentBadge agent={t.routed.agent} pct={pct(t.routed.confidence)} /> : <span className="text-xs text-muted-foreground">{t.error ? 'failed' : 'pending'}</span>}
                   {t.answered && <span className="text-xs tabular-nums text-muted-foreground">{secs(t.answered.agent_ms)}</span>}
+                  {filesOfTask(t, rec).length > 0 && <Badge tone="neutral" icon="files">{filesOfTask(t, rec).length === 1 ? '1 file' : `${filesOfTask(t, rec).length} files`}</Badge>}
                 </div>
               </li>
             ))}

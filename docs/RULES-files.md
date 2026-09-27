@@ -17,7 +17,7 @@ Severity:
 | S2 | At least one section with at least one non-empty block. | block | yes |
 | S3 | A title of 1–120 characters. Missing: taken from the first heading or the request. | fix | yes |
 | S4 | Text is plain: no HTML, no raw Markdown syntax inside paragraphs (converted to plain text, with bold/italic kept as runs where the format supports them). | fix | yes |
-| S5 | Numbers in tables and charts are numbers, not strings ("1,200" → 1200). Non-numeric chart values drop that point. | fix | yes |
+| S5 | Numbers in tables and charts are numbers, not strings ("1,200" → 1200; "$1,200.50" and "12%" become numbers that keep their money or percent format). Non-numeric chart values drop that point. | fix | yes |
 | S6 | Every table row has as many cells as there are columns (short rows padded, long rows trimmed). | fix | yes |
 | S7 | Facts in the file come from the conversation, attached files or the model's answer in this run; the spec never asks the renderer to fetch anything. | block | yes |
 

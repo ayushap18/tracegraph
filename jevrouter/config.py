@@ -19,6 +19,8 @@ AGENTS = {
     'dates': 'Calendar maths on given dates: days between two dates, the weekday of a date, a date some days before '
              'or after another, an age, or whether a year is a leap year',
     'url': 'Reading, summarizing or answering a question about a specific web page whose http or https link is in the query',
+    # docs/PLAN-files.md: offered keyless too, since an earlier answer or an attached table becomes a file with no LLM.
+    'create': 'Create a downloadable file: PDF, Word (DOCX), PowerPoint (PPTX), Excel (XLSX) or Markdown',
 }
 # Only offered to Jev when the active engine can search the web.
 RESEARCH = {'research': 'Recent news, current events, or anything that needs searching the web for up-to-date information'}
@@ -87,6 +89,21 @@ URL_TYPES = ('text/html', 'text/plain', 'application/xhtml+xml', 'application/js
 # SQL over attached tables: result rows shown, and the seconds a query may run.
 SQL_MAX_ROWS = 50
 SQL_TIMEOUT = 2.0
+
+# Created files (docs/PLAN-files.md). The one spec call sees the request plus at most CREATE_CONTEXT_CHARS of context
+# (earlier turns, earlier steps, attached files: a table as its columns and first CREATE_TABLE_ROWS rows), and may write
+# at most CREATE_MAX_TOKENS for the format (tables come from data, so a spreadsheet needs the fewest words). Jev's
+# safety check (X4) reads all of the spec's text as it will be written (numbers left out, repeated cells once), in
+# pieces of CREATE_SAFETY_CHARS checked side by side, at most CREATE_SAFETY_CHUNKS of them; a file with more text than
+# that is not made. A sandbox keeps at most
+# CREATE_SANDBOX_FILES created files (CREATE_SANDBOX_BYTES in all) in memory; the oldest go first.
+CREATE_CONTEXT_CHARS = 6000
+CREATE_TABLE_ROWS = 5
+CREATE_MAX_TOKENS = {'md': 3000, 'docx': 3000, 'pdf': 3000, 'pptx': 2500, 'xlsx': 1500}
+CREATE_SAFETY_CHARS = 4000
+CREATE_SAFETY_CHUNKS = 32
+CREATE_SANDBOX_FILES = 10
+CREATE_SANDBOX_BYTES = 40 * 1024 * 1024
 
 # Dollars per million tokens.
 PRICES = {'jev_in': 0.042, 'claude_in': 5.0, 'claude_out': 25.0}

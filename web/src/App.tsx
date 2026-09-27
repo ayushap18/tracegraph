@@ -14,6 +14,7 @@ import Live from './pages/Live'
 import Runs from './pages/Runs'
 import RunDetail from './pages/RunDetail'
 import Review from './pages/Review'
+import Files from './pages/Files'
 import Settings from './pages/Settings'
 import Compare from './pages/Compare'
 import Evals from './pages/Evals'
@@ -46,6 +47,7 @@ function Page({ match }: { match: Match }) {
     case 'runs': return <Runs />
     case 'run': return <RunDetail params={params} />
     case 'review': return <Review />
+    case 'files': return <Files />
     case 'compare': return <Compare params={params} />
     case 'evals': return <Evals params={params} />
     case 'agents': return <Agents params={params} />

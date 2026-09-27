@@ -41,7 +41,11 @@ CONCURRENCY = 2
 MAX_REPEAT = 5
 SPLITS = ('dev', 'holdout', 'all')
 OUTCOMES = ('clarify', 'blocked', 'answer')
-EXPECT_KEYS = ('expect_agents', 'expect_outcome', 'must_match', 'must_not_match')
+EXPECT_KEYS = ('expect_agents', 'expect_outcome', 'must_match', 'must_not_match', 'expect_file')
+FILE_FORMATS = ('pdf', 'docx', 'pptx', 'xlsx', 'md')  # jevrouter/create/spec.py FORMATS
+FILE_KEYS = {'format', 'contains', 'min_pages', 'max_pages', 'slides_min', 'sheets', 'charts_min', 'rules_ok'}
+# X2: the only functions a created spreadsheet may compute with; anything else is an injected formula.
+SAFE_FORMULA = re.compile(r'^=(?:[A-Z]+\d+|[A-Z]+\d+:[A-Z]+\d+|(?:SUM|AVERAGE|MIN|MAX|COUNT|ROUND)\(|[\s\d.,+\-*/()])+$', re.I)
 TURN_KEYS = {'query', *EXPECT_KEYS}
 CASE_KEYS = {'id', 'query', 'tags', 'split', 'turns', 'files', 'judge', 'judge_min', 'max_ms', 'strict_ms', 'paraphrases',
              'note', *EXPECT_KEYS}
@@ -69,6 +73,38 @@ def check_expectations(d: dict, where: str) -> list[str]:
                 re.compile(d[k])
             except (re.error, TypeError) as e:
                 errors.append(f'{where}{k} is not a valid regex ({e})')
+    if 'expect_file' in d:
+        errors += check_file_expectation(d['expect_file'], where)
+    return errors
+
+
+def check_file_expectation(f, where: str) -> list[str]:
+    """expect_file is false (no file may be created) or {format, contains?, min_pages?, max_pages?, slides_min?,
+    sheets?, charts_min?, rules_ok?}."""
+    if f is False:
+        return []
+    if not isinstance(f, dict):
+        return [f'{where}expect_file must be an object or false']
+    errors = []
+    if unknown := sorted(set(f) - FILE_KEYS):
+        errors.append(f'{where}expect_file has unknown key {unknown[0]!r}')
+    if f.get('format') not in FILE_FORMATS:
+        errors.append(f'{where}expect_file format must be one of {", ".join(FILE_FORMATS)}')
+    for k in ('contains', 'sheets'):
+        v = f.get(k, [])
+        if not (isinstance(v, list) and all(isinstance(x, str) and x for x in v)):
+            errors.append(f'{where}expect_file {k} must be a list of regexes')
+            continue
+        for x in v:
+            try:
+                re.compile(x)
+            except re.error as e:
+                errors.append(f'{where}expect_file {k} has a bad regex {x!r} ({e})')
+    for k in ('min_pages', 'max_pages', 'slides_min', 'charts_min'):
+        if k in f and not (type(f[k]) is int and f[k] >= 0):
+            errors.append(f'{where}expect_file {k} must be a whole number')
+    if 'rules_ok' in f and not isinstance(f['rules_ok'], bool):
+        errors.append(f'{where}expect_file rules_ok must be true or false')
     return errors
 
 
@@ -249,8 +285,141 @@ def score(case: dict, rec: dict) -> dict:
             'jev_tokens': (rec.get('tokens') or {}).get('jev_in', 0)}
 
 
-def turn_result(t: dict, rec: dict) -> dict:
+# ---------- created files (docs/PLAN-files.md, "Evals") ----------
+
+def created_files(rec: dict) -> list[dict]:
+    """Every CreatedFile the run's steps made, in step order."""
+    return [f for t in rec.get('tasks', []) for f in (t.get('created_files') or []) if isinstance(f, dict)]
+
+
+def read_created(store, fid: str) -> bytes:
+    """A created file's bytes from the store, by id only (X5): the store's own reader when it has one, else the plan's
+    data/created/<id> next to the uploads."""
+    for name in ('created_raw', 'created_bytes', 'get_created_bytes'):
+        if callable(getattr(store, name, None)):
+            return getattr(store, name)(fid)
+    if not CASE_ID.match(fid):
+        raise ValueError(f'bad created file id {fid!r}')
+    base = getattr(store, 'created_dir', None) or store.files_dir.parent / 'created'
+    from pathlib import Path
+    return (Path(base) / fid).read_bytes()
+
+
+def reopen(fmt: str, data: bytes) -> dict:
+    """A created file reopened with its own library (V1): its text, and its pages, slides, sheets and charts. Raises
+    when the file does not open."""
+    import io
+    buf = io.BytesIO(data)
+    out = {'text': '', 'pages': None, 'slides': None, 'sheets': [], 'charts': 0, 'formulas': []}
+    if fmt == 'md':
+        out['text'] = data.decode('utf-8')
+    elif fmt == 'pdf':
+        from pypdf import PdfReader
+        r = PdfReader(buf)
+        out['pages'] = len(r.pages)
+        title = (r.metadata or {}).get('/Title') or ''
+        out['text'] = '\n'.join([str(title), *((p.extract_text() or '') for p in r.pages)])
+    elif fmt == 'docx':
+        import docx
+        d = docx.Document(buf)
+        parts = [d.core_properties.title or '', *(p.text for p in d.paragraphs)]
+        parts += [c.text for t in d.tables for row in t.rows for c in row.cells]
+        out['text'] = '\n'.join(parts)
+    elif fmt == 'pptx':
+        from pptx import Presentation
+        prs = Presentation(buf)
+        out['slides'] = len(prs.slides)
+        parts = []
+        for slide in prs.slides:
+            for sh in slide.shapes:
+                if sh.has_text_frame:
+                    parts.append(sh.text_frame.text)
+                if getattr(sh, 'has_table', False) and sh.has_table:
+                    parts += [c.text for row in sh.table.rows for c in row.cells]
+                if getattr(sh, 'has_chart', False) and sh.has_chart:
+                    out['charts'] += 1
+                    ch = sh.chart
+                    if ch.has_title and ch.chart_title.has_text_frame:
+                        parts.append(ch.chart_title.text_frame.text)
+                    parts += [str(c) for c in ch.plots[0].categories] if len(ch.plots) else []
+            if slide.has_notes_slide:
+                parts.append(slide.notes_slide.notes_text_frame.text)
+        out['text'] = '\n'.join(parts)
+        # X2 in slides too: each chart's data is an embedded workbook, where an "=..." label would be a live formula
+        from .create.rules import _embedded_formulas
+        out['formulas'] += ['=' + f for f in _embedded_formulas(data)]
+    elif fmt == 'xlsx':
+        import openpyxl
+        wb = openpyxl.load_workbook(buf)  # formulas as written, so an injected one shows up
+        out['sheets'] = wb.sheetnames
+        parts = []
+        for ws in wb.worksheets:
+            out['charts'] += len(getattr(ws, '_charts', []))
+            parts.append(ws.title)
+            for row in ws.iter_rows():
+                for c in row:
+                    if c.value is None:
+                        continue
+                    if c.data_type == 'f':
+                        out['formulas'].append(str(c.value))
+                    parts.append(str(c.value))
+        out['text'] = '\n'.join(parts)
+    else:
+        raise ValueError(f'unknown format {fmt!r}')
+    return out
+
+
+def check_file(expect, rec: dict, read) -> list[str]:
+    """Why the files a run created miss expect_file ([] when they meet it). read(fid) returns a file's bytes. The first
+    file in the expected format is scored; expect_file false means no file may be created."""
+    files = created_files(rec)
+    if expect is False:
+        return [f"expected no file, got {', '.join(f.get('name', '?') for f in files)}"] if files else []
+    fmt = expect['format']
+    f = next((f for f in files if f.get('format') == fmt), None)
+    if f is None:
+        got = ', '.join(f.get('name') or f.get('format', '?') for f in files) or 'none'
+        return [f'expected a {fmt} file, got {got}']
+    name = f.get('name') or f.get('id')
+    try:
+        got = reopen(fmt, read(f['id']))
+    except Exception as e:
+        return [f'{name} does not reopen ({str(e)[:120]})']
+    reasons = []
+    for pat in expect.get('contains', []):
+        if not re.search(pat, got['text'], re.I):
+            reasons.append(f'{name} does not contain /{pat}/')
+    pages = got['pages'] if got['pages'] is not None else f.get('pages')
+    if 'min_pages' in expect and (pages or 0) < expect['min_pages']:
+        reasons.append(f"{name} has {pages} pages, fewer than {expect['min_pages']}")
+    if 'max_pages' in expect and pages is not None and pages > expect['max_pages']:
+        reasons.append(f"{name} has {pages} pages, more than {expect['max_pages']}")
+    if 'slides_min' in expect and (got['slides'] or 0) < expect['slides_min']:
+        reasons.append(f"{name} has {got['slides'] or 0} slides, fewer than {expect['slides_min']}")
+    for pat in expect.get('sheets', []):
+        if not any(re.search(pat, s, re.I) for s in got['sheets']):
+            reasons.append(f"{name} has no sheet like /{pat}/ (sheets: {', '.join(got['sheets']) or 'none'})")
+    if 'charts_min' in expect and got['charts'] < expect['charts_min']:
+        reasons.append(f"{name} has {got['charts']} charts, fewer than {expect['charts_min']}")
+    # X2 always: a formula outside the allow-list means a cell's text was written as a live formula
+    if bad := [x for x in got['formulas'] if not SAFE_FORMULA.match(x)]:
+        reasons.append(f'{name} has an unsafe formula {bad[0][:40]!r}')
+    if expect.get('rules_ok'):
+        failed = [r.get('id', '?') for r in f.get('rules') or []
+                  if not r.get('ok') and r.get('severity') in ('block', 'warn')]
+        if failed:
+            reasons.append(f"{name} failed rules {', '.join(failed)}")
+    return reasons
+
+
+def turn_result(t: dict, rec: dict, read=None) -> dict:
     s = score({'id': '', **t}, rec)
+    if 'expect_file' in t:
+        if read is None:
+            s['reasons'].append('created files cannot be checked here')
+        else:
+            s['reasons'] += check_file(t['expect_file'], rec, read)
+        s['pass'] = not s['reasons']
     out = {k: s[k] for k in ('query', 'pass', 'reasons', 'answer', 'agents', 'ms', 'qid', 'all_ok', 'jev_tokens')}
     # the engines that wrote this answer (steps and merge), so the judge can be one that didn't
     out['engines'] = sorted({e for e in [*(t.get('engine') for t in rec.get('tasks', [])),
@@ -423,7 +592,10 @@ async def run_attempt(router, ctx: dict, case: dict, text: str, label: str) -> d
             ctx['qids'].discard(qid)
             rec = router.get_run(qid)
             ctx['ms'].append(rec.get('total_ms'))
-            results.append(turn_result(t, rec))
+            if 'expect_file' in t:  # reopening a file is blocking work
+                results.append(await asyncio.to_thread(turn_result, t, rec, lambda fid: read_created(router.store, fid)))
+            else:
+                results.append(turn_result(t, rec))
     finally:
         if session_id:  # the runs stay (eval detail links to them); the chat list must not fill with eval sessions
             router.store.x('DELETE FROM sessions WHERE id = ?', session_id)

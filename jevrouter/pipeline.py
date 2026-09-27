@@ -13,6 +13,7 @@ from . import agents as agent_registry
 from . import cache as cache_mod
 from . import gate
 from . import verify as verify_mod
+from .agents import create as create_agent
 from .agents.llm import COMMON
 from .agents.tools import dates_question, sql_agent, sql_in, units_question
 from .config import (AGENTS, BLOCK_AT, CONFIRM_AT, DEEP_MIN_OK, EASY_AT, GUARDS, HARD_AT, HISTORY, KEYLESS, PRICES, REPORT,
@@ -20,10 +21,10 @@ from .config import (AGENTS, BLOCK_AT, CONFIRM_AT, DEEP_MIN_OK, EASY_AT, GUARDS,
 from .engines.auto import Steered
 from .engines.health import Health, instrument_all, pct
 from .events import Broadcaster
-from .files import FILE_AGENTS, file_agents
+from .files import FILE_AGENTS, file_agents, to_table
 from .jev import clean, criteria, route_one, unsafe_score
 from .merger import STYLES, merge
-from .planner import SCHEMA as PLAN_SCHEMA, SYSTEM as PLAN_SYSTEM, kind as plan_kind, plan, resolve_step
+from .planner import SCHEMA as PLAN_SCHEMA, SYSTEM as PLAN_SYSTEM, is_file_request, kind as plan_kind, plan, resolve_step
 from .sandbox import DEFAULT_TTL, MAX_SANDBOXES, TURNS as SANDBOX_TURNS, Sandboxes, SandboxError
 from .store import Store
 
@@ -467,12 +468,68 @@ class Router:
         for turn in [t for t in thread if t['qid'] in wanted]:
             rec = renumber(copy.deepcopy(turn['record']), next(self.ids))
             rec.update(source='chat', session_id=session_id, compare_id=None, files=[], group_id=None, chosen=True)
+            self.keep_created(mem, rec)
             if not new_qids:
                 self.store.touch_session(session_id, rec['text'])
             self.store.save_run(rec)
             self.history.append(rec)
             new_qids.append(rec['qid'])
         return session_id, new_qids
+
+    def keep_created(self, mem, rec: dict):
+        """Keeping a sandbox turn keeps the files it made: the ones still in the sandbox's memory are saved with the
+        run (by id, under data/created); a file the sandbox has already let go of drops off the task."""
+        for t in rec.get('tasks') or []:
+            kept = []
+            for f in t.get('created_files') or []:
+                held = mem.created.get(f.get('id')) if mem else None
+                if held is not None:
+                    meta, spec, data = held
+                    meta = {**meta, 'qid': rec['qid'], 'sandbox': None}
+                    if self.store.get_created(meta['id']) is None:
+                        self.store.add_created(meta, spec, data)
+                    kept.append(meta)
+            if 'created_files' in t:
+                t['created_files'] = kept
+
+    def save_created(self, meta: dict, spec: dict, data: bytes, sandbox: str | None) -> dict:
+        """Stores a file a run made: in the sandbox's memory for a sandbox run (never on disk), else in the store."""
+        if sandbox:
+            meta = {**meta, 'sandbox': sandbox}
+            mem = self.sandboxes.peek(sandbox)
+            if mem is not None:
+                mem.add_created(meta, spec, data)
+        else:
+            self.store.add_created(meta, spec, data)
+        return meta
+
+    def chat_files(self, rec: dict, sandbox: str | None, before: int,
+                   remember: bool = True) -> tuple[list[dict], tuple | None]:
+        """What the create step may build on from earlier in the chat: its recent turns that answered, oldest first
+        ([{query, answer}]), and the newest file those turns made as (CreatedFile, spec, made by the latest of them).
+        A turn that only asked a follow-up question, was blocked or failed is skipped, so "now as slides" after a
+        clarify still means the file made before it."""
+        if sandbox:
+            mem = self.sandboxes.peek(sandbox) if remember else None
+            recs = [t['record'] for t in mem.thread[-create_agent.LOOKBACK:]] if mem else []
+        else:
+            mem, sid = None, rec.get('session_id')
+            recs = self.store.session_records(sid, before, create_agent.LOOKBACK) if sid else []
+        turns = [r for r in recs if create_agent.answered(r)]
+        last = None
+        for i in range(len(turns) - 1, -1, -1):
+            files = [f for t in turns[i].get('tasks') or [] for f in t.get('created_files') or []]
+            if files:
+                held = mem.created.get(files[-1]['id']) if mem else None
+                spec = held[1] if held else None if sandbox else self.store.created_spec(files[-1]['id'])
+                if spec is not None:
+                    last = (files[-1], spec, i == len(turns) - 1)
+                    break
+        # A turn that only made a file keeps its question but not its reply ("Created **x.pdf**, 1 page"), which is
+        # not content: "I also want a spreadsheet" must not become a file of that sentence.
+        context = [{'query': r['text'], 'answer': '' if create_agent.only_created(r) else (r.get('merged') or {}).get('answer') or ''}
+                   for r in turns]
+        return context, last
 
     def unfinished(self, qid: int, rec: dict, why: str):
         """Subtasks that never answered get an error, so no card is left spinning."""
@@ -610,7 +667,9 @@ class Router:
             ctx = '\n\nContext from earlier steps:\n' + '\n'.join(lines)
             earlier = [by_tid[d].get('input') or by_tid[d]['text'] for d in st['depends_on']]
             text = None
-            if llm_helpers:
+            # A file request is built from the earlier answers themselves (docs/PLAN-files.md): rewriting it costs tokens
+            # and would only paste those answers into the step's text.
+            if llm_helpers and not is_file_request(st['text']):
                 try:
                     text, tin, tout = await resolve_step(engine, st['text'] + ctx)
                     self.usage(rec, {'claude_in': tin, 'claude_out': tout})
@@ -709,6 +768,11 @@ class Router:
                 if (d['agent'] == 'clarify' and attached and pick in (*FILE_AGENTS, *SQL_AGENT) and pick in agents
                         and d['probabilities'].get(pick, 0) >= CONFIRM_AT and d['unsafe'] < BLOCK_AT):
                     d['agent'], d['reason'] = pick, f"{d['reason']}, but a file is attached"
+                # "put that in a PDF" reads as vague to Jev for the same reason: what "that" means is the chat's earlier
+                # answer, an earlier step or an attached file, which Jev doesn't see. A create pick then stands.
+                if (d['agent'] == 'clarify' and pick == 'create' and d['unsafe'] < BLOCK_AT
+                        and create_agent.asks_for_file(text) and (context or attached or by_tid[tid].get('depends_on'))):
+                    d['agent'], d['reason'] = 'create', f"{d['reason']}, but it asks for a file of what came before"
                 try:
                     ask = None if d['agent'] in GUARDS else gate.question(d['agent'], text) or tool_question(d['agent'], text)
                 except Exception:  # a parser bug must not fail the whole run; the step's agent reports its own error
@@ -738,11 +802,36 @@ class Router:
             msg, tin, tout = await gate.clarify_llm(engine, text, msg)
             return agent_registry.AgentResult(msg, False, None, engine.name if tin or tout else 'keyless', tin, tout)
 
+        async def make_file(st) -> tuple[agent_registry.AgentResult, list[dict]]:
+            """The create step (docs/PLAN-files.md): its file from the earlier steps' answers, the chat, the attached files
+            or one engine call, stored by id (or in the sandbox's memory). Returns (the answer, [the CreatedFile])."""
+            deps = [(by_tid[d].get('input') or by_tid[d]['text'], results[d]['answer'] if results[d].get('ok') else '')
+                    for d in st['depends_on']]
+            tables = [(f, *table) for f in attached if f.get('columns') and (table := to_table(f['kind'], texts[f['id']]))]
+            docs = [(f, texts[f['id']]) for f in attached if not f.get('columns')]
+            turns, last = self.chat_files(rec, sandbox, extras.get('context_before') or qid, extras.get('remember', True))
+            # A plan of one step is the user's own request: the LLM planner rewrites follow-ups into self-contained
+            # steps ("put that in a PDF" -> "put the information about Ada Lovelace in a PDF"), and the rewrite hides
+            # the words that say to reuse the answer or file already in the chat (at no token cost).
+            request = query if len(subtasks) == 1 else by_tid[st['tid']].get('input') or st['text']
+            job = create_agent.Job(request, deps, turns, tables, docs, last)
+            made = await create_agent.make(job, agent_registry.Tuned(engine) if engine is not None else None, self.jev,
+                                           mode)
+            self.usage(rec, {'jev_tokens': made.jev_tokens})
+            files = []
+            if made.file is not None:
+                meta = made.file
+                if made.data is not None:  # a new file (not one the chat already had in that format)
+                    meta = self.save_created({**meta, 'qid': qid}, made.spec, made.data, sandbox)
+                files.append(meta)
+            return agent_registry.AgentResult(made.answer, made.ok, None, made.engine, made.llm_in, made.llm_out), files
+
         async def run(st, r, text):
             tid, agent = st['tid'], r['agent']
             t1 = time.perf_counter()
             delta = lambda chunk: text_out(tid, chunk)
             efforts: list[str] = []
+            made: list[dict] = []  # files a create step made
             token = agent_registry.EFFORTS.set(efforts)
             try:
                 with cache_mod.track() as hits:
@@ -754,6 +843,9 @@ class Router:
                         delta(out.answer)
                     elif agent == 'clarify':
                         out = await ask(by_tid[tid].get('input') or st['text'], r['probabilities'])
+                        delta(out.answer)
+                    elif agent == 'create':
+                        out, made = await make_file(st)
                         delta(out.answer)
                     else:
                         runner = registry.get(agent) if agent in KEYLESS else agent_for(agent, hardness.get(tid))
@@ -769,6 +861,8 @@ class Router:
             self.usage(rec, {'claude_in': out.claude_in, 'claude_out': out.claude_out})
             answered = {'agent': agent, 'agent_ms': ms_since(t1), 'answer': out.answer, 'ok': out.ok,
                         'source': out.source, 'engine': out.engine}
+            if made:
+                answered['created_files'] = made
             checks = {}
             if hits[0]:
                 clock['hits'] += hits[0]
@@ -776,7 +870,7 @@ class Router:
             llm_answer = agent not in GUARDS and tid not in notes and out.engine not in (None, 'keyless')
             if llm_answer and efforts:
                 checks['effort'] = efforts[-1]
-            if llm_answer and out.ok:  # A6: keyless recompute of numbers always; a grounding check in deep mode
+            if llm_answer and out.ok and agent != 'create':  # A6: keyless recompute of numbers; grounding in deep mode
                 deep = mode == 'deep'
                 checker = self.fastest(exclude={out.engine}) if deep and agent in verify_mod.GROUNDED else None
                 try:
@@ -788,7 +882,8 @@ class Router:
                 checks.update(v)
             if checks:  # only when there is something to say: older clients ignore the key
                 answered['checks'] = checks
-            if agent in GUARDS or tid in notes or (agent in KEYLESS and out.engine == 'keyless'):
+            # a create step's answer is a line code wrote ("Created **x.pdf**, 4 pages"): nothing for an LLM to merge
+            if agent in GUARDS or tid in notes or (agent in KEYLESS and out.engine == 'keyless') or agent == 'create':
                 exact.add(tid)
             by_tid[tid].update(answered)
             emit('answered', qid=qid, tid=tid, **answered)
@@ -860,6 +955,12 @@ class Router:
         clock['merger'] = m['kind']
         if m['kind'] == 'llm':
             clock['merge'] = (t2, time.perf_counter())
+        # Merging keeps the file list: a merged answer that left out a created file still names it.
+        if m['kind'] != 'single' and (lost := [f for _, a in answers for f in a.get('created_files') or []
+                                              if f['name'] not in m['answer']]):
+            note = '\n\n' + '\n'.join(f'Created **{f["name"]}**' for f in lost)
+            text_out('merge', note)
+            m['answer'] += note
         # A6: a check that disagreed with an answer shows as a short warning, never a silent wrong answer.
         if warn := verify_mod.warning([(st['text'], a.get('checks') or {}) for st, a in answers]):
             if m['kind'] != 'single':  # a lone answer streamed as its step; the merged text replaces it when it arrives

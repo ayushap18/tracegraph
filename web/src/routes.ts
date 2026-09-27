@@ -1,6 +1,6 @@
 import type { UiIconName } from './icons'
 
-export type RouteName = 'chat' | 'sandbox' | 'live' | 'runs' | 'run' | 'review' | 'compare' | 'evals' | 'agents' | 'settings' | 'about'
+export type RouteName = 'chat' | 'sandbox' | 'live' | 'runs' | 'run' | 'review' | 'files' | 'compare' | 'evals' | 'agents' | 'settings' | 'about'
 
 export interface NavItem { name: RouteName; path: string; label: string; icon: UiIconName; title: string; subtitle: string; description: string; keywords?: string }
 
@@ -10,6 +10,7 @@ export const NAV: NavItem[] = [
   { name: 'live', path: '/live', label: 'Live', icon: 'live', title: 'Live', subtitle: 'Every run as it streams through the router', description: 'Watch every TraceGraph run live: the plan, each routing decision, agent timings and the merged answer, as a graph and a timeline.', keywords: 'dashboard realtime analytics graph' },
   { name: 'runs', path: '/runs', label: 'Runs', icon: 'runs', title: 'Runs', subtitle: 'Search and inspect past runs', description: 'Search and inspect past TraceGraph runs, with the full trace, stage timings and routing confidence for each one.', keywords: 'history table traces' },
   { name: 'review', path: '/review', label: 'Review', icon: 'review', title: 'Review', subtitle: 'Routing decisions that looked shaky', description: 'Check the TraceGraph routing decisions that looked doubtful and mark each one right or wrong, so corrections can become eval cases.', keywords: 'feedback label triage queue wrong route correct' },
+  { name: 'files', path: '/files', label: 'Files', icon: 'files', title: 'Files', subtitle: 'PDF, Word, PowerPoint, Excel and Markdown files made in chat', description: 'Every file TraceGraph created from a chat: download it, preview it, convert it to another format and see the rules it was checked against.', keywords: 'created documents download pdf docx pptx xlsx markdown export slides spreadsheet word excel powerpoint' },
   { name: 'compare', path: '/compare', label: 'Compare', icon: 'compare', title: 'Compare', subtitle: 'One question, several engines, side by side', description: 'Send one question to Claude Code, Codex, Antigravity or the Anthropic API and compare the answers side by side.', keywords: 'engines side by side' },
   { name: 'evals', path: '/evals', label: 'Evals', icon: 'evals', title: 'Evals', subtitle: 'Accuracy of the full pipeline on a fixed test set', description: 'Measure TraceGraph routing and answer accuracy on a fixed test set, run through the real pipeline.', keywords: 'tests accuracy benchmark' },
   { name: 'agents', path: '/agents', label: 'Agents', icon: 'agents', title: 'Agents', subtitle: 'Built-in, guard and custom agents', description: 'Browse the built-in and guard agents in TraceGraph, or describe your own agent with a prompt.', keywords: 'custom create' },
@@ -28,7 +29,7 @@ export function matchRoute(path: string): Match {
   if (!a) return { name: 'chat', params: {} }
   if (a === 'runs' && b && seg.length === 2) return { name: 'run', params: { qid: b } }
   if ((a === 'compare' || a === 'evals') && seg.length <= 2) return { name: a, params: b ? { id: b } : {} }
-  if (seg.length === 1 && ['sandbox', 'live', 'runs', 'review', 'agents', 'settings', 'about'].includes(a)) return { name: a as RouteName, params: {} }
+  if (seg.length === 1 && ['sandbox', 'live', 'runs', 'review', 'files', 'agents', 'settings', 'about'].includes(a)) return { name: a as RouteName, params: {} }
   return { name: 'chat', params: {} }
 }
 

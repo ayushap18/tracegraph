@@ -9,6 +9,7 @@ import {
   Link, LoaderCircle, Lock, Menu, PanelLeftClose, PanelLeftOpen, Paperclip, Plus, RefreshCw, RotateCcw, Server, Settings, Share2,
   Shield, Sparkles, Box, Square, SquarePen, Table, Tag, Trash2, TriangleAlert, Trophy, TrendingUp, Upload, Gauge, Download,
   ListChecks, ThumbsDown, ThumbsUp, Undo2,
+  ArrowLeftRight, FileCode, FileType, Files, Presentation, Scale,
 } from 'lucide-react'
 import { useId, type SVGProps } from 'react'
 import { colorOf } from './protocol'
@@ -43,6 +44,9 @@ export const UI_ICONS = {
   timeout: Hourglass, cancelled: Ban, trend: TrendingUp, gauge: Gauge, engine: Cpu, web: Globe, clock: Clock, sandbox: Box,
   // learning plan: route feedback and the review queue
   review: ListChecks, 'thumbs-up': ThumbsUp, 'thumbs-down': ThumbsDown, undo: Undo2,
+  // created files: the Files page, one glyph per format, converting and the ruleset
+  files: Files, 'file-pdf': FileType, 'file-docx': FileText, 'file-pptx': Presentation, 'file-xlsx': FileSpreadsheet, 'file-md': FileCode,
+  convert: ArrowLeftRight, rules: Scale,
 } satisfies Record<string, LucideIcon>
 
 export type UiIconName = keyof typeof UI_ICONS

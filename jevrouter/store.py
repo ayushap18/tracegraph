@@ -1,9 +1,11 @@
-"""SQLite persistence (stdlib sqlite3): runs, chat sessions, custom agents, uploaded files, eval results and route labels.
+"""SQLite persistence (stdlib sqlite3): runs, chat sessions, custom agents, uploaded files, eval results, route labels and
+created files (docs/PLAN-files.md).
 
 Every write is one small statement on a WAL database, so it runs inline rather than in a thread: that keeps the
 final save of a cancelled run from depending on the event loop still being willing to schedule work.
 """
 import json
+import re
 import sqlite3
 import tempfile
 import threading
@@ -29,6 +31,10 @@ CREATE TABLE IF NOT EXISTS evals(id TEXT PRIMARY KEY, at REAL, engine TEXT, stat
 CREATE TABLE IF NOT EXISTS labels(id TEXT PRIMARY KEY, qid INTEGER, tid TEXT, text TEXT, picked TEXT, correct TEXT,
                                   verdict TEXT, confidence REAL, margin REAL, note TEXT, at REAL, promoted TEXT);
 CREATE UNIQUE INDEX IF NOT EXISTS labels_run_task ON labels(qid, tid);
+CREATE TABLE IF NOT EXISTS created(id TEXT PRIMARY KEY, qid INTEGER, name TEXT, format TEXT, size INTEGER, created REAL,
+                                   spec TEXT, tokens INTEGER, rules TEXT, meta TEXT);
+CREATE INDEX IF NOT EXISTS created_at ON created(created);
+CREATE INDEX IF NOT EXISTS created_qid ON created(qid);
 """
 # Columns added after a table first shipped: (table, column, type). Older databases get them on open. The runs columns
 # (docs/PLAN-speed-evals-chat.md) copy fields of the record JSON that queries filter on: an answer group, whether the
@@ -41,16 +47,23 @@ RUN_COLS = ('qid', 'session_id', 'compare_id', 'source', 'text', 'at', 'status',
 INDEXES = 'CREATE INDEX IF NOT EXISTS runs_group ON runs(group_id);'
 LABEL_COLS = ('id', 'qid', 'tid', 'text', 'picked', 'correct', 'verdict', 'confidence', 'margin', 'note', 'at', 'promoted')
 EVAL_COLS = ('id', 'at', 'engine', 'status', 'done', 'passed', 'total', 'accuracy', 'silent_wrong', 'cases', 'examples')
+# A created file's id is ours (uuid hex), never a user-supplied name: its bytes live at created_dir/<id> (X5).
+CREATED_ID = re.compile(r'^[0-9a-f]{8,32}$')
 
 
 class Store:
-    def __init__(self, path: str | Path = ':memory:', files_dir: str | Path | None = None):
+    def __init__(self, path: str | Path = ':memory:', files_dir: str | Path | None = None,
+                 created_dir: str | Path | None = None):
         self.path = str(path)
         if self.path != ':memory:':
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.files_dir = Path(files_dir or (Path(self.path).parent / 'files' if self.path != ':memory:'
                                             else tempfile.mkdtemp(prefix='tracegraph-files-')))
         self.files_dir.mkdir(parents=True, exist_ok=True)
+        # Created files sit next to the uploads (data/created); an in-memory store gets its own temporary folder.
+        self.created_dir = Path(created_dir or (Path(self.path).parent / 'created' if self.path != ':memory:'
+                                                else tempfile.mkdtemp(prefix='tracegraph-created-')))
+        self.created_dir.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.lock = threading.Lock()
@@ -223,6 +236,55 @@ class Store:
             p.unlink(missing_ok=True)
         return found
 
+    # ---------- created files (docs/PLAN-files.md) ----------
+
+    def created_path(self, fid: str) -> Path:
+        """Where a created file's bytes live: created_dir/<id>, for an id of our own shape only."""
+        if not isinstance(fid, str) or not CREATED_ID.match(fid):
+            raise ValueError(f'bad created file id {str(fid)[:40]!r}')
+        return self.created_dir / fid
+
+    def add_created(self, meta: dict, spec: dict, data: bytes):
+        """meta is the CreatedFile (web/src/protocol.ts); its columns go in their own fields, the rest in meta."""
+        self.created_path(meta['id']).write_bytes(data)
+        rest = {k: v for k, v in meta.items() if k not in ('id', 'qid', 'name', 'format', 'size', 'created', 'tokens',
+                                                            'rules', 'sandbox')}
+        self.x('INSERT OR REPLACE INTO created VALUES (?,?,?,?,?,?,?,?,?,?)', meta['id'], meta.get('qid'), meta['name'],
+               meta['format'], meta['size'], meta['created'], json.dumps(spec), meta.get('tokens', 0),
+               json.dumps(meta.get('rules') or []), json.dumps(rest))
+
+    def get_created(self, fid: str) -> dict | None:
+        rows = self.q('SELECT * FROM created WHERE id = ?', fid)
+        return created_meta(rows[0]) if rows else None
+
+    def created_spec(self, fid: str) -> dict | None:
+        rows = self.q('SELECT spec FROM created WHERE id = ?', fid)
+        return json.loads(rows[0]['spec']) if rows else None
+
+    def created_raw(self, fid: str) -> bytes:
+        return self.created_path(fid).read_bytes()
+
+    def list_created(self, limit: int = 50, before: float | None = None) -> list[dict]:
+        """Newest first; `before` is a `created` time, for paging."""
+        where, args = ('WHERE created < ? ', [before]) if before is not None else ('', [])
+        return [created_meta(r) for r in self.q(f'SELECT * FROM created {where}ORDER BY created DESC LIMIT ?', *args, int(limit))]
+
+    def delete_created(self, fid: str) -> bool:
+        found = bool(self.q('SELECT 1 FROM created WHERE id = ?', fid))
+        self.x('DELETE FROM created WHERE id = ?', fid)
+        try:
+            self.created_path(fid).unlink(missing_ok=True)
+        except ValueError:
+            pass
+        return found
+
+    def session_records(self, session_id: str, before_qid: int, n: int) -> list[dict]:
+        """The last n finished runs of a session before `before_qid`, oldest first, as whole records (the create agent
+        reads their files and whether they answered). Of an answer group only the chosen run counts, as in turns()."""
+        rows = self.q("SELECT record FROM runs WHERE session_id = ? AND qid < ? AND status != 'running' "
+                      'AND (chosen IS NULL OR chosen != 0) ORDER BY qid DESC LIMIT ?', session_id, before_qid, int(n))
+        return [json.loads(r['record']) for r in reversed(rows)]
+
     # ---------- evals ----------
 
     def save_eval(self, e: dict):
@@ -301,6 +363,15 @@ def file_meta(r) -> dict:
     if r['rows'] is not None:
         m.update(rows=r['rows'], columns=json.loads(r['columns']))
     return m
+
+
+def created_meta(r) -> dict:
+    """A created row as a CreatedFile (web/src/protocol.ts)."""
+    meta = json.loads(r['meta'] or '{}')
+    return {'id': r['id'], 'name': r['name'], 'format': r['format'], 'size': r['size'], 'created': r['created'],
+            'qid': r['qid'], 'title': meta.get('title', ''), 'pages': meta.get('pages'), 'slides': meta.get('slides'),
+            'sheets': meta.get('sheets'), 'tokens': r['tokens'] or 0, 'source': meta.get('source', 'llm'),
+            'from_id': meta.get('from_id'), 'rules': json.loads(r['rules'] or '[]'), 'sandbox': None}
 
 
 def eval_row(r, cases: bool) -> dict:

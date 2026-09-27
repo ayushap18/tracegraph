@@ -27,7 +27,7 @@ export const MOD_KEY = isMac ? '⌘' : 'Ctrl'
 
 // Sidebar groups: the working surfaces, then the system pages.
 const GROUPS: Array<{ label: string; items: RouteName[] }> = [
-  { label: 'Workspace', items: ['chat', 'sandbox', 'live', 'runs', 'review', 'compare', 'evals', 'agents'] },
+  { label: 'Workspace', items: ['chat', 'sandbox', 'live', 'runs', 'review', 'files', 'compare', 'evals', 'agents'] },
   { label: 'System', items: ['settings', 'about'] },
 ]
 

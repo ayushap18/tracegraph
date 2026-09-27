@@ -20,13 +20,17 @@ STEP = {'type': 'object', 'properties': {'text': {'type': 'string'}, 'depends_on
 SCHEMA = {'type': 'object', 'properties': {'subtasks': {'type': 'array', 'items': STEP}},
           'required': ['subtasks'], 'additionalProperties': False}
 SYSTEM = ('You are a query planner. Do not use tools. You split a user query into subtasks for specialist agents (math, weather, '
-          'time, currency, knowledge, code, chat, research, report, document, data). Return 1 to 4 subtasks. Each must keep the '
+          'time, currency, knowledge, code, chat, research, report, document, data, create). Return 1 to 4 subtasks. Each must keep the '
           'exact numbers, currencies and places. If the query is a single request, return it unchanged as the only subtask. '
           'When a subtask needs an earlier subtask\'s answer (e.g. "the time in its capital" after "which country won"), put '
           'the 0-based indices of those earlier subtasks in depends_on and phrase it so it is clear what to take from them; '
-          'otherwise depends_on is []. If earlier conversation turns are given and the query is a follow-up, rewrite it into '
-          'self-contained subtasks ("and in GBP?" after "convert 100 USD to EUR" becomes "convert 100 USD to GBP"). Never '
-          'answer the query.')
+          'otherwise depends_on is []. A request for a file (PDF, Word, slides, spreadsheet, Markdown) of content another '
+          'subtask must produce first is its own last subtask that depends on that one ("research X and make slides" becomes '
+          '"research X" then "make slides from it" with depends_on [0]). '
+          'If earlier conversation turns are given and the query is a follow-up, rewrite it into '
+          'self-contained subtasks ("and in GBP?" after "convert 100 USD to EUR" becomes "convert 100 USD to GBP"), except '
+          'a request for a file of what came before ("put that in a PDF", "now as slides"): keep that word for word. '
+          'Never answer the query.')
 
 
 def substantial(part: str) -> bool:
@@ -45,8 +49,44 @@ def candidate_split(query: str) -> list[str]:
     return parts
 
 
+# A file request (docs/PLAN-files.md): a verb that makes something, then a file format. As the last part of a query
+# ("research X and make slides about it", "weather in Paris, then put it in a PDF") it is a step of its own that waits
+# for everything before it, so the file is built from those answers. No multi score is needed for this cue.
+FILE_FORMATS = (r'pdf|docx?|word\s+(?:doc|docs|document|file)|slides?|slide\s*deck|deck|presentation|pptx|power\s*point|'
+                r'spreadsheet|excel|xlsx|workbook|markdown|md\s+file')
+FILE_VERBS = (r'make|put|turn|create|export|save|convert|generate|build|write|produce|prepare|draft|compile|format|'
+              r'give\s+me|send\s+me|package')
+FILE_REQUEST = re.compile(rf'\b(?:{FILE_VERBS})\b.*?(?<![\w.])(?:{FILE_FORMATS})\b', re.I | re.S)
+FILE_SPLIT = re.compile(rf'^(?P<head>.*?\S)\s*(?:[;,]\s*|\s)(?:and\s+then|and|then|also|,)\s+(?P<file>(?:{FILE_VERBS})\b.*?'
+                        rf'(?<![\w.])(?:{FILE_FORMATS})\b.*)$', re.I | re.S)
+# "How do I open a file and save it as a PDF?" asks how, and wants an answer, not a file.
+HOW_TO = re.compile(r'^\s*how\b|\bhow\s+(?:to|do|does|can|could|would|should)\b', re.I)
+
+
+def is_file_request(text: str) -> bool:
+    """True when the text asks for a file to be made ("put that in a PDF", "make slides about it")."""
+    return bool(FILE_REQUEST.search(text or ''))
+
+
+def split_file_request(query: str) -> tuple[str, str] | None:
+    """(what comes first, the file request) when a query ends in a file request after other work, else None."""
+    m = None if HOW_TO.search(query) else FILE_SPLIT.match(query.strip())
+    if not m:
+        return None
+    head = m.group('head').strip(' ,;')
+    return (head, m.group('file').strip(' .')) if len(head.split()) >= 2 else None
+
+
 async def plan_heuristic(query: str, jev, scores=None) -> dict:
     """scores: an optional cache of Jev's multi score by query text (jevrouter/cache.py); a hit sets `cached`."""
+    if split := split_file_request(query):
+        head, file_part = split
+        out = await plan_heuristic(head, jev, scores)
+        if len(out['subtasks']) >= MAX_SUBTASKS:  # no room for the file step: what comes first stays one step
+            out = {**out, 'subtasks': [head], 'deps': [[]]}
+        n = len(out['subtasks'])
+        deps = out.get('deps') or [[] for _ in range(n)]
+        return {**out, 'subtasks': [*out['subtasks'], file_part], 'deps': [*deps, list(range(n))]}
     out = {'planner': 'heuristic', 'subtasks': [query], 'multi': None, 'jev_tokens': 0, 'claude_in': 0, 'claude_out': 0}
     parts = candidate_split(query)
     if len(parts) < 2:

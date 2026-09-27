@@ -1,6 +1,7 @@
 """aiohttp routes: GET / (web/dist or legacy page), GET /events (SSE), POST /ask, POST /control, GET /api/config,
-plus the v4 API in docs/PLAN-v4.md §1 (runs, sessions, agents, files, compare, evals, engine test) and the learning API in
-docs/PLAN-learning.md (labels, review queue, route examples, eval compare, engine health)."""
+plus the v4 API in docs/PLAN-v4.md §1 (runs, sessions, agents, files, compare, evals, engine test), the learning API in
+docs/PLAN-learning.md (labels, review queue, route examples, eval compare, engine health) and created files in
+docs/PLAN-files.md (list, download, preview, convert, the ruleset)."""
 import asyncio
 import json
 import os
@@ -8,22 +9,25 @@ import re
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import aiohttp
 from aiohttp import web
 
+from . import create as create_mod
 from . import evals as evals_mod
 from . import judge as judge_mod
 from . import labels as labels_mod
 from .config import AGENTS, DIST, GROUP_MAX, GUARDS, LEGACY_PAGE, MODES, REPORT, RESEARCH, RUN, STYLES
 from .engines import EngineError, catalog, choose
 from .engines.health import pct, unblock
+from .agents import create as maker
 from .events import sse
 from .jev import examples_for
 from .files import FILE_AGENTS, MAX_BYTES, FileError, extract
 from .pipeline import SANDBOX_QID0, USE_ACTIVE, Router, table_files, warm_up
 from .sandbox import MAX_FILES as MAX_SANDBOX_FILES, SandboxError
-from .store import DEFAULT_DB, Store
+from .store import CREATED_ID, DEFAULT_DB, Store
 
 ROUTER = web.AppKey('router', Router)
 HTTP = web.AppKey('http', aiohttp.ClientSession)
@@ -504,6 +508,151 @@ async def delete_file(request):
     return web.json_response({'ok': True})
 
 
+# ---------- created files (docs/PLAN-files.md) ----------
+
+MAX_CREATED_LIST = 200
+
+
+def disposition(name: str) -> str:
+    """Content-Disposition for a download (RFC 6266): a plain ASCII quoted filename, plus filename* for the exact name.
+    Names are ours (F7: lowercase words and hyphens), but nothing that could close the quotes or a header gets through."""
+    ascii_name = re.sub(r'[^A-Za-z0-9._-]', '_', name)[:120].lstrip('.') or 'download'
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(name, safe="")}'
+
+
+def file_response(meta: dict, data: bytes) -> web.Response:
+    return web.Response(body=data, headers={
+        'Content-Type': create_mod.MIME[meta['format']], 'Content-Disposition': disposition(meta['name']),
+        'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store',
+        'Content-Security-Policy': "default-src 'none'; sandbox"})
+
+
+def created_id(request) -> str:
+    fid = request.match_info['fid']
+    if not CREATED_ID.match(fid):
+        raise Bad('no such file', 404)
+    return fid
+
+
+def stored_created(request) -> tuple[Store, dict]:
+    store = request.app[ROUTER].store
+    fid = created_id(request)
+    meta = store.get_created(fid)
+    if meta is None:
+        raise Bad('no such file', 404)
+    return store, meta
+
+
+async def list_created(request):
+    q = request.query
+    try:
+        limit = int_param(q, 'limit', 50, 1, MAX_CREATED_LIST)
+        before = float(q['before']) if q.get('before') else None
+    except (Bad, ValueError):
+        return err('limit and before must be numbers')
+    return web.json_response({'files': request.app[ROUTER].store.list_created(limit, before)})
+
+
+async def get_created(request):
+    try:
+        _, meta = stored_created(request)
+    except Bad as e:
+        return err(str(e), e.status)
+    return web.json_response(meta)
+
+
+async def delete_created(request):
+    try:
+        store, meta = stored_created(request)
+    except Bad as e:
+        return err(str(e), e.status)
+    store.delete_created(meta['id'])
+    return web.json_response({'ok': True})
+
+
+async def download_created(request):
+    try:
+        store, meta = stored_created(request)
+        data = store.created_raw(meta['id'])
+    except Bad as e:
+        return err(str(e), e.status)
+    except OSError:
+        return err('the file\'s content is missing', 404)
+    return file_response(meta, data)
+
+
+async def preview_of(meta: dict, data: bytes):
+    try:
+        return web.json_response(await asyncio.to_thread(create_mod.preview, meta['format'], data))
+    except Exception as e:
+        return err(f'no preview: {str(e)[:160]}', 422)
+
+
+async def preview_created(request):
+    try:
+        store, meta = stored_created(request)
+        data = store.created_raw(meta['id'])
+    except Bad as e:
+        return err(str(e), e.status)
+    except OSError:
+        return err('the file\'s content is missing', 404)
+    return await preview_of(meta, data)
+
+
+async def convert_created(request):
+    """A new file in another format from the stored spec: no LLM (0 tokens, rule L5), source convert, from_id."""
+    body = await read_json(request)
+    fmt = body.get('format')
+    try:
+        if fmt not in create_mod.FORMATS:
+            raise Bad(f'format must be one of {", ".join(create_mod.FORMATS)}')
+        store, meta = stored_created(request)
+        if meta['format'] == fmt:
+            raise Bad(f'{meta["name"]} is already {fmt}', 409)
+        spec = store.created_spec(meta['id'])
+        new, spec, data = await asyncio.to_thread(maker.build, spec, fmt, source='convert', tokens=0,
+                                                  from_id=meta['id'], extra=maker.carried(meta))
+    except Bad as e:
+        return err(str(e), e.status)
+    except create_mod.SpecError as e:
+        return err(f'Rule {e.rule_id} blocked it: {e.message}', 422)
+    except Exception as e:  # a stored spec the renderer can't lay out is an honest 422, never a bare 500
+        return err(f'The {fmt} file could not be made ({type(e).__name__}: {str(e)[:160]})', 422)
+    store.add_created(new, spec, data)
+    return web.json_response(new, status=201)
+
+
+async def list_rules(request):
+    return web.json_response({'rules': create_mod.RULES})
+
+
+def sandbox_created(request) -> tuple[dict, dict, bytes]:
+    """A file a sandbox run made, from that sandbox's memory only (nothing is on disk)."""
+    sid = sandbox_id(request)
+    fid = created_id(request)
+    mem = request.app[ROUTER].sandboxes.peek(sid)
+    held = mem.created.get(fid) if mem else None
+    if held is None:
+        raise Bad('no such file', 404)
+    return held
+
+
+async def download_sandbox_created(request):
+    try:
+        meta, _, data = sandbox_created(request)
+    except Bad as e:
+        return err(str(e), e.status)
+    return file_response(meta, data)
+
+
+async def preview_sandbox_created(request):
+    try:
+        meta, _, data = sandbox_created(request)
+    except Bad as e:
+        return err(str(e), e.status)
+    return await preview_of(meta, data)
+
+
 # ---------- compare ----------
 
 async def compare(request):
@@ -867,6 +1016,12 @@ def create_app(router_factory=None) -> web.Application:
         web.post('/api/sandbox/{id}/keep', keep_sandbox),
         web.get('/api/agents', list_agents), web.post('/api/agents', create_agent), web.delete('/api/agents/{name}', delete_agent),
         web.get('/api/files', list_files), web.post('/api/files', upload_file), web.delete('/api/files/{id}', delete_file),
+        web.get('/api/created', list_created), web.get('/api/created/{fid}', get_created),
+        web.delete('/api/created/{fid}', delete_created), web.get('/api/created/{fid}/download', download_created),
+        web.get('/api/created/{fid}/preview', preview_created), web.post('/api/created/{fid}/convert', convert_created),
+        web.get('/api/rules', list_rules),
+        web.get('/api/sandbox/{id}/created/{fid}/download', download_sandbox_created),
+        web.get('/api/sandbox/{id}/created/{fid}/preview', preview_sandbox_created),
         web.post('/api/compare', compare), web.get('/api/compare/{id}', get_compare),
         web.post('/api/evals/run', run_eval), web.get('/api/evals', list_evals),
         web.get('/api/evals/compare', compare_evals), web.get('/api/evals/{id}', get_eval),

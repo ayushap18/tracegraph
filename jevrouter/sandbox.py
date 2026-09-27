@@ -1,10 +1,13 @@
-"""Per-sandbox memory: finished turns (for follow-up context and "keep"), temporary files, and when it was last used.
+"""Per-sandbox memory: finished turns (for follow-up context and "keep"), temporary files, the files its runs created
+(docs/PLAN-files.md), and when it was last used.
 
 Everything here lives in process memory only. Nothing is written to the store or to disk, and a sandbox that sits idle
 past its TTL (or falls off the LRU end) is simply forgotten.
 """
 import time
 from collections import OrderedDict
+
+from .config import CREATE_SANDBOX_BYTES, CREATE_SANDBOX_FILES
 
 MAX_SANDBOXES = 200          # most sandboxes kept in memory; the least recently used is dropped first
 MAX_THREAD = 50              # finished turns kept per sandbox
@@ -31,6 +34,7 @@ class SandboxMemory:
     def __init__(self, now: float | None = None):
         self.thread: list[dict] = []                     # [{qid, query, answer, record}], oldest first
         self.files: dict[str, tuple[dict, str]] = {}     # id -> (metadata, extracted text)
+        self.created: OrderedDict[str, tuple[dict, dict, bytes]] = OrderedDict()  # id -> (CreatedFile, spec, bytes)
         self.last_used = time.time() if now is None else now
 
     def touch(self, now: float | None = None):
@@ -66,6 +70,14 @@ class SandboxMemory:
 
     def file_bytes(self) -> int:
         return sum(m['size'] for m, _ in self.files.values())
+
+    def add_created(self, meta: dict, spec: dict, data: bytes):
+        """A file a run made, kept in memory only. Past CREATE_SANDBOX_FILES files or CREATE_SANDBOX_BYTES the oldest
+        are forgotten (a run has already answered, so refusing would leave its file card pointing at nothing)."""
+        self.created[meta['id']] = (meta, spec, data)
+        while len(self.created) > 1 and (len(self.created) > CREATE_SANDBOX_FILES or
+                                         sum(len(d) for _, _, d in self.created.values()) > CREATE_SANDBOX_BYTES):
+            self.created.popitem(last=False)
 
 
 class Sandboxes:
