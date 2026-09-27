@@ -319,10 +319,16 @@ FILE_INTENT = re.compile(
     r"markdown|md)\b", re.I)
 
 
+# "make a file from this table", "create a Word document", "generate me a PDF": the file is the direct object
+FILE_OBJECT = re.compile(
+    r"\b(?:make|create|generate|build|export|produce|give)\s+(?:me\s+)?(?:an?|the|this|that|one)\s+(?:[\w-]+\s+){0,2}?"
+    r"(?:file|document|doc|pdf|docx|pptx|xlsx|spreadsheet|workbook|slide\s*deck|deck|presentation|markdown\s+file)\b", re.I)
+
+
 def wants_file(text: str) -> bool:
     """A request to produce a file ("turn these notes into a summary file", "save this as a PDF"), as opposed to a
     question about one ("what does this file say?")."""
     if re.match(r"\s*(?:how\s+(?:do|can|would|should)\s+(?:i|you|we|one)|how\s+to|what(?:'s| is)\s+the\s+best\s+way)\b",
                 text, re.I):
         return False  # "how do I convert a docx to pdf?" asks for steps, not a file
-    return bool(FILE_INTENT.search(text))
+    return bool(FILE_INTENT.search(text) or FILE_OBJECT.search(text))

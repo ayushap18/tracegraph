@@ -601,7 +601,9 @@ async def test_an_unsafe_request_is_never_planned_from_an_llm_rewrite():
     ('Turn this sales data into an Excel sheet with a chart', True),
     ('What does this file say?', False), ('Convert 100 USD to EUR', False), ('Write a report on the Eiffel Tower', False),
     ('How do I convert a docx to pdf?', False), ('summarize the attached document', False),
-    ('how to save a file as PDF in Word', False)])
+    ('how to save a file as PDF in Word', False), ('Make a file from this table', True),
+    ('Create a Word document about our Q3 goals', True), ('Generate me a PDF of the summary', True),
+    ('Make a plan for my week', False), ('Create a list of 5 healthy snacks', False), ('How do I make a PDF?', False)])
 def test_wants_file(q, want):
     assert gate.wants_file(q) is want
 
