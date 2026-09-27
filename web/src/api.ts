@@ -3,6 +3,7 @@ import type {
   AgentInfo, AskBody, AskResponse, CompareDetail, CompareResponse, ControlBody, ControlResponse, EngineTestResult,
   EvalDetail, EvalSummary, FileInfo, NewAgent, RunRecord, SessionDetail, SessionSummary,
   AgentExamples, EngineHealth, EvalCompare, Label, NewLabel, ReviewItem, ShakyReason, Verdict,
+  RunEvalBody, TimingsSummary,
 } from './protocol'
 
 export class ApiError extends Error {
@@ -61,6 +62,11 @@ export function listRuns(p: ListRunsParams = {}) {
   return get<{ runs: RunRecord[] }>('/api/runs' + (s ? '?' + s : ''))
 }
 export const getRun = (qid: number) => get<RunRecord>(`/api/runs/${qid}`)
+/** Several answers: make this run the chosen answer of its group (only chosen runs feed follow-ups). */
+export const chooseRun = (qid: number) => post<{ ok: true; group_id: string; chosen: number }>(`/api/runs/${qid}/choose`)
+/** Per-stage p50/p90 over recent saved runs, optionally for one engine ('none' = keyless). */
+export const getTimings = (engine?: string, limit = 200) =>
+  get<TimingsSummary>(`/api/timings?limit=${limit}` + (engine ? `&engine=${enc(engine)}` : ''))
 
 // ---------- chat sessions ----------
 export const listSessions = (limit = 30) => get<{ sessions: SessionSummary[] }>(`/api/sessions?limit=${limit}`)
@@ -100,6 +106,8 @@ export const getCompare = (id: string) => get<CompareDetail>(`/api/compare/${enc
 /** examples: run with route examples on (true) or off (false); omitted = the server's current setting. */
 export const runEval = (engine?: string, examples?: boolean) =>
   post<{ eval_id: string }>('/api/evals/run', { ...(engine ? { engine } : {}), ...(examples === undefined ? {} : { examples }) })
+/** Full options: split (dev/holdout/all), tag filter, repeat count for flakiness, judge engine for open-ended cases. */
+export const runEvalWith = (body: RunEvalBody) => post<{ eval_id: string }>('/api/evals/run', body)
 export const compareEvals = (a: string, b: string) => get<EvalCompare>(`/api/evals/compare?a=${enc(a)}&b=${enc(b)}`)
 export const cancelEval = (id: string) => post<{ ok: true }>(`/api/evals/${enc(id)}/cancel`)
 export const listEvals = () => get<{ evals: EvalSummary[] }>('/api/evals')

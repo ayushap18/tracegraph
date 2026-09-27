@@ -40,6 +40,8 @@ export interface RoutedFields {
   jev_ms: number
   model: string
   examples?: boolean // learning plan: route examples were in Jev's criteria for this decision
+  cached?: boolean // speed plan: this decision came from the routing cache
+  forced?: boolean // chat: the user picked the agent with @agent
 }
 
 export interface AnsweredFields {
@@ -49,6 +51,7 @@ export interface AnsweredFields {
   ok: boolean
   source: string | null
   engine: Engine
+  checks?: AnswerChecks // speed plan: verify result, cache hit, effort used
 }
 
 // One entry of `hello.history`, ascending qid, max 60; queries still in flight have total_ms null.
@@ -79,6 +82,9 @@ export interface RunRecord extends HistoryRecord {
   session_id: string | null
   compare_id: string | null
   files: string[]
+  mode?: ChatMode; style?: AnswerStyle; agent?: string | null // agent: forced with @agent
+  group_id?: string | null; chosen?: boolean // several answers: only the chosen run of a group feeds follow-ups
+  timings?: RunTimings
 }
 
 export interface Features { files: boolean; compare: boolean; evals: boolean; custom_agents: boolean; exec: boolean }
@@ -110,7 +116,7 @@ export interface DeltaEvent { type: 'delta'; qid: number; tid: string; text: str
 export interface AnsweredEvent extends AnsweredFields { type: 'answered'; qid: number; tid: string }
 export interface MergedEvent { type: 'merged'; qid: number; answer: string; engine: MergeEngine; ms: number }
 export interface RunTokens { jev_in: number; llm_in: number; llm_out: number }
-export interface DoneEvent { type: 'done'; qid: number; total_ms: number; stats: Stats; status?: RunStatus; tokens?: RunTokens }
+export interface DoneEvent { type: 'done'; qid: number; total_ms: number; stats: Stats; status?: RunStatus; tokens?: RunTokens; timings?: RunTimings }
 export interface CancelledEvent { type: 'cancelled'; qid: number }
 export interface EvalProgressEvent { type: 'eval_progress'; eval_id: string; done: number; total: number; passed: number }
 export interface EvalDoneEvent { type: 'eval_done'; eval_id: string; passed: number; total: number; accuracy: number; status?: 'done' | 'cancelled' | 'error' }
@@ -130,8 +136,13 @@ export interface AskBody {
   query: string; session_id?: string; engine?: string; files?: string[]; source?: 'you' | 'chat' | 'compare' | 'eval' | 'sandbox'
   // sandbox only (docs/PLAN-sandbox.md)
   sandbox_id?: string; draft_agent?: DraftAgent; replaces?: number; remember?: boolean
+  // chat variety (docs/PLAN-speed-evals-chat.md)
+  mode?: ChatMode; style?: AnswerStyle
+  agent?: string       // "@agent": skip routing, send every step to this offered agent
+  engines?: string[]   // 2-3 engines: one run per engine in a new answer group (response carries qids + group_id)
+  retry_of?: number    // another answer for that run's question, added to its group (use with `engine`)
 }
-export interface AskResponse { ok: true; qid: number; session_id: string | null; sandbox_id?: string }
+export interface AskResponse { ok: true; qid: number; session_id: string | null; sandbox_id?: string; qids?: number[]; group_id?: string }
 
 export interface SessionSummary { id: string; title: string; created: number; updated: number; turns: number }
 export interface SessionDetail { id: string; title: string; runs: RunRecord[] }
@@ -147,8 +158,8 @@ export interface CompareResponse { compare_id: string; runs: Array<{ engine: str
 export interface CompareDetail { compare_id: string; query: string; runs: RunRecord[] }
 
 export type EvalStatus = 'running' | 'done' | 'cancelled' | 'error'
-export interface EvalSummary { eval_id: string; at: number; engine: string | null; status: EvalStatus; passed: number; total: number; accuracy: number; silent_wrong: number; done?: number; examples?: boolean }
-export interface EvalCase { id: string; query: string; tags: string[]; pass: boolean; reasons: string[]; agents: string[]; answer: string; ms: number; qid: number | null; expect_agents?: string[] | null; expect_outcome?: string | null }
+export interface EvalSummary extends EvalSummaryExtra { eval_id: string; at: number; engine: string | null; status: EvalStatus; passed: number; total: number; accuracy: number; silent_wrong: number; done?: number; examples?: boolean }
+export interface EvalCase extends EvalCaseExtra { id: string; query: string; tags: string[]; pass: boolean; reasons: string[]; agents: string[]; answer: string; ms: number; qid: number | null; expect_agents?: string[] | null; expect_outcome?: string | null }
 export interface EvalDetail extends EvalSummary { cases: EvalCase[] }
 
 export interface EngineTestResult { ok: boolean; ms: number; text?: string; error?: string }
@@ -209,4 +220,38 @@ export interface EvalCompare { a: EvalCompareSide; b: EvalCompareSide; cases: Ev
 export interface EngineHealth {
   name: string; label: string; calls: number; ok: number; fallbacks_from: number; fallbacks_to: number
   p50_ms: number | null; p95_ms: number | null; last_error: string | null; cooling_until: number | null
+}
+
+// ---------- speed, harder evals, chat variety (docs/PLAN-speed-evals-chat.md) ----------
+export type ChatMode = 'quick' | 'balanced' | 'deep' | 'research'
+export type AnswerStyle = 'default' | 'concise' | 'detailed' | 'bullets' | 'steps' | 'simple' | 'table'
+/** Milliseconds per stage of one run. null = the stage did not run (e.g. no LLM planner, template merge). */
+export interface RunTimings {
+  plan_ms: number | null; route_ms: number | null; agents_ms: number | null; merge_ms: number | null
+  first_token_ms: number | null // query start -> first answer text shown
+  planner: 'llm' | 'heuristic' | 'single'; merger: 'llm' | 'template' | 'single'
+  cache_hits: number
+}
+/** Per-subtask extras on `answered` events and stored tasks. */
+export interface AnswerChecks { verified?: 'ok' | 'mismatch' | 'skipped'; verify_note?: string | null; cached?: boolean; effort?: 'low' | 'medium' | 'high' }
+export interface StageStats { stage: 'plan' | 'route' | 'agents' | 'merge' | 'first_token' | 'total'; p50: number | null; p90: number | null; n: number }
+/** GET /api/timings?engine=&limit= : per-stage percentiles over recent saved runs. */
+export interface TimingsSummary { engine: string | null; runs: number; stages: StageStats[] }
+
+export type EvalSplit = 'dev' | 'holdout' | 'all'
+export interface RunEvalBody { engine?: string; examples?: boolean; split?: EvalSplit; tags?: string[]; repeat?: number; judge?: string | null }
+export interface TagScore { passed: number; total: number }
+/** Extra fields on eval summaries (all optional so older stored evals still parse). */
+export interface EvalSummaryExtra {
+  split?: EvalSplit; repeat?: number; judge?: string | null; tags?: string[] | null
+  by_tag?: Record<string, TagScore>; p50_ms?: number | null; p95_ms?: number | null; flaky?: number; judge_mean?: number | null
+}
+export interface EvalTurnResult { query: string; pass: boolean; reasons: string[]; answer: string; agents: string[]; ms: number; qid: number | null }
+export interface JudgeScore { correct: number; complete: number; grounded: number; concise: number; mean: number; note: string; engine: string }
+/** Extra fields on scored eval cases. */
+export interface EvalCaseExtra {
+  kind?: 'single' | 'multi_turn' | 'file' | 'judge'; split?: 'dev' | 'holdout'
+  turns?: EvalTurnResult[] // multi-turn cases: one per turn
+  attempts?: boolean[]     // repeat > 1: pass/fail per attempt; flaky when they differ
+  flaky?: boolean; judge?: JudgeScore | null; max_ms?: number | null; over_budget?: boolean
 }
