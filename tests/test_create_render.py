@@ -1,3 +1,4 @@
+import json
 """Renderers: every block type in every format and theme renders and reopens; per-format structure (F1-F6), formula
 injection (X2), non-Latin text, the size limit, and previews."""
 import io
@@ -110,8 +111,9 @@ def test_non_latin_text_renders(fmt):
     data = render(NON_LATIN, fmt)
     res = verify(NON_LATIN, fmt, data)
     bad = [(r.id, r.note) for r in res if r.id in ('V1', 'V2', 'V3', 'V4') and not r.ok]
-    if fmt == 'pdf':  # no PDF font here draws the emoji: V2 says so rather than hiding it
-        bad = [(i, n) for i, n in bad if not (i == 'V2' and n.startswith('1 characters could not be drawn') and '🎉' in n)]
+    if fmt == 'pdf':  # characters the machine's PDF font can't draw (the emoji; CJK on Linux CI): V2 says so
+        lost = {c for c in json.dumps(NON_LATIN, ensure_ascii=False) if ord(c) > 127} - render_mod.unicode_glyphs()
+        bad = [(i, n) for i, n in bad if not (i == 'V2' and lost and 'could not be drawn' in n)]
     assert not bad, bad
 
 
@@ -149,7 +151,9 @@ def test_pdf_with_a_unicode_font_keeps_the_text():
     if render_mod.unicode_font() is None:
         pytest.skip('no Unicode TTF on this machine')
     text = PdfReader(io.BytesIO(render(NON_LATIN, 'pdf'))).pages[0].extract_text()
-    assert 'Москва' in text and '日本語のテキスト' in text and 'Батареи' in text
+    assert 'Москва' in text and 'Батареи' in text
+    if set('日本語') <= render_mod.unicode_glyphs():  # CJK only when the font has it (Arial Unicode yes, DejaVu no)
+        assert '日本語のテキスト' in text
 
 
 # ---------- DOCX ----------
