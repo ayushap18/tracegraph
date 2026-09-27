@@ -9,11 +9,12 @@ def choice(pick, probs):
 
 class FakeJev:
     """route_for(text) -> (agent, confidence); multi is the `multi` noul (or an exception to raise); fail_on makes
-    route calls whose text contains any of those substrings raise."""
+    route calls whose text contains any of those substrings raise; hard is the `hard` score, a number or text -> number."""
 
-    def __init__(self, route_for=None, multi=0.9, unsafe=0.02, clear=0.9, delay=0.0, fail_on=()):
+    def __init__(self, route_for=None, multi=0.9, unsafe=0.02, clear=0.9, delay=0.0, fail_on=(), hard=0.5):
         self.route_for = route_for or (lambda text: ('chat', 0.9))
         self.multi, self.unsafe, self.clear, self.delay, self.fail_on = multi, unsafe, clear, delay, fail_on
+        self.hard = hard
         self.calls = []
         self.criteria = []  # the route Choice's criteria per route call: which agents Jev was offered
 
@@ -35,8 +36,9 @@ class FakeJev:
         names = list(qs['route'].criteria)
         rest = (1 - conf) / (len(names) - 1)
         probs = {n: (conf if n == agent else rest) for n in names}
+        hard = self.hard(state) if callable(self.hard) else self.hard
         return NS(answers={'route': choice(agent, probs), 'urgency': NS(score=0.5), 'unsafe': NS(noul=self.unsafe),
-                           'clear': NS(noul=self.clear)}, usage=usage, model='jev-test')
+                           'clear': NS(noul=self.clear), 'hard': NS(score=hard)}, usage=usage, model='jev-test')
 
 
 class FakeStream:

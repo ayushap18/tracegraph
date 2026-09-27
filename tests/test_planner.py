@@ -53,7 +53,8 @@ async def test_heuristic_survives_jev_failure():
 async def test_claude_planner():
     claude = FakeAnthropic(['{"subtasks": ["weather in Paris", ', '"convert 100 EUR to INR"]}'])
     jev = FakeJev()
-    p = await plan('weather in Paris and convert 100 EUR to INR', jev, eng(claude))
+    # deep mode: the LLM plans even a split the heuristic is sure of (balanced lets that one stand, see test_speed.py)
+    p = await plan('weather in Paris and convert 100 EUR to INR', jev, eng(claude), mode='deep')
     assert p['planner'] == 'anthropic' and p['subtasks'] == ['weather in Paris', 'convert 100 EUR to INR'] and p['multi'] is None
     # Jev's only call is the safety check on the whole query (it runs alongside the planner); a safe query ends there
     assert p['claude_in'] == 10 and [c[1] for c in jev.calls] == [['unsafe']] and p['jev_tokens'] == 100

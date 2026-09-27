@@ -14,14 +14,13 @@ def test_cases_file_is_valid():
     cases = load_cases()
     assert len(cases) >= 40 and len({c['id'] for c in cases}) == len(cases)
     assert sum('stress' in c['tags'] for c in cases) >= 30 and sum('control' in c['tags'] for c in cases) >= 10
-    allowed = {'id', 'query', 'expect_agents', 'expect_outcome', 'must_match', 'must_not_match', 'tags'}
-    for c in cases:
-        assert set(c) <= allowed and c['query'] and isinstance(c['tags'], list)
-        assert c.get('expect_outcome') in (None, 'clarify', 'blocked', 'answer')
-        for k in ('must_match', 'must_not_match'):
-            if k in c:
-                re.compile(c[k])
-        assert any(k in c for k in ('expect_agents', 'expect_outcome', 'must_match', 'must_not_match')), c['id']
+    for c in cases:  # the schema (and every regex) is checked by validate_case; strict also wants an expectation
+        assert evals.validate_case(c, strict=True) == [], c['id']
+        assert isinstance(c['tags'], list) and c['tags'], c['id']
+    for k in ('must_match', 'must_not_match'):  # the original 40 cases keep their shape
+        assert all(re.compile(c[k]) for c in cases[:40] if k in c)
+    assert all(set(c) <= {'id', 'query', 'expect_agents', 'expect_outcome', 'must_match', 'must_not_match', 'tags'}
+               for c in cases[:40])
 
 
 def test_score_checks_every_expectation():

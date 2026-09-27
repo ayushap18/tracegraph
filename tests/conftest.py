@@ -1,6 +1,6 @@
 import pytest
 
-from jevrouter import evals, gate
+from jevrouter import cache, evals, gate
 
 
 @pytest.fixture(autouse=True)
@@ -19,3 +19,11 @@ def no_meanings_lookup(monkeypatch):
     async def none(http, term):
         return None
     monkeypatch.setattr(gate, 'meanings', none)
+
+
+@pytest.fixture(autouse=True)
+def empty_live_cache():
+    """Live-data answers (jevrouter/cache.py) are cached module-wide; every test starts without them."""
+    cache.LIVE.clear()
+    yield
+    cache.LIVE.clear()

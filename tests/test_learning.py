@@ -417,7 +417,9 @@ async def test_health_endpoint(client):
     assert set(r['engines'][0]) == {'name', 'label', 'calls', 'ok', 'fallbacks_from', 'fallbacks_to', 'p50_ms', 'p95_ms',
                                     'last_error', 'cooling_until'}
     await json_of(await client.post('/api/engines/codex/test'))
-    await client.post('/ask', json={'query': 'weather in Paris and convert 100 EUR to INR', 'engine': 'claude-code'})
+    # deep mode: the LLM plans and merges (balanced would answer this one without an LLM call)
+    await client.post('/ask', json={'query': 'weather in Paris and convert 100 EUR to INR', 'engine': 'claude-code',
+                                    'mode': 'deep'})
     await asyncio.gather(*client.router.tasks)
     h = {x['name']: x for x in (await json_of(await client.get('/api/engines/health')))['engines']}
     assert h['codex']['calls'] == 1 and h['codex']['ok'] == 1 and h['codex']['p50_ms'] is not None

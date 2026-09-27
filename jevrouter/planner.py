@@ -1,7 +1,9 @@
-"""plan(query) -> subtasks (with dependencies). The LLM engine splits when one is active; otherwise a conservative text split that Jev must confirm."""
+"""plan(query) -> subtasks (with dependencies). A conservative text split that Jev must confirm, or the LLM engine when one
+is active and the split needs it (dependent steps, follow-ups, files, long or unclear queries)."""
 import asyncio
 import re
 
+from .cache import normalize
 from .config import BLOCK_AT, MAX_SUBTASKS, MULTI_AT
 from .engines import parse_json
 from .gate import refers_back
@@ -39,15 +41,23 @@ def candidate_split(query: str) -> list[str]:
     return parts
 
 
-async def plan_heuristic(query: str, jev) -> dict:
+async def plan_heuristic(query: str, jev, scores=None) -> dict:
+    """scores: an optional cache of Jev's multi score by query text (jevrouter/cache.py); a hit sets `cached`."""
     out = {'planner': 'heuristic', 'subtasks': [query], 'multi': None, 'jev_tokens': 0, 'claude_in': 0, 'claude_out': 0}
     parts = candidate_split(query)
     if len(parts) < 2:
         return out
-    try:
-        out['multi'], out['jev_tokens'] = await multi_score(jev, query)
-    except Exception:
-        return out  # without Jev's confirmation, don't guess
+    key = normalize(query)
+    hit = scores.get(key) if scores is not None else None
+    if hit is not None:
+        out['multi'], out['cached'] = hit, True
+    else:
+        try:
+            out['multi'], out['jev_tokens'] = await multi_score(jev, query)
+        except Exception:
+            return out  # without Jev's confirmation, don't guess
+        if scores is not None:
+            scores.put(key, out['multi'])
     if out['multi'] >= MULTI_AT:
         out['subtasks'] = parts
         # "...and then what time is it there": a part that points back waits for the part before it, which gives it
@@ -129,17 +139,128 @@ async def unplanned_harm(query: str, subtasks: list[str], jev, whole: float) -> 
     return harmful or [query], tokens
 
 
-async def plan(query: str, jev, engine=None, context=None, files=None) -> dict:
-    """context: earlier session turns [{query, answer}]; files: attached file names. The keyless planner ignores both."""
-    if engine is not None and worth_llm_plan(query, context):
+# A2 (docs/PLAN-speed-evals-chat.md): the heuristic plans a multi-part query on its own when the parts are clear, so an
+# engine run doesn't wait seconds for an LLM plan of "time in Tokyo and 15% of 380". Jev's multi score decides how sure
+# the split is: at SURE_MULTI or above the parts stand, at SURE_SINGLE or below it's one request; in between the LLM plans.
+SURE_MULTI = 0.8
+SURE_SINGLE = 0.2
+LONG_QUERY = 24  # words: a query this long may hold requests the text splitter can't see
+
+
+# A later part that may use an earlier part's answer: "...then which is better value", "...and double it", "...convert
+# that to GBP". Broader than gate.refers_back on purpose: a false alarm only costs the LLM plan the query had before.
+USES_EARLIER = re.compile(r'\b(?:which|whichever|better|worse|cheaper|more|less|bigger|smaller|higher|lower|compare|'
+                          r'difference|both|them|they|those|these|that|this|same|result|answer|total|sum|together|'
+                          r'combined|previous|above|former|latter)\b|(?<!\bis )(?<!\bwas )\bit\b', re.I)
+
+
+# A person or thing named earlier: "...and how old is he", "...what is his net worth", "...and what is her name".
+PRONOUN = re.compile(r'\b(?:he|she|him|his|her|hers|its|their|theirs|there|they|them)\b', re.I)
+# A later part that is only an operation on an earlier answer: "...and divide by 2", "...then multiply by 3".
+OPERATES = re.compile(r'^(?:then\s+|and\s+)?(?:divide|multiply|add|subtract|double|halve|triple|square|cube|times|minus|'
+                      r'plus|round|increase|decrease|reduce|raise|take|convert\s+(?:that|it|this)|split)\b', re.I)
+# Words that qualify a definite noun on the spot: "the time in Tokyo", "the capital of France", "the date today".
+QUALIFIERS = {'of', 'in', 'for', 'at', 'on', 'from', 'to', 'between', 'near', 'by', 'with', 'today', 'tomorrow',
+              'yesterday', 'now'}
+# A part that needs a place or an amount to be answered: "What is the weather", "convert 100".
+NEEDS_ANCHOR = re.compile(r'\b(?:weather|temperature|forecast|rain|time|convert|exchange|rate|sunrise|sunset)\b', re.I)
+WORD = re.compile(r"[A-Za-z][A-Za-z'-]*")
+
+
+def anchors(part: str) -> set[str]:
+    """Places, names and codes in a part: capitalised words after the first ("in Paris", "to EUR")."""
+    return {w for w in WORD.findall(part)[1:] if w[:1].isupper()}
+
+
+def dangling_the(part: str, earlier: str) -> bool:
+    """A definite noun that nothing in the part itself pins down and no earlier part names: "when was the author born",
+    "the winning country". "the time in Tokyo" and "the Eiffel Tower" are pinned down where they stand."""
+    words = WORD.findall(part)
+    seen = {w.lower() for w in WORD.findall(earlier)}
+    for i, w in enumerate(words):
+        if w.lower() != 'the' or i + 1 >= len(words):
+            continue
+        head, after = words[i + 1], [x.lower() for x in words[i + 1:i + 5]]
+        if head[:1].isupper() or any(x in QUALIFIERS for x in after) or head.lower() in seen:
+            continue
+        return True
+    return False
+
+
+def depends(parts: list[str]) -> bool:
+    """True when some part may need another part's answer or detail, so the parts can't simply run side by side. Errs
+    towards True: a false alarm only costs the LLM plan the query had before the heuristic shortcut."""
+    for i, p in enumerate(parts):
+        if i and (refers_back(p) or USES_EARLIER.search(p) or PRONOUN.search(p) or OPERATES.search(p)
+                  or dangling_the(p, ' '.join(parts[:i]))):
+            return True
+        # "What is the weather and the time in Tokyo", "convert 100 and 200 USD to EUR": an earlier part that needs a
+        # place or an amount a later part has
+        if NEEDS_ANCHOR.search(p) and not anchors(p) and any(anchors(q) for q in parts[i + 1:]):
+            return True
+    return False
+
+
+def needs_llm_plan(query: str, context=None, files=None) -> bool:
+    """True when only the LLM planner can plan this query well: a follow-up (it resolves against earlier turns), attached
+    files, a long query, one the text splitter can't split, or parts that may depend on each other ("...the time there",
+    "...then which is better value", "...how old is he", "...and divide by 2")."""
+    if context or files or len(query.split()) > LONG_QUERY:
+        return True
+    parts = candidate_split(query)
+    return len(parts) < 2 or depends(parts)
+
+
+def sure(p: dict) -> bool:
+    """Jev's multi score is decisive either way, so the heuristic plan can stand without the LLM."""
+    return p['multi'] is not None and (p['multi'] >= SURE_MULTI or p['multi'] <= SURE_SINGLE)
+
+
+def kind(p: dict) -> str:
+    """The RunTimings planner: 'llm', 'heuristic' (Jev's multi score was asked) or 'single' (no planner call at all)."""
+    if p['planner'] != 'heuristic':
+        return 'llm'
+    return 'heuristic' if p['multi'] is not None else 'single'
+
+
+async def plan(query: str, jev, engine=None, context=None, files=None, mode: str = 'balanced', on_llm=None,
+               scores=None) -> dict:
+    """context: earlier session turns [{query, answer}]; files: attached file names. The keyless planner ignores both.
+    mode (docs/PLAN-speed-evals-chat.md): 'quick' never calls the LLM planner; 'deep' calls it whenever the query may
+    hold several requests (the behaviour before the A2 skips); 'balanced' and 'research' let a sure heuristic plan stand.
+    on_llm() is called just before the LLM planner starts, so the caller can route the whole query alongside it.
+    scores: a cache of Jev's multi score by query text (the Router's; evals pass none)."""
+    heuristic, safety = None, None
+    if engine is not None and mode != 'quick' and worth_llm_plan(query, context):
+        if mode != 'deep' and not needs_llm_plan(query, context, files):
+            # The whole query's safety check runs alongside the multi score. The heuristic keeps every part as written,
+            # and each part is routed (and blocked) on its own; a query that is unsafe as a whole still goes to the LLM
+            # path below, whose unplanned_harm check makes sure the harmful part becomes a step of its own.
+            heuristic, safety = await asyncio.gather(plan_heuristic(query, jev, scores), unsafe_score(jev, query),
+                                                     return_exceptions=True)
+            if isinstance(heuristic, BaseException):
+                heuristic = None
+            elif not isinstance(safety, BaseException):
+                heuristic['jev_tokens'] += safety[1]
+                if sure(heuristic) and safety[0] < BLOCK_AT:
+                    return with_deps(heuristic)
+        if on_llm is not None:
+            on_llm()
         # Jev's safety check on the whole query runs alongside the LLM planner, so it adds no wait.
-        llm, safety = await asyncio.gather(plan_llm(query, engine, context, files), unsafe_score(jev, query),
-                                           return_exceptions=True)
+        if safety is None or isinstance(safety, BaseException):
+            llm, safety = await asyncio.gather(plan_llm(query, engine, context, files), unsafe_score(jev, query),
+                                               return_exceptions=True)
+        else:  # already known from the heuristic check (its tokens are counted there)
+            safety = (safety[0], 0)
+            try:
+                llm = await plan_llm(query, engine, context, files)
+            except Exception as e:
+                llm = e
         p = None if isinstance(llm, BaseException) else llm  # refusal, API error, bad JSON: the heuristic still works
         if p is not None and not isinstance(safety, BaseException):  # without Jev's check, keep every part as written
             # a step that points back ("what time is it there") but was planned as independent waits for the one before
             p['deps'] = [d or ([i - 1] if i and refers_back(t) else []) for i, (t, d) in enumerate(zip(p['subtasks'], p['deps']))]
-            p['jev_tokens'] += safety[1]
+            p['jev_tokens'] += safety[1] + (heuristic or {}).get('jev_tokens', 0)
             try:
                 missing, tokens = await unplanned_harm(query, p['subtasks'], jev, safety[0])
             except Exception:
@@ -150,7 +271,10 @@ async def plan(query: str, jev, engine=None, context=None, files=None) -> dict:
             if missing and len(p['subtasks']) + len(missing) <= MAX_SUBTASKS:  # put them back, verbatim, as their own steps
                 return {**p, 'subtasks': p['subtasks'] + missing, 'deps': p['deps'] + [[] for _ in missing]}
             # no room, or Jev couldn't check: the keyless plan keeps every part of the query as written
-    out = await plan_heuristic(query, jev)
+    return with_deps(heuristic or await plan_heuristic(query, jev, scores))
+
+
+def with_deps(out: dict) -> dict:
     return {**out, 'deps': out.get('deps') or [[] for _ in out['subtasks']]}
 
 

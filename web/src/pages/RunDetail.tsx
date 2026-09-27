@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { ask, cancelRun, errorText, getRun } from '../api'
-import type { RunRecord } from '../protocol'
+import type { RunRecord, RunTimings } from '../protocol'
 import { useRunState, useStore } from '../store'
 import type { Run } from '../useEventStream'
 import { Badge, Button, Card, EmptyState, Skeleton, StatusBadge, Tabs, copyText, navigate, timeAgo, useHashPath, useToast } from '../ui'
@@ -10,6 +10,7 @@ import Markdown from '../components/Markdown'
 import { TraceView } from '../components/TraceView'
 import { RouteFeedback, canLabel, useRunLabels } from '../components/RouteFeedback'
 import { Waterfall } from '../components/Viz'
+import { Timings } from '../components/Timings'
 import { AgentBadge, BackLink, PageBody } from '../components/app'
 import { cn } from '@/lib/utils'
 import { pct } from '../lib'
@@ -27,6 +28,21 @@ const TABS = [
 // Same format as the Runs table: whole milliseconds under a second, one decimal above.
 const secs = (v: number | null | undefined) => (v == null ? '-' : v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
 
+// The stored record (GET /api/runs/:qid), fetched again when the run finishes. It carries what the live client state
+// does not: stage timings, and the exact JSON for the Raw tab.
+function useStoredRun(qid: number | null, done: boolean | undefined) {
+  const [rec, setRec] = useState<RunRecord | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  useEffect(() => {
+    if (qid == null) return
+    let alive = true
+    setErr(null)
+    getRun(qid).then(r => alive && setRec(r), e => alive && setErr(errorText(e)))
+    return () => { alive = false }
+  }, [qid, done])
+  return { rec: rec?.qid === qid ? rec : null, err }
+}
+
 export default function RunDetail({ params }: { params: Record<string, string> }) {
   const qid = Number(params.qid)
   const { run, loading, error, notFound } = useRunState(Number.isFinite(qid) ? qid : null)
@@ -36,6 +52,9 @@ export default function RunDetail({ params }: { params: Record<string, string> }
   const tab = TABS.some(t => t.id === query.get('tab')) ? query.get('tab')! : 'answer'
   const setTab = (id: string) => location.replace(`#/runs/${qid}${id === 'answer' ? '' : '?tab=' + id}`)
   const [busy, setBusy] = useState<'stop' | 'replay' | null>(null)
+  const stored = useStoredRun(Number.isFinite(qid) ? qid : null, run?.done)
+  // A client that learns timings from the `done` event may carry them on the run; otherwise use the stored record.
+  const timings: RunTimings | undefined = (run as { timings?: RunTimings } | null)?.timings ?? stored.rec?.timings
 
   if (!Number.isFinite(qid)) return <PageBody><Card><EmptyState icon="alert" title="Not a run id" text={`"${params.qid}" is not a number.`} action={<Button onClick={() => navigate('/runs')}>All runs</Button>} /></Card></PageBody>
   if (loading) return <DetailSkeleton />
@@ -85,8 +104,15 @@ export default function RunDetail({ params }: { params: Record<string, string> }
               <StatItem label="Total">{run.done ? <span className="tabular-nums">{secs(run.total_ms)}</span> : <span className="text-primary">running…</span>}</StatItem>
               <StatItem label="Steps"><span className="tabular-nums">{tasks.length || '-'}</span></StatItem>
               <StatItem label="Agents" className="max-w-full min-w-0"><span className="break-words">{agentNames || '-'}</span></StatItem>
+              {timings?.first_token_ms != null && <StatItem label="First token"><span className="tabular-nums">{secs(timings.first_token_ms)}</span></StatItem>}
               <StatItem label="Started"><span className="tabular-nums" title={new Date(run.at * 1000).toLocaleString()}>{timeAgo(run.at)}</span></StatItem>
             </dl>
+            {timings && run.done && (
+              <button type="button" onClick={() => setTab('timeline')} aria-label="Stage timings, open the timeline"
+                className="max-w-xl cursor-pointer rounded-md bg-transparent p-0 text-left outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35">
+                <Timings timings={timings} totalMs={run.total_ms} compact />
+              </button>
+            )}
             {(run.session_id || run.compare_id || run.files.length > 0) && (
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[13px]">
                 {run.session_id && <a className={LINK} href={'#/?s=' + encodeURIComponent(run.session_id)}><Icon name="chat" size={14} />Open chat</a>}
@@ -110,14 +136,21 @@ export default function RunDetail({ params }: { params: Record<string, string> }
           {tab === 'answer' && <AnswerTab run={run} />}
           {tab === 'trace' && <Card flush className="overflow-hidden"><TraceView run={run} store={store} /></Card>}
           {tab === 'timeline' && (
-            <Card title="Pipeline timeline" icon="timeline" subtitle={run.marks.query == null ? 'Durations laid end to end (this run was loaded from history).' : 'When each stage started and finished in this browser.'}>
-              <Waterfall run={run} />
-            </Card>
+            <div className="flex flex-col gap-4">
+              <Card title="Stage timings" icon="latency"
+                subtitle={timings ? 'Server-measured time per stage. Stages can overlap, so they may add up to more than the total.' : undefined}>
+                {timings ? <Timings timings={timings} totalMs={run.total_ms} />
+                  : <p className="m-0 text-[13px] text-muted-foreground">{!run.done ? 'Stage timings appear when the run finishes.' : stored.rec || stored.err ? 'This run has no stage timings. Runs saved before timings were recorded only have a total.' : 'Loading…'}</p>}
+              </Card>
+              <Card title="Pipeline timeline" icon="timeline" subtitle={run.marks.query == null ? 'Durations laid end to end (this run was loaded from history).' : 'When each stage started and finished in this browser.'}>
+                <Waterfall run={run} />
+              </Card>
+            </div>
           )}
           {tab === 'subtasks' && (
             tasks.length ? <SubtasksTab run={run} /> : <Card><EmptyState icon="subtasks" title={run.done ? 'No subtasks' : 'Planning…'} text={run.done ? 'This run finished without a plan.' : 'Subtasks appear as soon as the planner splits the query.'} /></Card>
           )}
-          {tab === 'raw' && <RawTab run={run} />}
+          {tab === 'raw' && <RawTab run={run} rec={stored.rec} err={stored.err} />}
         </div>
       </div>
     </PageBody>
@@ -197,16 +230,8 @@ function AnswerTab({ run }: { run: Run }) {
   )
 }
 
-function RawTab({ run }: { run: Run }) {
+function RawTab({ run, rec, err }: { run: Run; rec: RunRecord | null; err: string | null }) {
   const toast = useToast()
-  const [rec, setRec] = useState<RunRecord | null>(null)
-  const [err, setErr] = useState<string | null>(null)
-  useEffect(() => {
-    let alive = true
-    setRec(null); setErr(null)
-    getRun(run.qid).then(r => alive && setRec(r), e => alive && setErr(errorText(e)))
-    return () => { alive = false }
-  }, [run.qid, run.done])
   // Without the server record, show the client's view of the run (minus browser timing marks).
   const { marks: _m, ...client } = run
   const json = JSON.stringify(rec ?? client, null, 2)

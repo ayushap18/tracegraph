@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { compareEvals, errorText, listEvals } from '../../api'
-import type { EvalCompare as Compare, EvalCompareCase, EvalCompareSide, EvalSummary } from '../../protocol'
+import type { EvalCompare as Compare, EvalCompareCase, EvalCompareSide, EvalSummary, TagScore } from '../../protocol'
 import { Badge, Button, Card, EmptyState, IconButton, Skeleton, navigate } from '../../ui'
 import { BackLink, EngineBadge, PageBody } from '../../components/app'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -40,6 +40,16 @@ export default function EvalCompare({ a, b }: { a: string; b: string }) {
     return filter === 'all' || (filter === 'flips' ? f != null : f === filter)
   })
   const byId = useMemo(() => Object.fromEntries(evals.map(e => [e.eval_id, e])), [evals])
+  // Extras from the eval summaries (latency, flakiness, per-tag scores); absent on evals stored before them.
+  const sa = data ? byId[data.a.eval_id] as EvalSummary | undefined : undefined
+  const sb = data ? byId[data.b.eval_id] as EvalSummary | undefined : undefined
+  const tagRows = useMemo(() => {
+    if (!sa?.by_tag || !sb?.by_tag) return []
+    const tags = [...new Set([...Object.keys(sa.by_tag), ...Object.keys(sb.by_tag)])]
+    const acc = (s: TagScore | undefined) => (s && s.total ? s.passed / s.total : null)
+    return tags.map(t => ({ tag: t, a: sa.by_tag![t], b: sb.by_tag![t], d: acc(sb.by_tag![t]) != null && acc(sa.by_tag![t]) != null ? acc(sb.by_tag![t])! - acc(sa.by_tag![t])! : null }))
+      .sort((x, y) => (x.d ?? 0) - (y.d ?? 0) || x.tag.localeCompare(y.tag))
+  }, [sa, sb])
 
   return (
     <PageBody>
@@ -82,6 +92,13 @@ export default function EvalCompare({ a, b }: { a: string; b: string }) {
                     delta={signed(data.b.silent_wrong - data.a.silent_wrong)} good={data.a.silent_wrong - data.b.silent_wrong} />
                   <MetricRow label="Mean Jev tokens" a={Math.round(data.a.mean_jev_tokens).toLocaleString()} b={Math.round(data.b.mean_jev_tokens).toLocaleString()}
                     delta={tokenDelta(data.a.mean_jev_tokens, data.b.mean_jev_tokens)} good={tokenGood(data.a.mean_jev_tokens, data.b.mean_jev_tokens)} />
+                  {sa?.p50_ms != null && sb?.p50_ms != null && (
+                    <MetricRow label="Latency p50" a={secs(sa.p50_ms)} b={secs(sb.p50_ms)}
+                      delta={tokenDelta(sa.p50_ms, sb.p50_ms)} good={sa.p50_ms > 0 && (sb.p50_ms - sa.p50_ms) / sa.p50_ms > 0.2 ? -1 : sb.p50_ms < sa.p50_ms * 0.8 ? 1 : 0} />
+                  )}
+                  {sa?.flaky != null && sb?.flaky != null && (sa.repeat ?? 1) > 1 && (sb.repeat ?? 1) > 1 && (
+                    <MetricRow label="Flaky" a={sa.flaky} b={sb.flaky} delta={signed(sb.flaky - sa.flaky)} good={sa.flaky - sb.flaky} />
+                  )}
                 </tbody>
               </table>
             </div>
@@ -89,6 +106,29 @@ export default function EvalCompare({ a, b }: { a: string; b: string }) {
               {flips.total === 0 ? 'No case changed result.' : `${flips.fixed} fixed and ${flips.broken} broken in B.`} Token change above 30% is flagged.
             </p>
           </Card>
+
+          {tagRows.length > 0 && (
+            <Card flush title="By tag" icon="tag" aria-label="By tag">
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[19rem] border-collapse text-[13px]">
+                  <thead>
+                    <tr className="border-b border-border text-left text-xs text-muted-foreground">
+                      <th className="px-3 py-2 font-medium sm:px-4 sm:pl-5">Tag</th>
+                      <th className="px-3 py-2 font-medium sm:px-4">A</th>
+                      <th className="px-3 py-2 font-medium sm:px-4">B</th>
+                      <th className="px-3 py-2 text-right font-medium sm:px-4 sm:pr-5">Change</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {tagRows.map(r => (
+                      <MetricRow key={r.tag} label={<span className="font-mono text-xs">#{r.tag}</span>} a={tagCell(r.a)} b={tagCell(r.b)}
+                        delta={r.d == null ? 'n/a' : pts(r.d)} good={r.d == null ? 0 : Math.round(r.d * 100)} />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
 
           <Card flush title="Cases" icon="evals" aria-label="Cases">
             <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3 sm:px-5">
@@ -116,6 +156,8 @@ export default function EvalCompare({ a, b }: { a: string; b: string }) {
   )
 }
 
+const secs = (v: number) => (v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
+const tagCell = (s: TagScore | undefined) => (s && s.total ? `${pctOf(s.passed / s.total)} (${s.passed}/${s.total})` : 'n/a')
 const signed = (n: number) => (n > 0 ? `+${n}` : n === 0 ? '0' : String(n))
 const pts = (d: number) => `${d > 0 ? '+' : ''}${Math.round(d * 100)} pts`
 const tokenDelta = (a: number, b: number) => (a > 0 ? `${b >= a ? '+' : ''}${Math.round(((b - a) / a) * 100)}%` : signed(Math.round(b - a)))
@@ -137,7 +179,7 @@ function SideHead({ tag, side, at }: { tag: string; side: EvalCompareSide; at?: 
   )
 }
 
-function MetricRow({ label, a, b, delta, good }: { label: string; a: ReactNode; b: ReactNode; delta: string; good: number }) {
+function MetricRow({ label, a, b, delta, good }: { label: ReactNode; a: ReactNode; b: ReactNode; delta: string; good: number }) {
   return (
     <tr>
       <td className="px-3 py-2.5 sm:px-4 text-muted-foreground sm:pl-5">{label}</td>

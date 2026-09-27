@@ -13,14 +13,15 @@ import aiohttp
 from aiohttp import web
 
 from . import evals as evals_mod
+from . import judge as judge_mod
 from . import labels as labels_mod
-from .config import AGENTS, DIST, GUARDS, LEGACY_PAGE, REPORT, RESEARCH, RUN
+from .config import AGENTS, DIST, GROUP_MAX, GUARDS, LEGACY_PAGE, MODES, REPORT, RESEARCH, RUN, STYLES
 from .engines import EngineError, catalog, choose
-from .engines.health import unblock
+from .engines.health import pct, unblock
 from .events import sse
 from .jev import examples_for
 from .files import FILE_AGENTS, MAX_BYTES, FileError, extract
-from .pipeline import USE_ACTIVE, Router, warm_up
+from .pipeline import SANDBOX_QID0, USE_ACTIVE, Router, table_files, warm_up
 from .sandbox import MAX_FILES as MAX_SANDBOX_FILES, SandboxError
 from .store import DEFAULT_DB, Store
 
@@ -89,6 +90,9 @@ async def ask(request):
             known = {f['id'] for f in router.store.list_files()}
             if missing := [f for f in files if f not in known]:
                 raise Bad(f'unknown file id {missing[0]!r}')
+        chat = chat_options(body)
+        if body.get('retry_of') is not None:
+            return retry(router, body, chat)
         engine = pick_engine(router, body['engine']) if body.get('engine') else USE_ACTIVE
         sandbox = body.get('sandbox_id') if source == 'sandbox' else None
         extras = None
@@ -98,14 +102,100 @@ async def ask(request):
                 raise Bad('sandbox_id must be 8-64 letters, digits, - or _')
             if session_id:
                 raise Bad('sandbox runs take no session_id')
+            if body.get('engines') is not None:
+                raise Bad('sandbox runs take one engine')
             engine, extras = sandbox_extras(router, sandbox, body, engine, list(dict.fromkeys(files)))
+        files = list(dict.fromkeys(files))
+        if body.get('engines') is not None:
+            if body.get('engine'):
+                raise Bad('send engine or engines, not both')
+            engines = pick_engines(router, body['engines'])
+            runs = [mode_engine(router, chat, e) for e in engines]
+        else:
+            runs = [mode_engine(router, chat, engine)]
+        attached = [meta for meta, _ in extras['files']] if extras else router.store.list_files(files) if files else []
+        for e in runs:
+            check_agent(router, chat, e, attached, text)
     except Bad as e:
         return err(str(e), e.status)
     if source == 'chat' and not session_id:
         session_id = uuid.uuid4().hex[:12]
-    qid = router.submit(text, source, session_id=session_id, engine=engine, files=list(dict.fromkeys(files)), sandbox=sandbox,
-                        extras=extras)
-    return web.json_response({'ok': True, 'qid': qid, 'session_id': session_id, **({'sandbox_id': sandbox} if sandbox else {})})
+    if len(runs) == 1:
+        qid = router.submit(text, source, session_id=session_id, engine=runs[0], files=files, sandbox=sandbox,
+                            extras=extras, **chat)
+        return web.json_response({'ok': True, 'qid': qid, 'session_id': session_id,
+                                  **({'sandbox_id': sandbox} if sandbox else {})})
+    # Several answers: one run per engine in a new group; the first is the chosen answer until the user picks another.
+    gid, qids = uuid.uuid4().hex[:10], []
+    for i, e in enumerate(runs):
+        qids.append(router.submit(text, source, session_id=session_id, engine=e, files=files, group_id=gid,
+                                  chosen=i == 0, context_before=qids[0] if qids else None, **chat))
+    return web.json_response({'ok': True, 'qid': qids[0], 'qids': qids, 'group_id': gid, 'session_id': session_id})
+
+
+def chat_options(body: dict) -> dict:
+    """The run's chat variety options (docs/PLAN-speed-evals-chat.md), validated: mode, style and a forced agent."""
+    mode, style, agent = body.get('mode') or 'balanced', body.get('style') or 'default', body.get('agent') or None
+    if mode not in MODES:
+        raise Bad(f'mode must be one of {", ".join(MODES)}')
+    if style not in STYLES:
+        raise Bad(f'style must be one of {", ".join(STYLES)}')
+    if agent is not None:
+        if not isinstance(agent, str):
+            raise Bad('agent must be an agent name')
+        agent = agent.strip().lstrip('@')
+    return {'mode': mode, 'style': style, 'agent': agent}
+
+
+def pick_engines(router, names) -> list:
+    if not isinstance(names, list) or not 2 <= len(names) <= GROUP_MAX or len(set(map(str, names))) != len(names):
+        raise Bad(f'engines must list 2 to {GROUP_MAX} different engines')
+    return [pick_engine(router, n) for n in names]
+
+
+def mode_engine(router, chat: dict, engine):
+    """The engine a run in this mode uses. Deep with none named: USE_ACTIVE, so the run picks the strongest healthy
+    engine itself and knows it may steer steps (an engine the user named stays pinned). Research: an engine that can
+    search the web, 400 when there is none (a named engine must be one)."""
+    if chat['mode'] == 'research':
+        e = router.web_engine() if engine is USE_ACTIVE else engine
+        if e is None or not e.supports_web:
+            raise Bad('Research mode needs an engine that can search the web, and none is available.'
+                      if engine is USE_ACTIVE else f'Research mode needs web search, which {e.label if e else "keyless mode"} '
+                      'does not have.')
+        return e
+    return engine
+
+
+def check_agent(router, chat: dict, engine, attached: list[dict], text: str):
+    """@agent must be an agent this run could route to (guards are not agents you can pick): file agents need a file
+    attached, @sql a table among them (as the run itself decides, see table_files)."""
+    agent = chat['agent']
+    if agent is None:
+        return
+    if engine is USE_ACTIVE:
+        engine = router.deep_engine() if chat['mode'] == 'deep' else router.engine
+    offered = router.offered(engine, with_files=bool(attached), tables=bool(table_files(attached, engine, text)))
+    if agent not in offered:
+        raise Bad(f'@{agent} is not an agent you can pick here')
+
+
+def retry(router, body: dict, chat: dict):
+    """Another answer to an earlier run's question, on `engine` (the active one if none), added to that run's group."""
+    qid = body['retry_of']
+    if type(qid) is not int:
+        raise Bad('retry_of must be a qid')
+    if body.get('engines') is not None or body.get('source') == 'sandbox':
+        raise Bad('retry_of takes one engine and no sandbox')
+    rec = router.get_run(qid)
+    if rec is None or qid in router.sandbox or qid >= SANDBOX_QID0:
+        raise Bad(f'no run {qid}', 404)
+    engine = mode_engine(router, chat, pick_engine(router, body['engine']) if body.get('engine') else USE_ACTIVE)
+    check_agent(router, chat, engine, router.store.list_files(rec['files']) if rec.get('files') else [], rec['text'])
+    gid, first = router.join_group(qid)
+    new = router.submit(rec['text'], rec['source'], session_id=rec.get('session_id'), engine=engine,
+                        files=rec.get('files') or [], group_id=gid, chosen=False, context_before=first, **chat)
+    return web.json_response({'ok': True, 'qid': new, 'qids': [new], 'group_id': gid, 'session_id': rec.get('session_id')})
 
 
 def sandbox_extras(router, sid: str, body: dict, engine, files: list[str]):
@@ -236,6 +326,42 @@ async def get_run(request):
     except ValueError:
         rec = None
     return web.json_response(rec) if rec else err('no such run', 404)
+
+
+async def choose_run(request):
+    """Several answers: this run becomes its group's chosen answer (the one follow-ups build on), its siblings not."""
+    try:
+        qid = int(request.match_info['qid'])
+    except ValueError:
+        return err('bad qid', 404)
+    status, gid = request.app[ROUTER].choose(qid)
+    if status == 'unknown':
+        return err(f'no run {qid}', 404)
+    if status == 'no group':
+        return err(f'run {qid} is not one of several answers', 409)
+    return web.json_response({'ok': True, 'group_id': gid, 'chosen': qid})
+
+
+STAGES = (('plan', 'plan_ms'), ('route', 'route_ms'), ('agents', 'agents_ms'), ('merge', 'merge_ms'),
+          ('first_token', 'first_token_ms'))
+MAX_TIMED = 1000
+
+
+async def timings_summary(request):
+    """GET /api/timings?engine=&limit=: p50/p90 per stage over the newest finished runs that stored timings."""
+    q = request.query
+    try:
+        limit = int_param(q, 'limit', 200, 1, MAX_TIMED)
+    except Bad as e:
+        return err(str(e), e.status)
+    engine = q.get('engine') or None
+    runs = request.app[ROUTER].store.timed_runs(engine, limit)
+    stages = []
+    for stage, key in (*STAGES, ('total', None)):
+        vals = sorted(v for r in runs if (v := r.get('total_ms') if key is None else (r.get('timings') or {}).get(key))
+                      is not None)
+        stages.append({'stage': stage, 'p50': pct(vals, 0.5), 'p90': pct(vals, 0.9), 'n': len(vals)})
+    return web.json_response({'engine': engine, 'runs': len(runs), 'stages': stages})
 
 
 # ---------- sessions ----------
@@ -408,33 +534,56 @@ async def get_compare(request):
 # ---------- evals ----------
 
 async def run_eval(request):
+    """RunEvalBody: engine, examples, split (dev/holdout/all), tags (any of), repeat (1-5), judge (engine name, auto or
+    null). A judge that is the engine under test is swapped for another available engine when there is one."""
     body, router = await read_json(request), request.app[ROUTER]
-    examples = body.get('examples')
+    examples, split, tags = body.get('examples'), body.get('split', 'all'), body.get('tags')
+    repeat, judge = body.get('repeat', 1), body.get('judge')
     try:
         engine = pick_engine(router, body['engine']) if body.get('engine') else router.engine
         if examples is not None and not isinstance(examples, bool):
             raise Bad('examples must be true or false')
+        if split not in evals_mod.SPLITS:
+            raise Bad('split must be dev, holdout or all')
+        if tags is not None and not (isinstance(tags, list) and len(tags) <= 50 and all(isinstance(t, str) and t for t in tags)):
+            raise Bad('tags must be a list of tag names')
+        if type(repeat) is not int or not 1 <= repeat <= evals_mod.MAX_REPEAT:
+            raise Bad(f'repeat must be a whole number from 1 to {evals_mod.MAX_REPEAT}')
+        if judge is not None and not (isinstance(judge, str) and (judge == 'auto' or judge in router.engines)):
+            raise Bad(f'unknown judge engine {judge!r}')
+        try:
+            judge_engine, _ = judge_mod.pick(router.engines, judge, engine)
+        except judge_mod.JudgeError as e:
+            raise Bad(str(e), 409)
+        try:
+            cases = evals_mod.select(evals_mod.load_cases(), split, tags)
+        except evals_mod.CaseError as e:
+            raise Bad(f'bad eval case: {e}', 500)
+        if not cases:
+            raise Bad('no cases match that split and those tags')
     except Bad as e:
         return err(str(e), e.status)
-    return web.json_response({'eval_id': evals_mod.start(router, engine, engine.name if engine else 'none', examples=examples)})
+    eid = evals_mod.start(router, engine, engine.name if engine else 'none', cases, examples, split=split, tags=tags or None,
+                          repeat=repeat, judge=judge_engine)
+    return web.json_response({'eval_id': eid})
 
 
 async def compare_evals(request):
     store, q = request.app[ROUTER].store, request.query
     if not q.get('a') or not q.get('b'):
         return err('a and b must be eval ids')
-    a, b = store.get_eval(q['a']), store.get_eval(q['b'])
+    a, b = evals_mod.get(store, q['a']), evals_mod.get(store, q['b'])
     if a is None or b is None:
         return err(f"no such eval {q['a'] if a is None else q['b']}", 404)
     return web.json_response(evals_mod.compare(a, b))
 
 
 async def list_evals(request):
-    return web.json_response({'evals': request.app[ROUTER].store.list_evals()})
+    return web.json_response({'evals': evals_mod.listed(request.app[ROUTER].store)})
 
 
 async def get_eval(request):
-    e = request.app[ROUTER].store.get_eval(request.match_info['id'])
+    e = evals_mod.get(request.app[ROUTER].store, request.match_info['id'])
     return web.json_response(e) if e else err('no such eval', 404)
 
 
@@ -570,7 +719,7 @@ async def control(request):
     if 'route_examples' in body:
         if not isinstance(body['route_examples'], bool):
             return web.json_response({'error': 'route_examples must be true or false'}, status=400)
-        router.route_examples = body['route_examples']
+        router.set_route_examples(body['route_examples'])  # also clears the route cache
         router.bus.emit('config', **router.config())
     if 'engine_order' in body:
         auto = router.engines.get('auto')
@@ -711,6 +860,7 @@ def create_app(router_factory=None) -> web.Application:
         web.get('/', index), web.get('/events', events), web.post('/ask', ask), web.post('/control', control),
         web.get('/api/config', config),
         web.get('/api/runs', list_runs), web.get('/api/runs/{qid}', get_run), web.post('/api/runs/{qid}/cancel', cancel_run),
+        web.post('/api/runs/{qid}/choose', choose_run), web.get('/api/timings', timings_summary),
         web.get('/api/sessions', list_sessions), web.get('/api/sessions/{id}', get_session),
         web.delete('/api/sessions/{id}', delete_session), web.delete('/api/sandbox/{id}', clear_sandbox),
         web.post('/api/sandbox/{id}/files', upload_sandbox_file), web.delete('/api/sandbox/{id}/files/{fid}', delete_sandbox_file),

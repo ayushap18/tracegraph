@@ -60,7 +60,7 @@ async def test_label_right_copies_the_decision_from_the_run(client):
                                                                  'correct': 'math', 'note': '  looks good '}))
     assert set(label) == {'id', 'qid', 'tid', 'text', 'picked', 'correct', 'verdict', 'confidence', 'margin', 'note', 'at', 'promoted'}
     assert label['text'] == 'weather in Paris' and label['picked'] == 'weather' and label['correct'] == 'weather'  # right: correct = picked
-    assert label['confidence'] == pytest.approx(0.9) and label['margin'] == pytest.approx(0.9 - 0.1 / 6, abs=1e-4)
+    assert label['confidence'] == pytest.approx(0.9) and label['margin'] == pytest.approx(0.9 - 0.1 / (len(client.router.agents) - 1), abs=1e-4)
     assert label['note'] == 'looks good' and label['promoted'] is None and label['verdict'] == 'right'
 
 

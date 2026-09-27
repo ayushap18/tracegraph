@@ -12,7 +12,7 @@ FIELDS = {
     'delta': {'type', 'qid', 'tid', 'text'},
     'answered': {'type', 'qid', 'tid', 'agent', 'agent_ms', 'answer', 'ok', 'source', 'engine'},
     'merged': {'type', 'qid', 'answer', 'engine', 'ms'},
-    'done': {'type', 'qid', 'total_ms', 'stats', 'status', 'tokens'},  # v4 adds status and tokens
+    'done': {'type', 'qid', 'total_ms', 'stats', 'status', 'tokens', 'timings'},  # v4 adds status and tokens, speed plan timings
     'error': {'type', 'qid', 'tid', 'message'},
 }
 STATS = {'queries', 'subtasks', 'errors', 'jev_input_tokens', 'claude_input_tokens', 'claude_output_tokens', 'by_agent'}
@@ -94,7 +94,8 @@ async def test_two_subtask_event_sequence():
 
     rec = router.history[-1]
     assert set(rec) == {'qid', 'text', 'source', 'at', 'plan', 'tasks', 'merged', 'total_ms', 'error',
-                        'status', 'engine', 'session_id', 'compare_id', 'files', 'tokens'}  # v4 fields
+                        'status', 'engine', 'session_id', 'compare_id', 'files', 'tokens',  # v4 fields
+                        'mode', 'style', 'agent', 'group_id', 'chosen', 'timings'}  # speed plan and chat variety
     assert rec['status'] == 'done' and done['status'] == 'done' and done['tokens'] == rec['tokens'] == {'jev_in': 300, 'llm_in': 0, 'llm_out': 0}
     assert rec['error'] is None and not router.inflight
     assert rec['plan']['planner'] == 'heuristic' and len(rec['tasks']) == 2
@@ -177,7 +178,8 @@ async def test_pipeline_with_llm_engine():
     engine = eng(claude)
     registry = agents.build(None, engine)
     registry['weather'] = fake_registry()['weather']
-    router = Router(FakeJev(route_for=by_keyword), engine=engine, registry=registry)
+    # Jev unsure the query holds two requests: the LLM plans it (a sure split would skip the LLM planner, test_speed.py)
+    router = Router(FakeJev(route_for=by_keyword, multi=0.6), engine=engine, registry=registry)
     assert 'research' in router.agents and 'research' in router.stats['by_agent']
     events = await run(router, 'weather in Paris and latest news on Mars rovers')
     check_fields(events)

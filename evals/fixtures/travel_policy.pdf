@@ -1,0 +1,32 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 862 >>
+stream
+BT /F1 10 Tf 14 TL 60 740 Td (Acme Corp travel policy, effective 1 April 2025) Tj T* () Tj T* (1. Flights: economy class for flights under 6 hours. Business class is allowed for flights of 6 hours or more.) Tj T* (2. Hotels: the limit is 180 euros per night in Europe and 220 US dollars per night in North America.) Tj T* (3. Meals: the daily meal allowance is 55 euros. Alcohol is not reimbursed.) Tj T* (4. Claims: file expense claims within 30 days of the end of the trip.) Tj T* (   Receipts are required for any single item over 25 euros.) Tj T* (5. Approval: a line manager must approve every trip at least 14 days before departure.) Tj T* (6. Cars: rental cars need approval from the finance team.) Tj T* (   Travel in a personal car is paid at 0.30 euros per kilometre.) Tj T* (7. Contact: questions about this policy go to travel@acme.example.) Tj T* ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000001154 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1224
+%%EOF

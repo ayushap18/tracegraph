@@ -157,7 +157,7 @@ TypeScript shapes: end of `web/src/protocol.ts` (`ChatMode`, `AnswerStyle`, `Run
 - `files`: fixture names under `evals/fixtures/` attached to the case.
 - `judge`: rubric text for open-ended answers, scored 1–5 on correct, complete, grounded and concise by the judge
   engine; the case passes when the mean is at least `judge_min` (default 3.5).
-- `max_ms`: latency budget; over budget is reported, and fails the case only when `strict_ms` is true.
+- `max_ms`: latency budget; over budget is reported, and fails the case only when `strict_ms` is true and the run is keyless (the budgets are keyless ones; an engine run only reports it).
 - `paraphrases`: extra phrasings, each run and scored as its own attempt with the same expectations.
 
 ## Order

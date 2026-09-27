@@ -460,7 +460,7 @@ async def test_follow_up_turn_still_gets_the_safety_check():
 ])
 async def test_a_correct_llm_rewrite_is_not_run_twice(query, steps):
     engine = ScriptEngine(plan={'subtasks': [{'text': t, 'depends_on': d} for t, d in steps]})
-    p = await plan(query, FakeJev(), engine)
+    p = await plan(query, FakeJev(), engine, mode='deep')  # deep: the LLM plans even a split the heuristic is sure of
     assert p['subtasks'] == [t for t, _ in steps]
 
 

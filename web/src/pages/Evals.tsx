@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { cancelEval, errorText as errText, getEval, listEvals, runEval } from '../api'
+import { cancelEval, errorText as errText, getEval, listEvals, runEvalWith } from '../api'
 import { Badge, Button, Card, EmptyState, ProgressBar, Skeleton, StatusBadge, navigate, useToast } from '../ui'
 import { useStore } from '../store'
 import { EngineIcon, Icon } from '../icons'
@@ -13,6 +13,8 @@ import { Sparkline } from '../components/Viz'
 import { ms } from '../lib'
 import EvalCompare from './evals/EvalCompare'
 import { CELL, CHIP, HEAD, LINK_ICON, accTone, compareHref, parseCompare, pctOf, when } from './evals/shared'
+import { DEFAULT_OPTS, RunOptions, type RunOpts } from './evals/RunOptions'
+import { CaseExtras, CaseFlags, CaseTime, TagScorecard, extrasLabel, hasExtras, tagScores } from './evals/CaseExtras'
 
 // Eval suite: run the cases in evals/cases.jsonl through the real pipeline, watch progress live over SSE,
 // and compare accuracy across runs. `#/evals/:id` drills into one run's cases; `#/evals/<a>...<b>` compares two.
@@ -44,6 +46,7 @@ function EvalList() {
   const [starting, setStarting] = useState(false)
   const [progress, setProgress] = useState<Progress | null>(null)
   const [examples, setExamples] = useState<ExamplesMode>('current')
+  const [opts, setOpts] = useState<RunOpts>(DEFAULT_OPTS)
   const [picked, setPicked] = useState<string[]>([]) // up to two eval ids to compare
   const pick = (id: string) => setPicked(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id].slice(-2))
 
@@ -77,7 +80,11 @@ function EvalList() {
   const start = async () => {
     setStarting(true)
     try {
-      const res = await runEval(engine || undefined, examples === 'current' ? undefined : examples === 'on')
+      const res = await runEvalWith({
+        ...(engine ? { engine } : {}), ...(examples === 'current' ? {} : { examples: examples === 'on' }),
+        split: opts.split, repeat: opts.repeat, judge: opts.judge === 'none' ? null : opts.judge,
+        ...(opts.tags.length ? { tags: opts.tags } : {}),
+      })
       setProgress(p => p?.eval_id === res.eval_id ? p : { eval_id: res.eval_id, done: 0, total: 0, passed: 0 })
       void load()
     } catch (err) {
@@ -102,13 +109,15 @@ function EvalList() {
   const prev = sorted.filter(e => e.status === 'done')[1]
   const delta = latest && prev ? latest.accuracy - prev.accuracy : null
   const best = trend.length ? Math.max(...trend) : null
+  // Tags seen in earlier runs feed the tag filter; the server has no separate list of them.
+  const knownTags = useMemo(() => [...new Set((evals ?? []).flatMap(e => [...Object.keys(e.by_tag ?? {}), ...(e.tags ?? [])]))].sort(), [evals])
 
   return (
     <PageBody>
       <section aria-label="Run an eval" className="flex min-w-0 flex-col gap-4 rounded-lg border border-border bg-surface p-4 sm:p-5">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between md:gap-6">
           <p className="m-0 max-w-[70ch] text-[13px] leading-relaxed text-muted-foreground">
-            Runs every case in <code className="rounded-sm bg-subtle px-1 font-mono text-[12px] text-foreground">evals/cases.jsonl</code> through the real pipeline and scores agents, outcomes and answers.
+            Runs the cases in <code className="rounded-sm bg-subtle px-1 font-mono text-[12px] text-foreground">evals/cases.jsonl</code> through the real pipeline and scores agents, outcomes, answers, latency budgets and, with a judge, open-ended answers.
           </p>
           <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
             <label className="sr-only" htmlFor="ev-engine">Engine</label>
@@ -137,6 +146,7 @@ function EvalList() {
               : <Button icon="play" onClick={() => void start()} disabled={starting}>{starting ? 'Starting…' : 'Run eval'}</Button>}
           </div>
         </div>
+        <RunOptions opts={opts} onChange={setOpts} knownTags={knownTags} engines={store.engines} engine={engine} disabled={!!progress} />
         {progress && (
           <div aria-live="polite" className="flex flex-col gap-2 rounded-md bg-subtle px-3 py-2.5">
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[13px]">
@@ -193,6 +203,7 @@ function EvalList() {
                       <TableHead className={HEAD}>Engine</TableHead>
                       <TableHead className={HEAD}>Status</TableHead>
                       <TableHead className={cn(HEAD, 'text-right')}>Passed</TableHead>
+                      <TableHead className={cn(HEAD, 'hidden text-right lg:table-cell')}>p50 / p95</TableHead>
                       <TableHead className={cn(HEAD, 'text-right')}>Accuracy</TableHead>
                       <TableHead className={cn(HEAD, 'text-right')}>Silent wrong</TableHead>
                       <TableHead className={cn(HEAD, 'w-10')}><span className="sr-only">Open</span></TableHead>
@@ -206,10 +217,13 @@ function EvalList() {
                         </TableCell>
                         <TableCell className={cn(CELL, 'tabular-nums text-foreground')}>{when(e.at)}</TableCell>
                         <TableCell className={CELL}>
-                          <span className="flex items-center gap-2"><EngineBadge name={e.engine ?? 'none'} label={e.engine ?? 'keyless'} />{e.examples && <ExamplesBadge />}</span>
+                          <span className="flex flex-wrap items-center gap-2"><EngineBadge name={e.engine ?? 'none'} label={e.engine ?? 'keyless'} />{e.examples && <ExamplesBadge />}<RunBadges e={e} /></span>
                         </TableCell>
                         <TableCell className={CELL}><StatusBadge status={e.status} /></TableCell>
-                        <TableCell className={cn(CELL, 'text-right tabular-nums')}>{e.passed}/{e.total}</TableCell>
+                        <TableCell className={cn(CELL, 'text-right tabular-nums')}>
+                          <span className="flex flex-col items-end">{e.passed}/{e.total}{!!e.flaky && <span className="text-xs font-medium text-warn">{e.flaky} flaky</span>}</span>
+                        </TableCell>
+                        <TableCell className={cn(CELL, 'hidden text-right tabular-nums text-muted-foreground lg:table-cell')}>{latencyPair(e)}</TableCell>
                         <TableCell className={cn(CELL, 'text-right')}><AccBar v={e.accuracy} /></TableCell>
                         <TableCell className={cn(CELL, 'text-right tabular-nums', e.silent_wrong ? 'font-medium text-destructive' : 'text-muted-foreground')}>{e.silent_wrong}</TableCell>
                         <TableCell className={cn(CELL, 'text-right')}>
@@ -229,16 +243,18 @@ function EvalList() {
                     <a href={`#/evals/${e.eval_id}`} aria-label={`Open eval ${e.eval_id}`}
                       className="flex min-w-0 flex-1 flex-col gap-2 py-3 pr-4 pl-3 outline-none transition-colors hover:bg-subtle focus-visible:bg-subtle">
                       <span className="flex items-center justify-between gap-3">
-                        <span className="flex min-w-0 items-center gap-2"><EngineBadge name={e.engine ?? 'none'} label={e.engine ?? 'keyless'} />{e.examples && <ExamplesBadge />}</span>
+                        <span className="flex min-w-0 flex-wrap items-center gap-2"><EngineBadge name={e.engine ?? 'none'} label={e.engine ?? 'keyless'} />{e.examples && <ExamplesBadge />}<RunBadges e={e} /></span>
                         <StatusBadge status={e.status} />
                       </span>
                       <span className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[13px]">
                         <span className="tabular-nums text-muted-foreground">{when(e.at)}</span>
                         <AccBar v={e.accuracy} />
                       </span>
-                      <span className="flex items-center gap-4 text-xs text-muted-foreground">
+                      <span className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
                         <span className="tabular-nums">{e.passed}/{e.total} passed</span>
                         <span className={cn('tabular-nums', e.silent_wrong > 0 && 'font-medium text-destructive')}>{e.silent_wrong} silent wrong</span>
+                        {!!e.flaky && <span className="tabular-nums font-medium text-warn">{e.flaky} flaky</span>}
+                        {e.p50_ms != null && <span className="tabular-nums">{latencyPair(e)}</span>}
                       </span>
                     </a>
                   </li>
@@ -248,6 +264,21 @@ function EvalList() {
           )}
       </Card>
     </PageBody>
+  )
+}
+
+const fmtS = (v: number | null | undefined) => (v == null ? '-' : v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
+const latencyPair = (e: EvalSummary) => (e.p50_ms == null && e.p95_ms == null ? '-' : `${fmtS(e.p50_ms)} / ${fmtS(e.p95_ms)}`)
+
+/** Split, repeat count and judge of one run, shown only when they differ from a plain single pass over all cases. */
+function RunBadges({ e }: { e: EvalSummary }) {
+  return (
+    <>
+      {e.split && e.split !== 'all' && <Badge tone={e.split === 'holdout' ? 'info' : 'neutral'} title={`Split: ${e.split}`}>{e.split}</Badge>}
+      {e.repeat != null && e.repeat > 1 && <Badge title={`Each case ran ${e.repeat} times`}>x{e.repeat}</Badge>}
+      {e.judge && <Badge title={`Open-ended answers judged by ${e.judge}`}>judge {e.judge}</Badge>}
+      {!!e.tags?.length && <Badge title={`Only cases tagged ${e.tags.map(t => '#' + t).join(', ')}`}>{e.tags.length === 1 ? '#' + e.tags[0] : `${e.tags.length} tags`}</Badge>}
+    </>
   )
 }
 
@@ -271,7 +302,7 @@ function AccBar({ v }: { v: number }) {
   )
 }
 
-type PassFilter = 'all' | 'pass' | 'fail'
+type PassFilter = 'all' | 'pass' | 'fail' | 'flaky'
 const ANY_TAG = '__any'
 const USER_TAG = 'user'
 
@@ -303,8 +334,11 @@ function EvalDetailPage({ id }: { id: string }) {
   // "user" (cases promoted from your labels) leads the tag chips.
   const tags = useMemo(() => [...new Set(cases.flatMap(c => c.tags ?? []))].sort((x, y) => Number(y === USER_TAG) - Number(x === USER_TAG) || x.localeCompare(y)), [cases])
   const tagCount = (t: string) => cases.filter(c => c.tags?.includes(t)).length
-  const shown = cases.filter(c => (filter === 'all' || (filter === 'pass') === c.pass) && (!tag || c.tags?.includes(tag)))
+  const shown = cases.filter(c => (filter === 'all' || (filter === 'flaky' ? !!c.flaky : (filter === 'pass') === c.pass)) && (!tag || c.tags?.includes(tag)))
   const failCount = cases.filter(c => !c.pass).length
+  const flakyCount = cases.filter(c => c.flaky).length
+  const scores = useMemo(() => tagScores(data?.by_tag, cases), [data?.by_tag, cases])
+  const overBudget = cases.filter(c => c.over_budget).length
 
   if (!data) {
     return (
@@ -329,10 +363,10 @@ function EvalDetailPage({ id }: { id: string }) {
   const toggles = (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border px-4 py-3 sm:px-5">
       <ToggleGroup type="single" value={filter} onValueChange={v => { if (v) setFilter(v as PassFilter) }} spacing={1} aria-label="Filter by result" className="flex-wrap">
-        {(['all', 'pass', 'fail'] as PassFilter[]).map(f => (
+        {(['all', 'pass', 'fail', ...(flakyCount ? ['flaky'] : [])] as PassFilter[]).map(f => (
           <ToggleGroupItem key={f} value={f} className={CHIP}>
-            {f === 'all' ? 'All' : f === 'pass' ? 'Passed' : 'Failed'}
-            <span className="tabular-nums text-muted-foreground">{f === 'all' ? cases.length : f === 'pass' ? cases.length - failCount : failCount}</span>
+            {f === 'all' ? 'All' : f === 'pass' ? 'Passed' : f === 'fail' ? 'Failed' : 'Flaky'}
+            <span className="tabular-nums text-muted-foreground">{f === 'all' ? cases.length : f === 'pass' ? cases.length - failCount : f === 'fail' ? failCount : flakyCount}</span>
           </ToggleGroupItem>
         ))}
       </ToggleGroup>
@@ -363,8 +397,28 @@ function EvalDetailPage({ id }: { id: string }) {
           <Stat label="Status" value={<span className="inline-flex h-8 items-center"><StatusBadge status={data.status} /></span>} note={`${cases.length} of ${data.total} cases recorded`} />
           <Stat label="Silent wrong" value={data.silent_wrong} tone={data.silent_wrong ? 'bad' : undefined} note="failed, yet every answer said ok" />
         </StatStrip>
+        {(data.split != null || data.repeat != null || data.p50_ms != null || data.judge != null) && (
+          <StatStrip cols={4}>
+            <Stat label="Latency p50 / p95" size="md" value={data.p50_ms == null && data.p95_ms == null ? 'n/a' : `${fmtS(data.p50_ms)} / ${fmtS(data.p95_ms)}`}
+              tone={overBudget ? 'warn' : undefined} note={overBudget ? `${overBudget} case${overBudget === 1 ? '' : 's'} over budget` : 'no case over budget'} />
+            <Stat label="Flaky" value={data.flaky ?? flakyCount} tone={(data.flaky ?? flakyCount) ? 'warn' : undefined}
+              note={(data.repeat ?? 1) > 1 ? `each case ran ${data.repeat} times` : 'ran once, repeat to measure'} />
+            <Stat label="Judge mean" value={data.judge_mean == null ? 'n/a' : data.judge_mean.toFixed(1)}
+              tone={data.judge_errors?.length ? 'bad' : data.judge_mean == null ? undefined : data.judge_mean >= 3.5 ? 'ok' : 'bad'}
+              note={data.judge_errors?.length ? `${data.judge_errors.length} case${data.judge_errors.length === 1 ? '' : 's'} not judged: ${data.judge_errors[0].replace(/^[^:]*:\s*/, '')}`
+                : data.judge ? `of 5, judged by ${data.judge}` : 'no judge for this run'} />
+            <Stat label="Split" size="md" value={data.split === 'dev' ? 'Dev' : data.split === 'holdout' ? 'Holdout' : 'All cases'}
+              note={data.tags?.length ? data.tags.map(t => '#' + t).join(' ') : 'every tag'} />
+          </StatStrip>
+        )}
         {data.status === 'running' && <ProgressBar value={data.total ? cases.length / data.total : 0} label="Eval progress" />}
       </section>
+
+      {Object.keys(scores).length > 0 && (
+        <Card title="By tag" icon="tag" subtitle="Weakest first. Click a tag to show only its cases.">
+          <TagScorecard scores={scores} active={tag} onPick={setTag} />
+        </Card>
+      )}
 
       <Card flush title="Cases" icon="evals" aria-label="Cases">
         {toggles}
@@ -376,7 +430,7 @@ function EvalDetailPage({ id }: { id: string }) {
                 <Table className="table-fixed">
                   <TableHeader>
                     <TableRow className="border-border hover:bg-transparent">
-                      <TableHead className={cn(HEAD, 'w-20')}>Result</TableHead>
+                      <TableHead className={cn(HEAD, 'w-28')}>Result</TableHead>
                       <TableHead className={cn(HEAD, 'w-[24%]')}>Query</TableHead>
                       <TableHead className={cn(HEAD, 'w-[18%]')}>Agents (expected / got)</TableHead>
                       <TableHead className={cn(HEAD, 'w-[20%]')}>Reasons</TableHead>
@@ -386,12 +440,12 @@ function EvalDetailPage({ id }: { id: string }) {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {shown.map(c => <CaseRow key={c.id} c={c} open={open === c.id} onToggle={() => setOpen(open === c.id ? null : c.id)} />)}
+                    {shown.map((c, i) => <CaseRow key={c.id + ':' + i} c={c} open={open === c.id} onToggle={() => setOpen(open === c.id ? null : c.id)} />)}
                   </TableBody>
                 </Table>
               </div>
               <ul className="m-0 flex list-none flex-col divide-y divide-border p-0 md:hidden">
-                {shown.map(c => <CaseCard key={c.id} c={c} open={open === c.id} onToggle={() => setOpen(open === c.id ? null : c.id)} />)}
+                {shown.map((c, i) => <CaseCard key={c.id + ':' + i} c={c} open={open === c.id} onToggle={() => setOpen(open === c.id ? null : c.id)} />)}
               </ul>
             </>
           )}
@@ -423,6 +477,18 @@ function CompareWith({ id }: { id: string }) {
 
 function ResultBadge({ pass }: { pass: boolean }) {
   return <Badge tone={pass ? 'ok' : 'bad'} icon={pass ? 'success' : 'error'}>{pass ? 'pass' : 'fail'}</Badge>
+}
+
+/** Opens the case's extras (turns, judge scores, attempts); it shares the row's open state with the long answer. */
+function ExtrasToggle({ c, open, onToggle }: { c: EvalCase; open: boolean; onToggle: () => void }) {
+  if (!hasExtras(c)) return null
+  return (
+    <button type="button" data-slot="button" aria-expanded={open} onClick={onToggle}
+      className="inline-flex cursor-pointer items-center gap-1 self-start rounded-sm bg-transparent p-0 text-xs font-medium text-primary outline-none hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/35">
+      <Icon name="chevron-down" size={12} className={cn('transition-transform', open && 'rotate-180')} />
+      {open ? 'Hide' : 'Show'} {extrasLabel(c).toLowerCase()}
+    </button>
+  )
 }
 
 function Tags({ tags }: { tags: string[] | undefined }) {
@@ -478,21 +544,32 @@ function RunLink({ qid }: { qid: number | null }) {
 }
 
 function CaseRow({ c, open, onToggle }: { c: EvalCase; open: boolean; onToggle: () => void }) {
+  const tone = c.pass ? 'hover:bg-subtle/60' : 'bg-destructive/[0.04] hover:bg-destructive/[0.07]'
   return (
-    <TableRow className={cn('border-border align-top', c.pass ? 'hover:bg-subtle/60' : 'bg-destructive/[0.04] hover:bg-destructive/[0.07]')}>
-      <TableCell className={cn(CELL, 'align-top')}><ResultBadge pass={c.pass} /></TableCell>
-      <TableCell className={cn(CELL, 'align-top whitespace-normal')}>
-        <div className="flex flex-col gap-1">
-          <span className="text-[13px] font-medium leading-snug text-foreground [overflow-wrap:anywhere]">{c.query}</span>
-          <Tags tags={c.tags} />
-        </div>
-      </TableCell>
-      <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseAgents c={c} /></TableCell>
-      <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseReasons reasons={c.reasons} /></TableCell>
-      <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseAnswer answer={c.answer ?? ''} open={open} onToggle={onToggle} /></TableCell>
-      <TableCell className={cn(CELL, 'align-top text-right text-[13px] tabular-nums text-muted-foreground')}>{ms(c.ms)}</TableCell>
-      <TableCell className={cn(CELL, 'align-top text-right')}><RunLink qid={c.qid} /></TableCell>
-    </TableRow>
+    <>
+      <TableRow className={cn('border-border align-top', tone, open && hasExtras(c) && 'border-b-0')}>
+        <TableCell className={cn(CELL, 'align-top whitespace-normal')}><span className="flex flex-col items-start gap-1"><ResultBadge pass={c.pass} /><CaseFlags c={c} /></span></TableCell>
+        <TableCell className={cn(CELL, 'align-top whitespace-normal')}>
+          <div className="flex flex-col gap-1">
+            <span className="text-[13px] font-medium leading-snug text-foreground [overflow-wrap:anywhere]">{c.query}</span>
+            <Tags tags={c.tags} />
+            <ExtrasToggle c={c} open={open} onToggle={onToggle} />
+          </div>
+        </TableCell>
+        <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseAgents c={c} /></TableCell>
+        <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseReasons reasons={c.reasons} /></TableCell>
+        <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseAnswer answer={c.answer ?? ''} open={open} onToggle={onToggle} /></TableCell>
+        <TableCell className={cn(CELL, 'align-top text-right text-[13px] tabular-nums text-muted-foreground')}><CaseTime c={c} /></TableCell>
+        <TableCell className={cn(CELL, 'align-top text-right')}><RunLink qid={c.qid} /></TableCell>
+      </TableRow>
+      {open && hasExtras(c) && (
+        <TableRow className={cn('border-border hover:bg-transparent', !c.pass && 'bg-destructive/[0.04] hover:bg-destructive/[0.04]')}>
+          <TableCell colSpan={7} className={cn(CELL, 'whitespace-normal pt-0 pb-4')}>
+            <div className="rounded-md border border-border bg-surface p-3 sm:p-4"><CaseExtras c={c} /></div>
+          </TableCell>
+        </TableRow>
+      )}
+    </>
   )
 }
 
@@ -509,6 +586,7 @@ function CaseCard({ c, open, onToggle }: { c: EvalCase; open: boolean; onToggle:
           <RunLink qid={c.qid} />
         </span>
       </div>
+      {(c.flaky || c.over_budget || c.judge || c.judge_error || c.split === 'holdout') && <span className="flex flex-wrap gap-1"><CaseFlags c={c} /></span>}
       <dl className="m-0 grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-[13px]">
         <dt className="text-xs text-muted-foreground">Agents</dt>
         <dd className="m-0 min-w-0"><CaseAgents c={c} /></dd>
@@ -517,8 +595,10 @@ function CaseCard({ c, open, onToggle }: { c: EvalCase; open: boolean; onToggle:
         <dt className="text-xs text-muted-foreground">Answer</dt>
         <dd className="m-0 min-w-0"><CaseAnswer answer={c.answer ?? ''} open={open} onToggle={onToggle} /></dd>
         <dt className="text-xs text-muted-foreground">Time</dt>
-        <dd className="m-0 tabular-nums text-muted-foreground">{ms(c.ms)}</dd>
+        <dd className="m-0 tabular-nums text-muted-foreground">{ms(c.ms)}{c.max_ms != null && <span className={cn('ml-1', c.over_budget && 'font-medium text-warn')}>(budget {ms(c.max_ms)})</span>}</dd>
       </dl>
+      <ExtrasToggle c={c} open={open} onToggle={onToggle} />
+      {open && hasExtras(c) && <div className="rounded-md border border-border bg-surface p-3"><CaseExtras c={c} /></div>}
     </li>
   )
 }

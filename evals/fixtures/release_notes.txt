@@ -1,0 +1,20 @@
+Nimbus Notes release notes
+
+Version 4.2.0, released 3 June 2025
+- New: offline mode for the mobile apps. Notes sync when you reconnect.
+- New: export any notebook to Markdown or PDF.
+- Fixed: search missed notes that had an emoji in the title.
+- Changed: the free plan now holds 500 notes (it was 200).
+- Removed: the Windows 7 desktop app is no longer supported.
+
+Version 4.1.3, released 12 May 2025
+- Fixed: a crash when attaching images larger than 20 MB.
+- Fixed: dark mode colours on the settings page.
+
+Version 4.1.0, released 28 April 2025
+- New: shared notebooks with up to 10 collaborators.
+- Changed: the minimum iOS version is now iOS 16.
+
+Known issues
+- Offline mode does not sync attachments larger than 50 MB.
+- Shared notebooks cannot be exported to PDF yet.

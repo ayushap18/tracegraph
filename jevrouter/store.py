@@ -30,8 +30,15 @@ CREATE TABLE IF NOT EXISTS labels(id TEXT PRIMARY KEY, qid INTEGER, tid TEXT, te
                                   verdict TEXT, confidence REAL, margin REAL, note TEXT, at REAL, promoted TEXT);
 CREATE UNIQUE INDEX IF NOT EXISTS labels_run_task ON labels(qid, tid);
 """
-# Columns added after a table first shipped: (table, column, type). Older databases get them on open.
-MIGRATIONS = [('evals', 'examples', 'INTEGER')]
+# Columns added after a table first shipped: (table, column, type). Older databases get them on open. The runs columns
+# (docs/PLAN-speed-evals-chat.md) copy fields of the record JSON that queries filter on: an answer group, whether the
+# run is its group's chosen answer (NULL: not in a group), and the stage timings.
+MIGRATIONS = [('evals', 'examples', 'INTEGER'), ('runs', 'group_id', 'TEXT'), ('runs', 'chosen', 'INTEGER'),
+              ('runs', 'timings', 'TEXT')]
+RUN_COLS = ('qid', 'session_id', 'compare_id', 'source', 'text', 'at', 'status', 'engine', 'total_ms', 'record', 'group_id',
+            'chosen', 'timings')
+# Created after the migrations, since an older database only has the column once they have run.
+INDEXES = 'CREATE INDEX IF NOT EXISTS runs_group ON runs(group_id);'
 LABEL_COLS = ('id', 'qid', 'tid', 'text', 'picked', 'correct', 'verdict', 'confidence', 'margin', 'note', 'at', 'promoted')
 EVAL_COLS = ('id', 'at', 'engine', 'status', 'done', 'passed', 'total', 'accuracy', 'silent_wrong', 'cases', 'examples')
 
@@ -53,6 +60,7 @@ class Store:
         for table, col, kind in MIGRATIONS:
             if col not in {r['name'] for r in self.q(f'PRAGMA table_info({table})')}:
                 self.x(f'ALTER TABLE {table} ADD COLUMN {col} {kind}')
+        self.db.executescript(INDEXES)
         # A run still marked running was cut off by a restart; it will never finish now.
         for r in self.q("SELECT qid, record FROM runs WHERE status = 'running'"):
             rec = {**json.loads(r['record']), 'status': 'error', 'error': 'interrupted by a server restart'}
@@ -76,9 +84,12 @@ class Store:
         return self.q('SELECT COALESCE(MAX(qid), 0) AS m FROM runs')[0]['m']
 
     def save_run(self, rec: dict):
-        self.x('INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?,?,?)', rec['qid'], rec.get('session_id'),
-               rec.get('compare_id'), rec['source'], rec['text'], rec['at'], rec.get('status'), rec.get('engine'),
-               rec.get('total_ms'), json.dumps(rec))
+        group = rec.get('group_id')
+        timings = rec.get('timings')
+        self.x(f'INSERT OR REPLACE INTO runs ({",".join(RUN_COLS)}) VALUES ({",".join("?" * len(RUN_COLS))})', rec['qid'],
+               rec.get('session_id'), rec.get('compare_id'), rec['source'], rec['text'], rec['at'], rec.get('status'),
+               rec.get('engine'), rec.get('total_ms'), json.dumps(rec), group,
+               int(bool(rec.get('chosen', True))) if group else None, json.dumps(timings) if timings else None)
 
     def get_run(self, qid: int) -> dict | None:
         rows = self.q('SELECT record FROM runs WHERE qid = ?', qid)
@@ -115,15 +126,31 @@ class Store:
         assert col in ('session_id', 'compare_id')
         return [json.loads(r['record']) for r in self.q(f'SELECT record FROM runs WHERE {col} = ? ORDER BY qid', value)]
 
-    def turns(self, session_id: str, before_qid: int, n: int = 3) -> list[dict]:
-        """The last n finished turns of a session before this run, oldest first: [{query, answer}]."""
+    def turns(self, session_id: str, before_qid: int, n: int = 3, group_id: str | None = None) -> list[dict]:
+        """The last n finished turns of a session before this run, oldest first: [{query, answer}]. Of an answer group
+        only the chosen run counts, and a run in group_id never sees its own group (the other answers to its question)."""
         rows = self.q("SELECT record FROM runs WHERE session_id = ? AND qid < ? AND status != 'running' "
-                      'ORDER BY qid DESC LIMIT ?', session_id, before_qid, n)
+                      'AND (chosen IS NULL OR chosen != 0) AND (group_id IS NULL OR group_id != ?) '
+                      'ORDER BY qid DESC LIMIT ?', session_id, before_qid, group_id or '', n)
         out = []
         for r in reversed(rows):
             rec = json.loads(r['record'])
             out.append({'query': rec['text'], 'answer': (rec.get('merged') or {}).get('answer') or rec.get('error') or ''})
         return out
+
+    def group_runs(self, group_id: str) -> list[dict]:
+        return [json.loads(r['record']) for r in self.q('SELECT record FROM runs WHERE group_id = ? ORDER BY qid', group_id)]
+
+    def timed_runs(self, engine: str | None = None, limit: int = 200) -> list[dict]:
+        """The newest finished runs that stored stage timings, newest first; engine 'none' means keyless runs."""
+        where, args = ["timings IS NOT NULL AND status = 'done'"], []
+        if engine == 'none':
+            where.append('engine IS NULL')
+        elif engine:
+            where.append('engine = ?')
+            args.append(engine)
+        return [json.loads(r['record']) for r in
+                self.q(f'SELECT record FROM runs WHERE {" AND ".join(where)} ORDER BY qid DESC LIMIT ?', *args, int(limit))]
 
     def counts(self) -> dict:
         return {t: self.q(f'SELECT COUNT(*) AS n FROM {t}')[0]['n'] for t in ('runs', 'sessions', 'agents', 'files', 'evals', 'labels')}

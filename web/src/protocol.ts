@@ -245,6 +245,7 @@ export interface TagScore { passed: number; total: number }
 export interface EvalSummaryExtra {
   split?: EvalSplit; repeat?: number; judge?: string | null; tags?: string[] | null
   by_tag?: Record<string, TagScore>; p50_ms?: number | null; p95_ms?: number | null; flaky?: number; judge_mean?: number | null
+  judge_errors?: string[]  // "case id: why" for every rubric case the judge failed to score (those cases fail)
 }
 export interface EvalTurnResult { query: string; pass: boolean; reasons: string[]; answer: string; agents: string[]; ms: number; qid: number | null }
 export interface JudgeScore { correct: number; complete: number; grounded: number; concise: number; mean: number; note: string; engine: string }
@@ -252,6 +253,8 @@ export interface JudgeScore { correct: number; complete: number; grounded: numbe
 export interface EvalCaseExtra {
   kind?: 'single' | 'multi_turn' | 'file' | 'judge'; split?: 'dev' | 'holdout'
   turns?: EvalTurnResult[] // multi-turn cases: one per turn
-  attempts?: boolean[]     // repeat > 1: pass/fail per attempt; flaky when they differ
-  flaky?: boolean; judge?: JudgeScore | null; max_ms?: number | null; over_budget?: boolean
+  attempts?: boolean[]     // repeat > 1: pass/fail per attempt (every phrasing, run after run)
+  flaky?: boolean          // the repeats of one phrasing disagree (a paraphrase that always fails is not flaky)
+  judge?: JudgeScore | null; judge_error?: string // judge_error: the judge failed, so the rubric wasn't checked
+  max_ms?: number | null; over_budget?: boolean
 }

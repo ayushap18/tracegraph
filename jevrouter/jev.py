@@ -7,12 +7,17 @@ from .config import BLOCK_AT, EXAMPLE_CHARS, MAX_EXAMPLES, MAX_NOT, MIN_CLEAR, M
 
 
 UNSAFE = 'The query asks for help with something harmful, illegal, sexual, or hateful.'
+# A5 (docs/PLAN-speed-evals-chat.md): how much a good answer takes, so easy steps can go to a fast engine at low effort
+# and hard ones to the strongest at high effort.
+HARD = ('How much reasoning, expertise or writing does a good answer to this request need? A greeting, a lookup or a '
+        'one-line fact is easy; a report, working code, a multi-step analysis or a careful comparison is hard.')
 
 
 def questions(agents: dict) -> dict:
     return {
         'route': Choice(instructions='Which specialist agent should handle this user query?', criteria=agents),
         'urgency': Score(instructions='How urgently does the user need an answer?', criteria=['No rush', 'Soon', 'Right now']),
+        'hard': Score(instructions=HARD, criteria=['Easy', 'Moderate', 'Hard']),
         'unsafe': Noul(instructions=UNSAFE),
         'clear': Noul(instructions='The query is clear enough to answer without asking a follow-up question.'),
     }
@@ -85,6 +90,7 @@ async def route_one(jev, text: str, agents: dict) -> dict:
     r = await jev.system_one(text, questions(crit))
     jev_ms = round((time.perf_counter() - t0) * 1000)
     route, urgency, unsafe, clear = (r.answers[k] for k in ('route', 'urgency', 'unsafe', 'clear'))
+    hard = r.answers.get('hard') if hasattr(r.answers, 'get') else None
     agent, reason = decide(route, unsafe.noul, clear.noul)
     return {
         'agent': agent, 'pick': route.choice, 'reason': reason,
@@ -92,6 +98,7 @@ async def route_one(jev, text: str, agents: dict) -> dict:
         'confidence': route.confidence, 'urgency': round(urgency.score, 2), 'unsafe': unsafe.noul, 'clear': clear.noul,
         'jev_ms': jev_ms, 'model': r.model, 'input_tokens': getattr(r.usage, 'input_tokens', 0) or 0,
         'examples': any(isinstance(c, dict) for c in crit.values()),
+        'hard': round(min(1.0, max(0.0, hard.score)), 2) if hard is not None else None,  # not a routed field: the pipeline reads it (A5)
     }
 
 

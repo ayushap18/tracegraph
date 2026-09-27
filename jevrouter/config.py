@@ -14,6 +14,11 @@ AGENTS = {
     'knowledge': 'A factual question about a person, place, event, thing, or concept',
     'code': 'Programming, software errors, or how to do something in code',
     'chat': 'Greetings, small talk, or questions about the assistant itself',
+    'units': 'Converting a measurement between units of length, weight, temperature, volume, speed, data size or '
+             'time (seconds, hours, days, weeks)',
+    'dates': 'Calendar maths on given dates: days between two dates, the weekday of a date, a date some days before '
+             'or after another, an age, or whether a year is a leap year',
+    'url': 'Reading, summarizing or answering a question about a specific web page whose http or https link is in the query',
 }
 # Only offered to Jev when the active engine can search the web.
 RESEARCH = {'research': 'Recent news, current events, or anything that needs searching the web for up-to-date information'}
@@ -22,7 +27,10 @@ REPORT = {'report': 'Long-form written reports, essays, comparisons or summaries
 RUN = {'run': 'Write and execute code to compute or produce something'}
 # Guard outcomes that are decided from Jev's other answers rather than picked by the route question.
 GUARDS = ['clarify', 'blocked']
-KEYLESS = {'math', 'weather', 'time', 'currency'}
+# Exact agents that parse what they need from plain text: their answers need no LLM merger and they never see context.
+KEYLESS = {'math', 'weather', 'time', 'currency', 'units', 'dates'}
+# Offered to Jev next to the file agents when an attached file is a table (CSV, or a JSON list of objects).
+SQL_AGENT = {'sql': 'Exact answers from an attached table: filtering, counting, grouping, sorting or looking up rows'}
 
 MIN_CONFIDENCE = 0.45
 MIN_CLEAR = 0.25
@@ -45,6 +53,41 @@ MAX_EXAMPLES = 3
 MAX_NOT = 2
 EXAMPLE_CHARS = 200
 
+# Chat modes and answer styles (docs/PLAN-speed-evals-chat.md; the style instructions are in jevrouter/merger.py).
+MODES = ('quick', 'balanced', 'deep', 'research')
+STYLES = ('default', 'concise', 'detailed', 'bullets', 'steps', 'simple', 'table')
+# Deep mode with no engine named: the strongest healthy engine, in this order. An engine that is cooling down after a
+# failure, or whose recent calls succeeded less often than DEEP_MIN_OK, is passed over.
+STRONGEST = ('claude-code', 'anthropic', 'codex', 'agy')
+DEEP_MIN_OK = 0.5
+GROUP_MAX = 3  # several answers: at most this many engines in one group from one ask
+
+# Engine per step (A5). Jev's `hard` score (0 easy .. 1 hard) picks, for an LLM step on Auto or in deep/quick mode, the
+# fastest healthy engine at effort low (at or below EASY_AT) or the strongest at effort high (at or above HARD_AT).
+EASY_AT = 0.3
+HARD_AT = 0.7
+# Health-aware Auto: an engine needs this many calls before its success rate and p50 change its place; engines whose
+# p50 is within SPEED_BAND times of the fastest count as equally fast, so the user's order decides between them.
+HEALTH_MIN_CALLS = 3
+SPEED_BAND = 2.0
+# Hedged requests (TG_HEDGE=1): when an engine has shown no text by its p90 (never sooner than HEDGE_MIN seconds, or
+# HEDGE_UNKNOWN before it has HEALTH_MIN_CALLS answers), the next engine starts too and the first to answer is kept.
+HEDGE_MIN = 4.0
+HEDGE_UNKNOWN = 10.0
+
+# Verify step (A6): a currency answer may differ from today's reference rate by this much before it is flagged.
+CURRENCY_TOLERANCE = 0.05
+
+# URL reader egress limits (jevrouter/agents/tools.py): what a fetched page may cost.
+URL_MAX_BYTES = 1_000_000
+URL_TIMEOUT = 8.0
+URL_MAX_REDIRECTS = 3
+URL_TYPES = ('text/html', 'text/plain', 'application/xhtml+xml', 'application/json', 'text/markdown', 'text/csv',
+             'application/xml', 'text/xml')
+# SQL over attached tables: result rows shown, and the seconds a query may run.
+SQL_MAX_ROWS = 50
+SQL_TIMEOUT = 2.0
+
 # Dollars per million tokens.
 PRICES = {'jev_in': 0.042, 'claude_in': 5.0, 'claude_out': 25.0}
 
@@ -61,6 +104,7 @@ SAMPLES = [
     'weather in Paris and convert 100 EUR to INR',
     "What time is it in Tokyo and what's 15% of 380?",
     'Who was Alan Turing; then convert 50 GBP to USD',
+    'Convert 5 km to miles', 'How many days between 1 March 2025 and 4 July 2025?', 'What weekday is 25 December 2026?',
 ]
 
 

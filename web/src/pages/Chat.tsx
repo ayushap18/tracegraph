@@ -1,37 +1,42 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { ask, cancelRun, deleteSession, errorText, getSession, listFiles, listSessions, uploadFile } from '../api'
-import type { FileInfo, SessionSummary } from '../protocol'
+import { ask, cancelRun, chooseRun, deleteSession, errorText, getSession, listFiles, listSessions, uploadFile } from '../api'
+import type { AskBody, FileInfo, SessionSummary } from '../protocol'
 import { useStore } from '../store'
 import { fromRecord, type Run } from '../useEventStream'
-import { Badge, Button, EmptyState, IconButton, Kbd, Skeleton, Spinner, StatusBadge, buttonClass, copyText, navigate, timeAgo, useHashPath, useNow, useToast } from '../ui'
+import { Button, EmptyState, IconButton, Kbd, Skeleton, Spinner, buttonClass, navigate, timeAgo, useHashPath, useNow, useToast } from '../ui'
 import { AgentIcon, Icon, Logo } from '../icons'
-import { Chip } from '../components/Panels'
-import Markdown from '../components/Markdown'
 import { TraceView } from '../components/TraceView'
 import { RouteFeedback, canLabel, useRunLabels } from '../components/RouteFeedback'
 import { Waterfall } from '../components/Viz'
 import { TopActions } from '../components/Shell'
-import { pct } from '../lib'
-import { AgentBadge } from '../components/app'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
+import { BotHead, Turn, UserMessage, answerOf } from '../components/chat/Turn'
+import { AnswerGroup, RetryMenu } from '../components/chat/AnswerGroup'
+import { CompareMenu, ModeSwitch, PresetMenu, PresetRow, StyleMenu } from '../components/chat/ChatOptions'
+import { AgentChip, MentionList, useMention } from '../components/chat/AgentMention'
+import {
+  engineLabel, extrasOf, pickableEngines, readCompare, readOpts, researchReason, takeAgent, writeCompare, writeOpts,
+  type ChatOpts, type Preset, type RunExtras,
+} from '../components/chat/options'
+
+// Sandbox renders chat turns too.
+export { Turn }
 
 // Chat home: sessions on the left, the conversation in the middle, the selected turn's live trace on the right.
 // Every message is a run with source "chat" and a session_id, so follow-ups reach the planner with context.
+// Above the composer: mode, answer style, "Compare engines" and presets; "@agent" in the text asks one agent directly.
+// Runs that share a group_id (several engines, or "Try another engine") show as one question with tabbed answers.
 
 const ACCEPT = '.txt,.md,.csv,.json,.pdf'
 const MAX_FILE = 10 * 1024 * 1024
 const TRACE_KEY = 'tg-chat-trace'
+// Agents the server offers only for a run with files attached (jevrouter/files.py FILE_AGENTS), and the one that also
+// needs a table among them (config.SQL_AGENT). `hello` lists them always, so the @ list filters them here.
+const FILE_ONLY_AGENTS = ['document', 'data', 'sql']
+const TABLE_AGENT = 'sql'
 
 interface Attachment { key: string; name: string; size: number; status: 'uploading' | 'ready' | 'error'; info?: FileInfo; error?: string }
 
-const answerOf = (run: Run) => {
-  if (run.merged) return run.merged.answer
-  if (run.mergeStream) return run.mergeStream
-  const ts = run.order.map(t => run.tasks[t]).filter(Boolean)
-  return ts.length === 1 ? ts[0].answered?.answer ?? ts[0].stream : ''
-}
-const secs = (v: number | null) => (v == null ? '' : v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
 const fmtSize = (n: number) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`)
 
 // The empty chat shows one sample per kind of agent (plus a multi-part one), each with that agent's icon,
@@ -69,6 +74,12 @@ export default function Chat() {
   }, [])
   useEffect(() => { loadSessions() }, [loadSessions])
 
+  // What the client Run does not carry: mode, style, @agent, answer group, chosen, timings, saved checks.
+  const [extras, setExtras] = useState<Record<number, RunExtras>>({})
+  const addExtras = useCallback((list: Array<[number, RunExtras]>) => {
+    if (list.length) setExtras(prev => { const out = { ...prev }; for (const [q, x] of list) out[q] = { ...out[q], ...x }; return out })
+  }, [])
+
   const [detail, setDetail] = useState<{ id: string; runs: Run[]; title: string } | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailErr, setDetailErr] = useState<string | null>(null)
@@ -79,7 +90,7 @@ export default function Chat() {
     setDetailLoading(true)
     setDetailErr(null)
     getSession(sessionId)
-      .then(r => { if (alive) { setDetail({ id: r.id, title: r.title, runs: r.runs.map(fromRecord) }); setDetailErr(null) } })
+      .then(r => { if (alive) { setDetail({ id: r.id, title: r.title, runs: r.runs.map(fromRecord) }); addExtras(r.runs.map(x => [x.qid, extrasOf(x)])); setDetailErr(null) } })
       .catch(e => { if (alive) { setDetail({ id: sessionId, title: '', runs: [] }); setDetailErr(errorText(e)) } })
       .finally(() => { if (alive) setDetailLoading(false) })
     return () => { alive = false }
@@ -89,7 +100,7 @@ export default function Chat() {
   // qids this tab asked, per session, so turns show even before the server echoes session_id.
   const mine = useRef(new Map<number, string>())
   const knownFiles = useRef(new Map<string, string>()) // file id -> name
-  const [sending, setSending] = useState<{ text: string; files: string[] } | null>(null)
+  const [sending, setSending] = useState<{ text: string; files: string[]; agent: string | null; engines: number } | null>(null)
 
   const turns = useMemo(() => {
     if (!sessionId) return [] as Run[]
@@ -104,16 +115,40 @@ export default function Chat() {
     return [...byQid.values()].sort((a, b) => a.qid - b.qid)
   }, [sessionId, detail, store.runs])
 
+  // Turns grouped by answer group, in order of each group's first run. Most groups hold one run.
+  const items = useMemo(() => {
+    const groups = new Map<string, Run[]>()
+    for (const r of turns) {
+      const g = extras[r.qid]?.group_id
+      const key = g ? 'g:' + g : 'q:' + r.qid
+      const list = groups.get(key)
+      if (list) list.push(r); else groups.set(key, [r])
+    }
+    return [...groups.values()]
+  }, [turns, extras])
+
+  // Saved extras (chosen answer, timings, checks) for the open chat, re-read as its runs finish.
+  const sidRef = useRef(sessionId)
+  sidRef.current = sessionId
+  const refreshExtras = useCallback(() => {
+    const sid = sidRef.current
+    if (sid) getSession(sid).then(r => addExtras(r.runs.map(x => [x.qid, extrasOf(x)])), () => {})
+  }, [addExtras])
+
   // Keep the session list fresh as runs in this browser start and finish.
   useEffect(() => {
-    let t = 0
+    let t = 0, x = 0
     const off = subscribe(e => {
       if ((e.type === 'query' && e.session_id) || (e.type === 'done' && mine.current.has(e.qid))) {
         clearTimeout(t); t = window.setTimeout(loadSessions, 400)
       }
+      if (e.type === 'done' && mine.current.has(e.qid)) {
+        if (e.timings) addExtras([[e.qid, { timings: e.timings }]])
+        clearTimeout(x); x = window.setTimeout(refreshExtras, 600)
+      }
     })
-    return () => { off(); clearTimeout(t) }
-  }, [subscribe, loadSessions])
+    return () => { off(); clearTimeout(t); clearTimeout(x) }
+  }, [subscribe, loadSessions, addExtras, refreshExtras])
 
   // ---------- trace panel ----------
   const [traceOpen, setTraceOpen] = useState(readTraceOpen)
@@ -129,8 +164,8 @@ export default function Chat() {
   const [dragging, setDragging] = useState(false)
   const ta = useRef<HTMLTextAreaElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
-  const last = turns[turns.length - 1]
-  const running = !!last && !last.done
+  const lastItem = items[items.length - 1]
+  const running = !!lastItem && lastItem.some(r => !r.done)
   const uploading = files.some(f => f.status === 'uploading')
   const filesEnabled = store.features.files || !store.ready
 
@@ -171,24 +206,81 @@ export default function Chat() {
     }
   }
 
+  // ---------- mode, style, compare, @agent ----------
+  const [opts, setOptsState] = useState<ChatOpts>(() => readOpts(sessionId))
+  useEffect(() => { setOptsState(readOpts(sessionId)) }, [sessionId])
+  const setOpts = (o: Partial<ChatOpts>) => setOptsState(cur => { const next = { ...cur, ...o }; writeOpts(sidRef.current, next); return next })
+  const researchWhy = store.ready ? researchReason(store.engines) : null
+  const mode = opts.mode === 'research' && researchWhy ? 'balanced' : opts.mode
+  const allPickable = useMemo(() => pickableEngines(store.engines), [store.engines])
+  // Research needs web search: an engine without it (Keyless included) can't answer a research run, so Compare and
+  // "Try another engine" leave those out then.
+  const webOnly = useCallback((list: Array<{ name: string; label: string }>) =>
+    list.filter(e => store.engines.some(x => x.name === e.name && x.available && x.web)), [store.engines])
+  const pickable = useMemo(() => (mode === 'research' ? webOnly(allPickable) : allPickable), [mode, allPickable, webOnly])
+  const [compareOn, setCompareOn] = useState(false)
+  const [picked, setPickedState] = useState<string[]>(readCompare)
+  const setPicked = (names: string[]) => { setPickedState(names); writeCompare(names) }
+  // Default to the first two engines; drop ones that went away.
+  const comparePicks = useMemo(() => {
+    const ok = picked.filter(n => pickable.some(e => e.name === n))
+    return ok.length ? ok : pickable.slice(0, 2).map(e => e.name)
+  }, [picked, pickable])
+  const comparing = compareOn && pickable.length >= 2
+  // File agents only with a file attached, @sql only with a table among them (as the server checks).
+  const hasFile = files.some(f => f.status !== 'error')
+  const hasTable = files.some(f => f.status === 'ready' && !!f.info?.columns?.length)
+  const offered = useMemo(() => Object.entries(store.agents)
+    .filter(([n]) => !store.guards.includes(n) && (!FILE_ONLY_AGENTS.includes(n) || hasFile) && (n !== TABLE_AGENT || hasTable))
+    .map(([name, description]) => ({ name, description }))
+    .sort((a, b) => a.name.localeCompare(b.name)), [store.agents, store.guards, hasFile, hasTable])
+  const [agentPick, setAgentPick] = useState<string | null>(null)
+  useEffect(() => { if (agentPick && store.ready && !offered.some(a => a.name === agentPick)) setAgentPick(null) }, [agentPick, offered, store.ready])
+  const mention = useMention({ agents: offered, text, setText, input: ta, onPick: setAgentPick })
+
+  const applyPreset = (p: Preset) => {
+    const at = p.template.indexOf('{}')
+    const t = p.template.replace('{}', '')
+    setText(t)
+    setOpts({ mode: p.mode, style: p.style })
+    requestAnimationFrame(() => { const el = ta.current; if (el) { el.focus(); const i = at < 0 ? t.length : at; el.setSelectionRange(i, i) } })
+  }
+
   const sendLock = useRef(false)
   const send = useCallback(async (raw: string, sid: string | null) => {
     if (sendLock.current || files.some(f => f.status === 'uploading')) return
-    const q = raw.trim().slice(0, 500)
-    if (!q) return
+    const q0 = raw.trim().slice(0, 500)
+    if (!q0) return
+    const typed = takeAgent(q0, offered.map(a => a.name))
+    const agent = agentPick ?? typed.agent
+    const q = typed.agent ? typed.text : q0
+    if (!q) { toast.error(`Add a question for @${agent}`); return }
+    const engines = comparing ? comparePicks : []
+    if (comparing && engines.length < 2) { toast.error('Pick at least 2 engines to compare, or turn Compare off'); return }
     sendLock.current = true
     const attached = files
     const ready = files.filter(f => f.status === 'ready' && f.info).map(f => f.info!)
-    setSending({ text: q, files: ready.map(f => f.name) })
+    setSending({ text: q, files: ready.map(f => f.name), agent, engines: engines.length })
     setText('')
     setFiles([])
+    setAgentPick(null)
+    const body: AskBody = {
+      query: q, source: 'chat', ...(sid ? { session_id: sid } : {}), ...(ready.length ? { files: ready.map(f => f.id) } : {}),
+      ...(mode !== 'balanced' ? { mode } : {}), ...(opts.style !== 'default' ? { style: opts.style } : {}),
+      ...(agent ? { agent } : {}), ...(engines.length ? { engines } : {}),
+    }
     try {
-      const res = await ask({ query: q, source: 'chat', ...(sid ? { session_id: sid } : {}), ...(ready.length ? { files: ready.map(f => f.id) } : {}) })
+      const res = await ask(body)
       const newSid = res.session_id ?? sid
-      if (newSid) mine.current.set(res.qid, newSid)
+      const qids = res.qids?.length ? res.qids : [res.qid]
+      if (newSid) for (const qid of qids) mine.current.set(qid, newSid)
+      addExtras(qids.map((qid, i) => [qid, {
+        mode, style: opts.style, agent, group_id: res.group_id ?? null, ...(qids.length > 1 ? { chosen: i === 0 } : {}),
+      }]))
       for (const f of ready) knownFiles.current.set(f.id, f.name)
       setSelQid(null)
       if (newSid && newSid !== sid) {
+        writeOpts(newSid, { mode: opts.mode, style: opts.style }) // the new chat keeps the choices it was started with
         setDetail({ id: newSid, title: q, runs: [] })
         location.replace('#/?s=' + encodeURIComponent(newSid))
       }
@@ -197,11 +289,45 @@ export default function Chat() {
       toast.error(`Could not send: ${errorText(e)}`)
       setText(current => current || q)
       setFiles(current => [...attached, ...current])
+      setAgentPick(current => current ?? agent)
     } finally {
       sendLock.current = false
       setSending(null)
     }
-  }, [files, loadSessions, toast])
+  }, [files, loadSessions, toast, offered, agentPick, comparing, comparePicks, mode, opts, addExtras])
+
+  // "Try another engine": a new run for the same question, added to its answer group (not chosen until picked).
+  const [retrying, setRetrying] = useState<number | null>(null)
+  const retry = async (run: Run, engine: string) => {
+    const x = extras[run.qid]
+    const sid = run.session_id ?? sessionId
+    setRetrying(run.qid)
+    try {
+      const res = await ask({
+        query: run.text, source: 'chat', retry_of: run.qid, engine, ...(sid ? { session_id: sid } : {}),
+        ...(x?.mode && x.mode !== 'balanced' ? { mode: x.mode } : {}), ...(x?.style && x.style !== 'default' ? { style: x.style } : {}),
+        ...(x?.agent ? { agent: x.agent } : {}),
+      })
+      if (sid) mine.current.set(res.qid, sid)
+      const gid = res.group_id ?? x?.group_id ?? null
+      addExtras([
+        ...(x?.group_id ? [] : [[run.qid, { group_id: gid, chosen: true }] as [number, RunExtras]]),
+        [res.qid, { group_id: gid, chosen: false, mode: x?.mode, style: x?.style, agent: x?.agent ?? null }],
+      ])
+      toast.info(`Asking ${engineLabel(store.engines, engine)} for another answer`)
+    } catch (e) { toast.error(`Could not try another engine: ${errorText(e)}`) } finally { setRetrying(null) }
+  }
+
+  // "Use this answer": only the chosen run of a group feeds follow-ups.
+  const [choosing, setChoosing] = useState<number | null>(null)
+  const choose = async (qid: number, group: Run[]) => {
+    setChoosing(qid)
+    try {
+      await chooseRun(qid)
+      addExtras(group.map(r => [r.qid, { chosen: r.qid === qid }]))
+      toast.success('Kept this answer. Follow-ups will build on it.')
+    } catch (e) { toast.error(`Could not use this answer: ${errorText(e)}`) } finally { setChoosing(null) }
+  }
 
   // Palette and deep links: #/?new=1 starts a fresh chat, &q=… also sends it.
   const handled = useRef('')
@@ -216,14 +342,22 @@ export default function Chat() {
   }, [query, send])
 
   const onComposerKey = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (e.nativeEvent.isComposing || mention.onKeyDown(e)) return
+    if (e.key === 'Backspace' && agentPick && e.currentTarget.selectionStart === 0 && e.currentTarget.selectionEnd === 0) {
+      e.preventDefault(); setAgentPick(null); return
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       if (!running && !uploading && !sending) void send(text, sessionId)
     }
   }
   const stop = async () => {
-    if (!last) return
-    try { await cancelRun(last.qid); toast.info(`Stopping run #${last.qid}…`) } catch (e) { toast.error(`Could not stop: ${errorText(e)}`) }
+    const live = lastItem?.filter(r => !r.done) ?? []
+    if (!live.length) return
+    try {
+      await Promise.all(live.map(r => cancelRun(r.qid)))
+      toast.info(live.length === 1 ? `Stopping run #${live[0].qid}…` : `Stopping ${live.length} runs…`)
+    } catch (e) { toast.error(`Could not stop: ${errorText(e)}`) }
   }
 
   // ---------- file names for turns that attached files ----------
@@ -241,7 +375,7 @@ export default function Chat() {
     const el = thread.current
     if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
   }
-  const lastText = last ? answerOf(last).length + last.order.length : 0
+  const lastText = lastItem ? lastItem.reduce((n, r) => n + answerOf(r).length + r.order.length, 0) : 0
   useEffect(() => {
     const el = thread.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
@@ -269,11 +403,17 @@ export default function Chat() {
   const title = sessionId ? (sessions?.find(s => s.id === sessionId)?.title || detail?.title || turns[0]?.text || 'Chat') : 'New chat'
   const empty = !sessionId && !sending
 
-  const showTrace = traceOpen && !empty
+  const showTracePanel = traceOpen && !empty
+  const showTrace = (qid: number) => { setSelQid(qid); if (!traceOpen) toggleTrace() }
+  const fileName = (id: string) => knownFiles.current.get(id) ?? 'file'
+  // The server stores engine = null only for keyless runs, so null means Keyless; only a stub run that hasn't had its
+  // query event yet (no text) falls back to the active engine.
+  const runEngine = (r: Run) => r.engine ?? (r.text ? 'none' : store.engine?.name ?? 'none')
+  const engineOf = (r: Run) => ({ name: runEngine(r), label: engineLabel(store.engines, runEngine(r)) })
 
   return (
     <div className={cn('relative grid h-full min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden bg-background',
-      'lg:grid-cols-[260px_minmax(0,1fr)]', showTrace && 'xl:grid-cols-[260px_minmax(0,1fr)_380px]')}>
+      'lg:grid-cols-[260px_minmax(0,1fr)]', showTracePanel && 'xl:grid-cols-[260px_minmax(0,1fr)_380px]')}>
       <TopActions>
         <IconButton icon="history" label="Show chats" className="lg:hidden" onClick={() => setDrawer(d => !d)} active={drawer} />
         <Button variant="secondary" size="sm" icon="new" onClick={() => navigate('/?new=1')}>New chat</Button>
@@ -335,7 +475,8 @@ export default function Chat() {
               <div className="grid size-12 place-items-center rounded-xl border border-border bg-surface"><Logo size={28} /></div>
               <h2 className="mt-5 text-2xl font-semibold tracking-tight text-balance">What can I help with?</h2>
               <p className="mt-2 max-w-[56ch] text-sm leading-relaxed text-muted-foreground text-pretty">Ask one thing or several at once. TraceGraph plans the steps, routes each to the right agent and merges the answers. Follow-ups keep the context.</p>
-              <div className="mt-8 grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
+              <PresetRow onPick={applyPreset} className="mt-6" />
+              <div className="mt-6 grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
                 {pickSamples(store.samples.length ? store.samples : ['What time is it in Tokyo?']).map(({ text, kind }) => (
                   <button type="button" data-slot="button" key={text} onClick={() => void send(text, null)}
                     className="flex items-start gap-2.5 rounded-lg border border-border bg-surface p-3 text-left text-[13px] leading-snug text-foreground transition-colors hover:border-edge hover:bg-subtle/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35">
@@ -353,16 +494,33 @@ export default function Chat() {
               {detailLoading && !turns.length && <div className="flex flex-col gap-4"><Skeleton height={36} width="45%" className="ml-auto" /><Skeleton lines={3} /></div>}
               {detailErr && !turns.length && !sending && <EmptyState icon="alert" title="Could not load this chat" text={detailErr} action={<Button variant="secondary" onClick={() => navigate('/?new=1')}>Start a new chat</Button>} />}
               {!detailLoading && !detailErr && sessionId && !turns.length && !sending && <EmptyState icon="chat" title="This chat is empty" text="Ask something below to start." />}
-              {turns.map(run => (
-                <Turn key={run.qid} run={run} selected={traceOpen && selected?.qid === run.qid} fileName={id => knownFiles.current.get(id) ?? 'file'}
-                  onShowTrace={() => { setSelQid(run.qid); if (!traceOpen) toggleTrace() }} />
-              ))}
+              {items.map(group => {
+                const run = group[0]
+                const actionsFor = (r: Run) => r.done && r.text
+                  ? <RetryMenu engines={extras[r.qid]?.mode === 'research' ? webOnly(allPickable) : allPickable} current={runEngine(r)} disabled={retrying != null} onPick={e => void retry(r, e)} />
+                  : null
+                if (group.length === 1) {
+                  return (
+                    <Turn key={run.qid} run={run} selected={traceOpen && selected?.qid === run.qid} fileName={fileName} extras={extras[run.qid]}
+                      engineLabel={run.engine ? engineLabel(store.engines, run.engine) : undefined} actions={actionsFor(run)}
+                      onShowTrace={() => showTrace(run.qid)} />
+                  )
+                }
+                const chosen = group.find(r => extras[r.qid]?.chosen)?.qid ?? run.qid
+                return (
+                  <AnswerGroup key={run.qid} runs={group} extras={extras} chosen={chosen} selectedQid={traceOpen ? selected?.qid ?? null : null}
+                    fileName={fileName} engineOf={engineOf} onShowTrace={showTrace} onChoose={qid => void choose(qid, group)} choosing={choosing}
+                    actionsFor={actionsFor} />
+                )
+              })}
               {sending && (
                 <div className="flex flex-col gap-4">
-                  <UserMessage text={sending.text} files={sending.files} />
+                  <UserMessage text={sending.text} files={sending.files} agent={sending.agent} />
                   <div className="border-l-2 border-transparent pl-4">
                     <BotHead />
-                    <div className="mt-3 flex items-center gap-2.5 text-sm text-muted-foreground"><Spinner size={14} /> Sending…</div>
+                    <div className="mt-3 flex items-center gap-2.5 text-sm text-muted-foreground" role="status">
+                      <Spinner size={14} /> {sending.engines > 1 ? `Sending to ${sending.engines} engines…` : 'Sending…'}
+                    </div>
                   </div>
                 </div>
               )}
@@ -375,9 +533,22 @@ export default function Chat() {
         <div className="shrink-0 px-3 pb-3 pt-2 sm:px-6 sm:pb-4">
           <div className="relative mx-auto w-full max-w-[760px]">
             {dragging && <div className="pointer-events-none absolute -top-11 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-md bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground shadow-md"><Icon name="upload" size={16} /> Drop files to attach</div>}
+            <div className="mb-2 flex flex-col gap-1">
+              <ModeSwitch value={mode} onChange={m => setOpts({ mode: m })} researchWhy={researchWhy}>
+                <StyleMenu value={opts.style} onChange={st => setOpts({ style: st })} />
+                <CompareMenu on={comparing} onToggle={setCompareOn} picked={comparePicks} onPick={setPicked} engines={pickable} />
+                <PresetMenu onPick={applyPreset} />
+              </ModeSwitch>
+            </div>
             <form onSubmit={e => { e.preventDefault(); if (!running && !uploading && !sending) void send(text, sessionId) }}
-              className={cn('rounded-xl border bg-surface p-2 shadow-sm transition-colors focus-within:border-edge',
+              className={cn('relative rounded-xl border bg-surface p-2 shadow-sm transition-colors focus-within:border-edge',
                 dragging ? 'border-dashed border-primary focus-within:border-primary' : 'border-border')}>
+              <MentionList m={mention} />
+              {agentPick && (
+                <div className="mb-2 flex flex-wrap gap-1.5 px-0.5 pt-0.5">
+                  <AgentChip agent={agentPick} onRemove={() => { setAgentPick(null); ta.current?.focus() }} />
+                </div>
+              )}
               {files.length > 0 && (
                 <ul className="mb-2 flex flex-wrap gap-1.5 px-0.5 pt-0.5" aria-label="Attached files">
                   {files.map(f => (
@@ -403,8 +574,9 @@ export default function Chat() {
                 <input ref={fileInput} type="file" accept={ACCEPT} multiple hidden onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }} />
                 <IconButton icon="paperclip" label={filesEnabled ? 'Attach files (.txt .md .csv .json .pdf, up to 10 MB)' : 'File attachments are not enabled on this server'}
                   disabled={!filesEnabled} onClick={() => fileInput.current?.click()} className="mb-0.5 shrink-0" />
-                <textarea ref={ta} value={text} rows={1} maxLength={500} onChange={e => setText(e.target.value)} onKeyDown={onComposerKey}
-                  placeholder={sessionId && turns.length ? 'Ask a follow-up…' : 'Ask anything, or several things at once…'} aria-label="Message"
+                <textarea ref={ta} value={text} rows={1} maxLength={500} onChange={e => { setText(e.target.value); mention.sync() }} onKeyDown={onComposerKey}
+                  onSelect={mention.sync} onBlur={mention.close} {...mention.inputProps}
+                  placeholder={agentPick ? `Ask @${agentPick}…` : sessionId && turns.length ? 'Ask a follow-up…' : 'Ask anything, or type @ to pick an agent…'} aria-label="Message"
                   className="max-h-[220px] min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-2 font-sans text-[15px] leading-normal text-foreground outline-none placeholder:text-muted-foreground focus-visible:outline-none" />
                 {running ? (
                   <Button variant="secondary" icon="stop" onClick={() => void stop()} className="mb-0.5 shrink-0" aria-label="Stop the running answer">Stop</Button>
@@ -414,9 +586,9 @@ export default function Chat() {
               </div>
             </form>
             <p className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1 text-xs text-muted-foreground">
-              <span className="inline-flex items-center gap-1 max-sm:hidden"><Kbd>Enter</Kbd> send, <Kbd>Shift</Kbd>+<Kbd>Enter</Kbd> new line</span>
+              <span className="inline-flex items-center gap-1 max-sm:hidden"><Kbd>Enter</Kbd> send, <Kbd>Shift</Kbd>+<Kbd>Enter</Kbd> new line, <Kbd>@</Kbd> agent</span>
               <span className="min-w-0 truncate">
-                {store.engine ? `Engine: ${store.engine.label}` : 'Keyless mode'}
+                {comparing ? `Comparing: ${comparePicks.map(n => engineLabel(store.engines, n)).join(', ')}` : store.engine ? `Engine: ${store.engine.label}` : 'Keyless mode'}
                 {text.length > 400 && <span className="tabular-nums max-sm:hidden"> · {text.length}/500</span>}
               </span>
             </p>
@@ -425,7 +597,7 @@ export default function Chat() {
       </section>
 
       {/* trace: a column from xl, an overlay over the thread below it */}
-      {showTrace && (
+      {showTracePanel && (
         <aside aria-label="Trace of the selected turn" className={cn('flex min-h-0 min-w-0 flex-col border-l border-border bg-surface',
           'max-xl:absolute max-xl:inset-y-0 max-xl:right-0 max-xl:z-20 max-xl:shadow-lg max-sm:w-full sm:max-xl:w-[420px]')}>
           <div className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border pl-4 pr-2">
@@ -472,116 +644,6 @@ function TraceFeedback({ run }: { run: Run }) {
           </li>
         ))}
       </ul>
-    </div>
-  )
-}
-
-function BotHead({ run }: { run?: Run }) {
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      <Logo size={18} />
-      <span className="text-[13px] font-semibold">TraceGraph</span>
-      {run?.engine && <Badge tone="neutral" icon="engine" className="min-w-0">{run.engine}</Badge>}
-    </div>
-  )
-}
-
-function UserMessage({ text, files }: { text: string; files: string[] }) {
-  return (
-    <div className="flex flex-col items-end gap-1.5">
-      <div className="max-w-[85%] rounded-2xl rounded-br-md bg-subtle px-4 py-2.5 text-[15px] leading-relaxed text-foreground">
-        <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</p>
-      </div>
-      {files.length > 0 && (
-        <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
-          {files.map((n, i) => (
-            <span key={i} className="inline-flex h-6 min-w-0 max-w-full items-center gap-1 rounded-md border border-border bg-surface px-2 text-xs text-muted-foreground">
-              <Icon name="paperclip" size={12} className="shrink-0" /><span className="truncate">{n}</span>
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-const STEP_TONE: Record<string, string> = { done: 'text-ok', running: 'text-primary', warn: 'text-warn', error: 'text-warn', wait: 'text-muted-foreground' }
-const STREAM_CURSOR = "[&>.md>:last-child]:after:ml-px [&>.md>:last-child]:after:text-primary [&>.md>:last-child]:after:content-['▍'] [&>.md>:last-child]:after:animate-[blink_1s_steps(2)_infinite]"
-
-/** One question and its answer. Also used by the Sandbox page. */
-export function Turn({ run, selected, onShowTrace, fileName }: { run: Run; selected: boolean; onShowTrace: () => void; fileName: (id: string) => string }) {
-  const toast = useToast()
-  const tasks = run.order.map(t => run.tasks[t]).filter(Boolean)
-  const answer = answerOf(run)
-  const streaming = !run.done && !run.merged
-  const multi = tasks.length > 1
-  const finalFail = run.done && run.status !== 'done' && run.status !== 'running'
-  const phase = !run.plan ? 'Planning…' : tasks.some(t => !t.routed && !t.error) ? `Routing ${tasks.length} step${tasks.length === 1 ? '' : 's'}…`
-    : tasks.some(t => !t.answered && !t.error) ? 'Agents working…' : multi ? 'Merging answers…' : 'Finishing…'
-  const copy = async () => { (await copyText(answer)) ? toast.success('Answer copied') : toast.error('Could not copy') }
-  // Steps start open while the run works and fold once it is done, like the old <details open={!run.done}>.
-  const [stepsOpen, setStepsOpen] = useState(!run.done)
-  useEffect(() => { setStepsOpen(!run.done) }, [run.done])
-  const quiet = run.status === 'cancelled' || run.status === 'timeout'
-
-  return (
-    <div className="flex flex-col gap-4">
-      <UserMessage text={run.text || '…'} files={run.files.map(fileName)} />
-      <div className={cn('min-w-0 border-l-2 pl-4 transition-colors', selected ? 'border-primary' : 'border-transparent')}>
-        <BotHead run={run} />
-        {multi && (
-          <Collapsible open={stepsOpen} onOpenChange={setStepsOpen} className="mt-3">
-            <CollapsibleTrigger data-slot="button"
-              className="group/steps -mx-1 inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-[13px] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35">
-              <Icon name="subtasks" size={14} />{tasks.length} steps{run.plan ? `, ${run.plan.planner} plan` : ''}
-              <Icon name="chevron-down" size={14} className="group-data-[state=open]/steps:rotate-180" />
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <ol className="mt-2 flex flex-col gap-1.5 border-l border-border pl-3">
-                {tasks.map(t => {
-                  const st = t.error ? 'error' : t.answered ? (t.answered.ok ? 'done' : 'warn') : t.routed ? 'running' : 'wait'
-                  return (
-                    <li key={t.tid} className="flex min-h-6 items-center gap-2 text-[13px] max-sm:flex-wrap">
-                      <span className={cn('inline-flex w-4 shrink-0 justify-center', STEP_TONE[st])} aria-hidden="true">{st === 'running' ? <Spinner size={12} /> : st === 'done' ? <Icon name="check" size={13} /> : st === 'wait' ? <Icon name="clock" size={12} /> : <Icon name="alert" size={13} />}</span>
-                      <span className={cn('min-w-0 flex-1 [overflow-wrap:anywhere]', st === 'wait' ? 'text-muted-foreground' : 'text-foreground')}>
-                        {t.text}{t.depends_on.length > 0 && <span className="text-xs text-muted-foreground"> (after {t.depends_on.join(', ')})</span>}
-                      </span>
-                      {t.routed && <span className="max-sm:ml-6"><Chip agent={t.routed.agent} /></span>}
-                    </li>
-                  )
-                })}
-              </ol>
-            </CollapsibleContent>
-          </Collapsible>
-        )}
-        {answer ? (
-          <div className={cn('mt-3 text-[15px] leading-relaxed text-foreground [overflow-wrap:anywhere]', streaming && STREAM_CURSOR)}><Markdown text={answer} /></div>
-        ) : !run.done ? (
-          <div className="mt-3 flex items-start gap-2.5 py-1 text-sm text-foreground" role="status">
-            <Spinner size={14} className="mt-0.5 shrink-0 text-muted-foreground" />
-            <span>{phase}<small className="mt-1 block text-xs text-muted-foreground">{!run.plan ? 'Breaking your request into clear steps.' : 'Your answer will appear here as it is ready.'}</small></span>
-          </div>
-        ) : !finalFail ? <p className="mt-3 text-sm text-muted-foreground">No answer.</p> : null}
-        {run.error && <p className={cn('mt-3 flex items-start gap-2 rounded-md border p-3 text-sm text-foreground', quiet ? 'border-warn/25 bg-warn/10' : 'border-destructive/25 bg-destructive/10')}>
-          <Icon name="alert" size={15} className={cn('mt-0.5 shrink-0', quiet ? 'text-warn' : 'text-destructive')} /><span className="min-w-0 [overflow-wrap:anywhere]">{run.error}</span></p>}
-        {finalFail && !run.error && <p className={cn('mt-3 flex items-start gap-2 rounded-md border p-3 text-sm text-foreground', quiet ? 'border-warn/25 bg-warn/10' : 'border-destructive/25 bg-destructive/10')}>
-          <Icon name={run.status === 'cancelled' ? 'cancelled' : 'timeout'} size={15} className={cn('mt-0.5 shrink-0', quiet ? 'text-warn' : 'text-destructive')} />
-          {run.status === 'cancelled' ? 'Stopped before it finished.' : run.status === 'timeout' ? 'Timed out.' : 'Something went wrong.'}</p>}
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <span className="flex min-w-0 flex-wrap gap-1.5">
-            {tasks.filter(t => t.routed).map(t => (
-              <AgentBadge key={t.tid} agent={t.routed!.agent} pct={pct(t.routed!.confidence)} title={`${t.routed!.agent}: ${pct(t.routed!.confidence)} confidence`} />
-            ))}
-          </span>
-          <span className="ml-auto flex flex-wrap items-center gap-1">
-            {run.done && run.status !== 'done' && <StatusBadge status={run.status} />}
-            {run.total_ms != null && <span className="mx-1 inline-flex items-center gap-1 text-xs tabular-nums text-muted-foreground" title="Total time"><Icon name="latency" size={12} />{secs(run.total_ms)}</span>}
-            {answer && run.done && <IconButton icon="copy" label="Copy answer" size="sm" onClick={() => void copy()} />}
-            <Button variant="ghost" size="sm" icon="graph" iconRight="arrow-right" onClick={onShowTrace} aria-pressed={selected}
-              className="aria-pressed:bg-primary/10 aria-pressed:text-primary">{selected ? 'Trace open' : 'View trace'}</Button>
-          </span>
-        </div>
-      </div>
     </div>
   )
 }

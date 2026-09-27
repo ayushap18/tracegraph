@@ -258,8 +258,11 @@ async def test_eval_run_progress_and_results(client, tmp_path, monkeypatch):
     assert {e['source'] for e in events if e['type'] == 'query'} == {'eval'}
 
     listed = (await json_of(await client.get('/api/evals')))['evals']
+    extra = {'split': 'all', 'repeat': 1, 'judge': None, 'tags': None, 'by_tag': {'c': {'passed': 1, 'total': 1},
+             's': {'passed': 0, 'total': 2}}, 'p50_ms': listed[0]['p50_ms'], 'p95_ms': listed[0]['p95_ms'], 'flaky': 0,
+             'judge_mean': None, 'judge_errors': []}  # EvalSummaryExtra (docs/PLAN-speed-evals-chat.md)
     assert listed == [{'eval_id': eid, 'at': listed[0]['at'], 'engine': 'none', 'status': 'done', 'done': 3, 'passed': 1,
-                       'total': 3, 'accuracy': 0.3333, 'silent_wrong': 1, 'examples': False}]  # the currency case answered ok but wrong
+                       'total': 3, 'accuracy': 0.3333, 'silent_wrong': 1, 'examples': False, **extra}]  # the currency case answered ok but wrong
     d = await json_of(await client.get(f'/api/evals/{eid}'))
     assert d['done'] == 3 and [c['id'] for c in d['cases']] == ['w', 'h', 'e']
     w, h, e = d['cases']

@@ -1,0 +1,12 @@
+{
+  "warehouse": "Rotterdam",
+  "updated": "2025-05-30",
+  "items": [
+    {"sku": "BX-100", "name": "Cardboard box, small", "qty": 1200, "reorder_level": 500, "unit_cost_eur": 0.35},
+    {"sku": "BX-200", "name": "Cardboard box, large", "qty": 180, "reorder_level": 300, "unit_cost_eur": 0.8},
+    {"sku": "TP-010", "name": "Packing tape", "qty": 45, "reorder_level": 100, "unit_cost_eur": 2.1},
+    {"sku": "BW-050", "name": "Bubble wrap roll", "qty": 60, "reorder_level": 40, "unit_cost_eur": 12.5},
+    {"sku": "LB-300", "name": "Shipping labels, pack of 100", "qty": 25, "reorder_level": 20, "unit_cost_eur": 4.0},
+    {"sku": "PL-900", "name": "Wooden pallet", "qty": 14, "reorder_level": 30, "unit_cost_eur": 9.75}
+  ]
+}
