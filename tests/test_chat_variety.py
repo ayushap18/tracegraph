@@ -439,3 +439,20 @@ def test_old_database_is_migrated(tmp_path):
     assert [t['answer'] for t in store.turns('s', 9)] == ['Paris: 18°C']  # the unchosen answer isn't context
     store.close()
     Store(path).close()  # opening again is a no-op
+
+
+async def test_the_selected_engine_is_remembered():
+    """Picking an engine in the app is saved, so a server restart doesn't silently fall back to Auto."""
+    from jevrouter.engines import choose
+    async with make_client(active='claude-code') as c:
+        r = await c.post('/control', json={'engine': 'agy'})
+        assert r.status == 200 and c.router.store.get_setting('engine') == 'agy'
+        assert choose(c.engines, c.router.store.get_setting('engine')) is c.engines['agy']
+        await c.post('/control', json={'engine': 'none'})
+        assert c.router.store.get_setting('engine') == 'none' and choose(c.engines, 'none') is None
+    s = Store()
+    s.set_setting('k', 'v')
+    s.set_setting('k', 'w')
+    assert s.get_setting('k') == 'w' and s.get_setting('missing', 'd') == 'd'
+    s.set_setting('k', None)
+    assert s.get_setting('k') is None

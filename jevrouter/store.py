@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS created(id TEXT PRIMARY KEY, qid INTEGER, name TEXT, 
                                    spec TEXT, tokens INTEGER, rules TEXT, meta TEXT);
 CREATE INDEX IF NOT EXISTS created_at ON created(created);
 CREATE INDEX IF NOT EXISTS created_qid ON created(qid);
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 """
 # Columns added after a table first shipped: (table, column, type). Older databases get them on open. The runs columns
 # (docs/PLAN-speed-evals-chat.md) copy fields of the record JSON that queries filter on: an answer group, whether the
@@ -176,6 +177,19 @@ class Store:
         return [json.loads(r['record']) for r in self.q(f'SELECT record FROM runs{where} ORDER BY qid DESC LIMIT ?', *skip, int(n))]
 
     # ---------- sessions ----------
+
+    # ---------- settings: choices made in the app that should survive a restart ----------
+
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        rows = self.q('SELECT value FROM settings WHERE key = ?', key)
+        return rows[0]['value'] if rows else default
+
+    def set_setting(self, key: str, value: str | None):
+        if value is None:
+            self.x('DELETE FROM settings WHERE key = ?', key)
+        else:
+            self.x('INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+                   key, value)
 
     def touch_session(self, sid: str, first_query: str):
         now = time.time()

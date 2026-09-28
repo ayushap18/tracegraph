@@ -1250,6 +1250,7 @@ async def control(request):
         name = str(body['engine'] or 'none')
         if name == 'none':
             router.use_engine(None)
+            router.store.set_setting('engine', 'none')
         else:
             engine = router.engines.get(name)
             if engine is None:
@@ -1259,6 +1260,7 @@ async def control(request):
                 return web.json_response({'error': f'{engine.label} is not available: {why}'}, status=409)
             unblock(engine)
             router.use_engine(engine)
+            router.store.set_setting('engine', engine.name)  # remembered across restarts
             background(warm_up(engine))
         # Agents, prices and the engine badge all change, so every browser gets the new config (older clients ignore it).
         emit_config(router)
@@ -1343,7 +1345,9 @@ def create_app(router_factory=None) -> web.Application:
             from typesafe_sdk import AsyncTypeSafeClient
             engines = catalog()
             store = Store(os.environ.get('TG_DB') or DEFAULT_DB)
-            app[ROUTER] = Router(AsyncTypeSafeClient(), app[HTTP], choose(engines), engines=engines, store=store)
+            # The engine picked in the app survives a restart; TG_ENGINE is the default until one is picked.
+            app[ROUTER] = Router(AsyncTypeSafeClient(), app[HTTP], choose(engines, store.get_setting('engine')),
+                                 engines=engines, store=store)
             app[WARMUP] = asyncio.create_task(warm_up(app[ROUTER].engine))
         app[AUTOPILOT] = asyncio.create_task(app[ROUTER].autopilot())
         app[SWEEPER] = asyncio.create_task(app[ROUTER].sweeper())
