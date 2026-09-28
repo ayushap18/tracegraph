@@ -17,7 +17,7 @@ import { AgentChip, MentionList, useMention } from '../components/chat/AgentMent
 import { CreatedFiles, FailedFiles, FileActionsContext, RunFiles, filesOfTasks, resumedKeys, type FileActions } from '../components/chat/CreatedFiles'
 import { costRemembered, rememberCost, useCostConfirm } from '../components/chat/CostDialog'
 import {
-  PRESETS, engineLabel, extrasOf, pickableEngines, readCompare, readOpts, researchReason, takeAgent, writeCompare, writeOpts,
+  PRESETS, engineLabel, extrasOf, pickableEngines, readCompare, readOpts, researchNote, researchReason, takeAgent, writeCompare, writeOpts,
   type ChatOpts, type Preset, type RunExtras,
 } from '../components/chat/options'
 
@@ -249,7 +249,8 @@ export default function Chat() {
   const [opts, setOptsState] = useState<ChatOpts>(() => readOpts(sessionId))
   useEffect(() => { setOptsState(readOpts(sessionId)) }, [sessionId])
   const setOpts = (o: Partial<ChatOpts>) => setOptsState(cur => { const next = { ...cur, ...o }; writeOpts(sidRef.current, next); return next })
-  const researchWhy = store.ready ? researchReason(store.engines) : null
+  const researchWhy = store.ready ? researchReason(store.engine) : null
+  const researchHint = store.ready ? researchNote(store.engine) : null
   const mode = opts.mode === 'research' && researchWhy ? 'balanced' : opts.mode
   const allPickable = useMemo(() => pickableEngines(store.engines), [store.engines])
   // Research needs web search: an engine without it (Keyless included) can't answer a research run, so Compare and
@@ -635,7 +636,7 @@ export default function Chat() {
           <div className="relative mx-auto w-full max-w-[760px]">
             {dragging && <div className="pointer-events-none absolute -top-11 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 whitespace-nowrap rounded-md bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground shadow-md"><Icon name="upload" size={16} /> Drop files to attach</div>}
             <div className="mb-2 flex flex-col gap-1">
-              <ModeSwitch value={mode} onChange={m => setOpts({ mode: m })} researchWhy={researchWhy}>
+              <ModeSwitch value={mode} onChange={m => setOpts({ mode: m })} researchWhy={researchWhy} researchNote={researchHint}>
                 <StyleMenu value={opts.style} onChange={st => setOpts({ style: st })} />
                 <CompareMenu on={comparing} onToggle={setCompareOn} picked={comparePicks} onPick={setPicked} engines={pickable} />
                 <PresetMenu onPick={applyPreset} />

@@ -65,8 +65,14 @@ export function pickableEngines(engines: EngineInfo[]): Array<{ name: string; la
 }
 export const engineLabel = (engines: EngineInfo[], name: string | null | undefined, fallback = 'Default engine') =>
   name == null ? fallback : name === 'none' ? 'Keyless' : engines.find(e => e.name === name)?.label ?? name
-export const researchReason = (engines: EngineInfo[]) =>
-  engines.some(e => e.available && e.web) ? null : 'Needs an engine with web search. Set one up in Settings.'
+/** Why Research can't be picked: only keyless mode. Research runs on the selected engine, strictly; one without web
+ *  search answers from its own knowledge and says so (see researchNote). */
+export const researchReason = (active: EngineInfo | null | undefined) =>
+  active ? null : 'Needs an LLM engine. Choose one in the engine menu.'
+
+/** A heads-up when the selected engine can't search the web; Research still runs on it. */
+export const researchNote = (active: EngineInfo | null | undefined) =>
+  active && !active.web ? `${active.label} can't search the web, so Research answers from its own knowledge.` : null
 
 // ---------- remembered choices (per chat session; storage may be blocked) ----------
 const OPTS_KEY = 'tg-chat-opts:'

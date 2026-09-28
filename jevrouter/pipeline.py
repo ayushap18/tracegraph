@@ -320,7 +320,10 @@ class Router:
         return [self.engines[n] for n in dict.fromkeys(names) if n in self.engines and n != 'auto']
 
     def deep_engine(self):
-        """Deep mode's engine when none is named: the strongest healthy one (config.STRONGEST), else the active one."""
+        """Deep mode's engine when none is named: the engine the user selected, strictly; only when that is Auto (or
+        keyless) the strongest healthy one (config.STRONGEST), else the active one."""
+        if self.engine is not None and self.engine.name != 'auto':
+            return self.engine
         now = time.monotonic()
         return next((self.engines[n] for n in STRONGEST if n in self.engines and self.healthy(self.engines[n], now)),
                     self.engine)
@@ -591,7 +594,8 @@ class Router:
         named = engine is not USE_ACTIVE
         if engine is USE_ACTIVE:
             engine = self.deep_engine() if mode == 'deep' else self.engine
-        extras['steer'] = engine is not None and (engine.name == 'auto' or (mode == 'deep' and not named))
+        # Steps are spread over engines only when the user chose Auto; a selected engine is used for every step.
+        extras['steer'] = engine is not None and engine.name == 'auto'
         t0 = time.perf_counter()
         rec = self.inflight[qid] = {
             'qid': qid, 'text': query, 'source': source, 'at': time.time(), 'plan': None, 'tasks': [], 'merged': None,
@@ -1586,6 +1590,13 @@ class Router:
             if m['kind'] != 'single':  # a lone answer streamed as its step; the merged text replaces it when it arrives
                 text_out('merge', warn)
             m['answer'] += warn
+        # Research on an engine without web search: it answered from its own knowledge, and the answer says so
+        if mode == 'research' and engine is not None and not getattr(engine, 'supports_web', False):
+            note = (f"{engine.label} can't search the web, so this answer comes from its own knowledge, not live "
+                    'sources. Select Claude Code, Codex or Auto for web research.')
+            m['caveats'] = [*(m.get('caveats') or []), note]
+            text_out('merge', '\n\n' + note)
+            m['answer'] += '\n\n' + note
         self.usage(rec, m)
         rec['merged'] = {'answer': m['answer'], 'engine': m['engine']}
         # B2: what the run couldn't do and the file the answer leads with; only when there is something to say

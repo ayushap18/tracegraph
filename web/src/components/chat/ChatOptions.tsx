@@ -16,8 +16,9 @@ const CHIP_ON = 'border-primary/40 bg-primary/10 text-primary'
 
 /** Quick / Balanced / Deep / Research as a radio group (arrow keys move and select), the other controls after it,
  *  and one line of help for the mode under the pointer or focus (else the current one). */
-export function ModeSwitch({ value, onChange, researchWhy, children }: {
-  value: ChatMode; onChange: (m: ChatMode) => void; researchWhy: string | null; children?: ReactNode
+export function ModeSwitch({ value, onChange, researchWhy, researchNote, children }: {
+  value: ChatMode; onChange: (m: ChatMode) => void; researchWhy: string | null; researchNote?: string | null
+  children?: ReactNode
 }) {
   const [hint, setHint] = useState<ChatMode | null>(null)
   const refs = useRef<Record<string, HTMLButtonElement | null>>({})
@@ -33,7 +34,8 @@ export function ModeSwitch({ value, onChange, researchWhy, children }: {
     refs.current[next.id]?.focus()
   }
   const shown = hint ?? value
-  const help = off(shown) ? `Research is not available. ${researchWhy}` : modeInfo(shown).help
+  const help = off(shown) ? `Research is not available. ${researchWhy}`
+    : shown === 'research' && researchNote ? `${modeInfo(shown).help} ${researchNote}` : modeInfo(shown).help
   return (
     <div className="flex min-w-0 flex-col gap-1">
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">

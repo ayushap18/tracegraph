@@ -451,15 +451,15 @@ def pick_engines(router, names) -> list:
 
 
 def mode_engine(router, chat: dict, engine):
-    """The engine a run in this mode uses. Deep with none named: USE_ACTIVE, so the run picks the strongest healthy
-    engine itself and knows it may steer steps (an engine the user named stays pinned). Research: an engine that can
-    search the web, 400 when there is none (a named engine must be one)."""
+    """The engine a run in this mode uses: always the one the user selected or named. Deep with none named:
+    USE_ACTIVE (the run resolves it: the selected engine, or the strongest healthy one when Auto is selected).
+    Research: the selected engine even without web search (the answer then says so); 400 only when keyless."""
     if chat['mode'] == 'research':
-        e = router.web_engine() if engine is USE_ACTIVE else engine
-        if e is None or not e.supports_web:
-            raise Bad('Research mode needs an engine that can search the web, and none is available.'
-                      if engine is USE_ACTIVE else f'Research mode needs web search, which {e.label if e else "keyless mode"} '
-                      'does not have.')
+        # The selected engine, strictly: research never switches engines behind the user's back. One without web
+        # search still runs, answering from its own knowledge, and the answer says so (pipeline merge).
+        e = router.engine if engine is USE_ACTIVE else engine
+        if e is None:
+            raise Bad('Research mode needs an LLM engine; keyless mode can only answer with the built-in agents.')
         return e
     return engine
 

@@ -164,18 +164,25 @@ async def test_pinned_engine_stays_pinned():
     assert next(e for e in events if e['type'] == 'answered')['engine'] == 'agy'
 
 
-async def test_deep_mode_steers_its_own_engine_but_keeps_high_effort():
+async def test_deep_mode_runs_on_the_selected_engine_at_high_effort():
+    """A selected engine is used for every step, even an easy one; deep's high effort still applies."""
     router, es = power_router(hard=0.1, active='codex')
     events = await events_of(router, 'hey there friend', mode='deep')
     a = next(e for e in events if e['type'] == 'answered')
-    assert a['engine'] == 'agy' and a['checks']['effort'] == 'high'  # deep's effort wins over the easy step's
+    assert a['engine'] == 'codex' and a['checks']['effort'] == 'high'
+    assert next(e for e in events if e['type'] == 'query')['engine'] == 'codex'
+    assert not agent_calls(es['agy']) and not agent_calls(es['claude-code'])
+    # with Auto selected, deep mode picks the strongest healthy engine and stays on it
+    router, es = power_router(hard=0.1, active='auto')
+    events = await events_of(router, 'hey there friend', mode='deep')
     assert next(e for e in events if e['type'] == 'query')['engine'] == 'claude-code'
+    assert next(e for e in events if e['type'] == 'answered')['engine'] == 'claude-code'
 
 
-async def test_deep_mode_keeps_a_named_engine_pinned_even_when_it_is_deeps_own_pick():
-    # claude-code is what deep mode would pick; naming it (a compare tab, "Try another engine") must still pin it.
+async def test_deep_mode_keeps_a_named_engine_pinned():
+    # a compare tab or "Try another engine" names an engine: it is pinned whatever is selected
     router, es = power_router(hard=0.1, active='codex')
-    assert router.deep_engine() is es['claude-code']
+    assert router.deep_engine() is es['codex']
     events = await events_of(router, 'hey there friend', engine=es['claude-code'], mode='deep')
     assert next(e for e in events if e['type'] == 'query')['engine'] == 'claude-code'
     assert next(e for e in events if e['type'] == 'answered')['engine'] == 'claude-code'

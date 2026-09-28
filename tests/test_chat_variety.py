@@ -152,9 +152,12 @@ async def test_deep_mode_verifies_arithmetic_an_llm_agent_answered():
     assert checks['verified'] == 'mismatch' and '57' in checks['verify_note']
 
 
-def test_deep_engine_is_the_strongest_healthy_one():
+def test_deep_engine_is_the_selected_engine_unless_auto():
+    """A selected engine is used strictly; only with Auto selected does deep mode pick the strongest healthy one."""
     es = engines()
-    router = Router(FakeJev(), None, es['agy'], engines=es, registry=fake_registry())
+    assert Router(FakeJev(), None, es['agy'], engines=es, registry=fake_registry()).deep_engine() is es['agy']
+    es['auto'] = ScriptEngine(name='auto', label='Auto')
+    router = Router(FakeJev(), None, es['auto'], engines=es, registry=fake_registry())
     assert router.deep_engine() is es['claude-code']
     for _ in range(4):
         router.health.record('claude-code', False, 10, 'boom')
@@ -163,11 +166,11 @@ def test_deep_engine_is_the_strongest_healthy_one():
     assert router.deep_engine() is es['agy']
 
 
-async def test_deep_mode_without_a_named_engine_uses_the_strongest():
+async def test_deep_mode_uses_the_selected_engine():
     async with make_client(active='agy') as c:
         body = await ask(c, query='tell me a joke', mode='deep')
         await settle(c)
-        assert c.router.get_run(body['qid'])['engine'] == 'claude-code'
+        assert c.router.get_run(body['qid'])['engine'] == 'agy'
 
 
 async def test_deep_mode_keeps_named_engines_pinned_in_compare_and_retry():
@@ -196,16 +199,23 @@ async def test_research_mode_sends_knowledge_to_the_research_agent(client):
     assert llm_calls(client.engines['claude-code'], 'agent')[0]['web'] is True
 
 
-async def test_research_mode_needs_web_search():
-    async with make_client(active='codex') as c:  # codex can't search; claude-code can, so it is used
+async def test_research_mode_keeps_the_selected_engine():
+    """Research never switches engines behind the user's back: an engine without web search answers from its own
+    knowledge and the answer says so; only keyless is refused."""
+    async with make_client(active='codex') as c:  # codex can't search the web
         body = await ask(c, query='Who was Ada Lovelace?', mode='research')
         await settle(c)
-        assert c.router.get_run(body['qid'])['engine'] == 'claude-code'
+        run = c.router.get_run(body['qid'])
+        assert run['engine'] == 'codex' and "can't search the web" in run['merged']['answer']
+        assert any("can't search the web" in x for x in run['merged'].get('caveats', []))
         r = await c.post('/ask', json={'query': 'Who was Ada Lovelace?', 'mode': 'research', 'engine': 'codex'})
-        assert r.status == 400 and 'web search' in (await r.json())['error']
+        assert r.status == 200
+    async with make_client(active='claude-code') as c:  # it can: no note
+        body = await ask(c, query='Who was Ada Lovelace?', mode='research')
+        await settle(c)
+        run = c.router.get_run(body['qid'])
+        assert run['engine'] == 'claude-code' and "can't search the web" not in (run['merged'] or {}).get('answer', '')
     async with make_client(active=None) as c:
-        for e in c.engines.values():
-            e.supports_web = False
         r = await c.post('/ask', json={'query': 'Who was Ada Lovelace?', 'mode': 'research'})
         assert r.status == 400 and 'Research mode' in (await r.json())['error']
 
