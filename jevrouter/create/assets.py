@@ -25,7 +25,7 @@ TYPES = ('image/jpeg', 'image/png')    # SVG, GIF, WebP, TIFF rejected
 CACHE = ROOT / 'data' / 'assets'       # <sha256>.png, re-encoded
 
 API = 'https://commons.wikimedia.org/w/api.php'
-UA = {'User-Agent': 'TraceGraph/1.0 (local; contact: none)'}
+from ..agents.tools import UA  # names the project URL, as Wikimedia's bot policy asks; 'contact: none' gets throttled
 SEARCH_TIMEOUT, DOWNLOAD_TIMEOUT, STAGE_TIMEOUT = 6.0, 8.0, 30.0
 MAX_REDIRECTS = 3
 TRIES = 3  # acceptable candidates tried per figure when a download fails
@@ -102,16 +102,56 @@ async def search_commons(http, query: str, limit: int = 5) -> list[dict]:
     params = {'action': 'query', 'generator': 'search', 'gsrnamespace': '6', 'gsrsearch': f'{query} filetype:bitmap',
               'gsrlimit': str(limit), 'prop': 'imageinfo', 'iiprop': 'url|size|mime|extmetadata', 'iiurlwidth': '1600',
               'format': 'json'}
-    for attempt in range(2):
+    key = f'{query.casefold()}|{limit}'
+    if key in _SEARCHES:
+        return _SEARCHES[key]
+    for attempt in range(3):
         async with http.get(API, params=params, headers=UA,
                             timeout=aiohttp.ClientTimeout(total=SEARCH_TIMEOUT)) as r:
-            if r.status == 429 and not attempt:  # Commons asks clients to slow down: wait once, briefly
+            if r.status == 429 and attempt < 2:  # Commons asks clients to slow down: honour Retry-After, twice
                 await asyncio.sleep(retry_after(r))
                 continue
             if r.status >= 400:
                 raise AssetError(f'the image search answered {r.status}')
-            return candidates_from(await r.json(content_type=None))
+            found = candidates_from(await r.json(content_type=None))
+            if len(_SEARCHES) >= 256:
+                _SEARCHES.pop(next(iter(_SEARCHES)))
+            _SEARCHES[key] = found
+            return found
     raise AssetError('the image search is busy')
+
+
+_SEARCHES: dict[str, list[dict]] = {}  # query -> candidates, for this process: a retry or resume doesn't search again
+_FILLER = re.compile(r"\b(?:the|a|an|first|original|iconic|famous|early|modern|today'?s|one|of|era'?s|icons?|"
+                     r"launched|sold|about|million|commercial|handheld|powers|growth|forerunner|photo|image|picture)\b",
+                     re.I)
+
+
+def queries(query: str, caption: str = '') -> list[str]:
+    """Search terms to try, most specific first, at most three. Commons full-text search finds nothing for a whole
+    caption sentence ("Motorola DynaTAC 8000X, the first commercial handheld cellphone (1983)"), so the ladder cuts it
+    down: the text before the first comma, colon or dash without years, then the leading name ("Motorola DynaTAC
+    8000X", "Nokia 3310")."""
+    out = []
+
+    def add(q):
+        q = ' '.join(re.sub(r'\([^)]*\)|\b1[89]\d\d\b|\b20\d\d\b', ' ', q).split()).strip(' .,:;-')
+        q = re.sub(r'(?:\s+(?:in|of|at|on|the|and|from|with|by))+$', '', q, flags=re.I)
+        if q and len(q) >= 3 and q.casefold() not in {o.casefold() for o in out}:
+            out.append(q)
+
+    for text in (query, caption):
+        text = str(text or '').strip()
+        if not text:
+            continue
+        if len(text.split()) <= 5:
+            add(text)
+        head = re.split(r'[,:;\u2013\u2014]|\s-\s|\.\s', text, maxsplit=1)[0]
+        add(' '.join(w for w in head.split() if not _FILLER.fullmatch(w))[:80])
+        name = re.match(r"\s*((?:[A-Z0-9][\w'.&-]*\s*){1,4})", re.sub(r'^(?:The|A|An)\s+', '', text))
+        if name:
+            add(name.group(1))
+    return out[:3]
 
 
 async def fetch_image(http, url: str) -> bytes:
@@ -159,7 +199,7 @@ async def fetch_image(http, url: str) -> bytes:
 
 def retry_after(r) -> float:
     try:
-        return min(max(float(r.headers.get('Retry-After') or 1), 0.2), 3.0)
+        return min(max(float(r.headers.get('Retry-After') or 1), 0.2), 5.0)
     except (TypeError, ValueError):
         return 1.0
 
@@ -249,7 +289,23 @@ def _drop(spec: dict, keep: dict) -> None:
                     out.append(keep[(si, bi)])
             else:
                 out.append(b)
+        if not out and s['blocks']:
+            out = _stand_in(s, s['blocks'])
         s['blocks'] = out
+
+
+def _stand_in(section: dict, dropped: list) -> list[dict]:
+    """What a section shows when its only content was a figure with no image: its notes as short bullets (slides put
+    the detail in notes), else the figure's caption. A slide or page is never left with only a title."""
+    notes = ' '.join(str(section.get('notes') or '').split())
+    if notes:
+        sentences = [x.strip() for x in re.split(r'(?<=[.!?])\s+', notes) if x.strip()]
+        items = [' '.join(x.split()[:18]).rstrip(',;') for x in sentences[:5]]
+        if items:
+            return [{'type': 'bullets', 'ordered': False, 'items': items}]
+    captions = [str(b.get('caption') or '').strip() for b in dropped if isinstance(b, dict)]
+    captions = [c for c in captions if c]
+    return [{'type': 'paragraph', 'text': captions[0]}] if captions else []
 
 
 def _offline(e: BaseException) -> bool:
@@ -291,7 +347,7 @@ async def resolve_figures(spec: dict, http, *, mono: bool,
                             for _, _, f in figures[n:]]
                 break
             try:
-                found = await asyncio.wait_for(_one(session, query, mono, used), left)
+                found = await asyncio.wait_for(_one(session, query, mono, used, caption), left)
             except Exception as e:
                 if time.monotonic() >= deadline - 0.05:  # the whole stage's time is up
                     caveats += [f'the image lookup ran out of time for "{f.get("caption") or f.get("query")}"'
@@ -320,8 +376,18 @@ async def resolve_figures(spec: dict, http, *, mono: bool,
     return spec, credits, caveats
 
 
-async def _one(http, query: str, mono: bool, used: set) -> tuple[dict, str] | None:
-    """The first acceptable candidate for a query that downloads and re-encodes, as (candidate, sha256)."""
+async def _one(http, query: str, mono: bool, used: set, caption: str = '') -> tuple[dict, str] | None:
+    """The first acceptable candidate that downloads and re-encodes, as (candidate, sha256), trying the query ladder."""
+    for i, q in enumerate(queries(query, caption) or [query]):
+        if i:
+            await asyncio.sleep(0.3)  # pace follow-up searches; Commons rate-limits bursts
+        found = await _first(http, q, mono, used)
+        if found is not None:
+            return found
+    return None
+
+
+async def _first(http, query: str, mono: bool, used: set) -> tuple[dict, str] | None:
     tried = 0
     for c in await search_commons(http, query):
         if not acceptable(c):

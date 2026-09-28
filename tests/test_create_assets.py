@@ -308,3 +308,54 @@ async def test_a_colour_image_turns_grey_in_a_black_and_white_file(cache):
         {'type': 'image', 'asset': sha, 'caption': 'red', 'credit': 'Image: x by y, CC0 (https://commons.wikimedia.org/x)'}]}]}
     assert grey_scan(render(spec, 'pdf')) == (True, 'only greys drawn; 1 greyscale image')
     assert not grey_scan(render({**spec, 'theme': 'clean'}, 'pdf'))[0]
+
+
+@pytest.mark.parametrize('query, want', [
+    ('Motorola DynaTAC 8000X, the first commercial handheld cellphone (1983)', 'Motorola DynaTAC 8000X'),
+    ("Nokia 3310 (2000), about 126 million sold, one of the era's icons", 'Nokia 3310'),
+    ('The original iPhone, launched in June 2007.', 'iPhone'),
+    ('Alan Turing in 1951', 'Alan Turing')])
+def test_a_caption_becomes_short_search_terms(query, want):
+    """Commons full-text search finds nothing for a whole caption sentence (run 2752 found 0 of 5 images)."""
+    got = assets.queries(query)
+    assert got[0] == want and len(got) <= 3
+
+
+def test_a_section_whose_only_figure_found_no_image_keeps_its_content():
+    """Run 2752: three slides were only a title, their text in the notes, after their figure was dropped."""
+    spec = {'title': 'Phones', 'sections': [
+        {'heading': 'The DynaTAC', 'notes': 'In 1973 Martin Cooper made the first handheld call. The 8000X followed in '
+                                           '1983 at $3,995.', 'blocks': [{'type': 'figure', 'query': 'DynaTAC', 'caption': 'The DynaTAC'}]},
+        {'heading': 'No notes', 'blocks': [{'type': 'figure', 'query': 'x', 'caption': 'A caption stays'}]},
+        {'heading': 'Kept', 'blocks': [{'type': 'paragraph', 'text': 'hi'}, {'type': 'figure', 'query': 'y', 'caption': 'c'}]}]}
+    assets._drop(spec, {})
+    a, b, c = spec['sections']
+    assert a['blocks'] == [{'type': 'bullets', 'ordered': False, 'items': [
+        'In 1973 Martin Cooper made the first handheld call.', 'The 8000X followed in 1983 at $3,995.']}]
+    assert b['blocks'] == [{'type': 'paragraph', 'text': 'A caption stays'}]
+    assert c['blocks'] == [{'type': 'paragraph', 'text': 'hi'}]  # other content: the figure just goes
+
+
+async def test_search_honours_retry_after_and_caches(monkeypatch):
+    calls = []
+
+    class Resp:
+        def __init__(self, status):
+            self.status, self.headers = status, {'Retry-After': '0.2'}
+
+        async def json(self, content_type=None):
+            return {'query': {'pages': {}}}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class Http:
+        def get(self, url, **kw):
+            calls.append(kw['params']['gsrsearch'])
+            return Resp(429 if len(calls) < 3 else 200)
+    assets._SEARCHES.clear()
+    assert await assets.search_commons(Http(), 'Nokia 3310') == [] and len(calls) == 3  # two waits, then an answer
+    assert await assets.search_commons(Http(), 'Nokia 3310') == [] and len(calls) == 3  # cached
