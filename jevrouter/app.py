@@ -16,17 +16,19 @@ import aiohttp
 from aiohttp import web
 
 from . import create as create_mod
+from . import estimate as estimate_mod
 from . import evals as evals_mod
 from . import judge as judge_mod
 from . import labels as labels_mod
-from .config import AGENTS, DIST, GROUP_MAX, GUARDS, LEGACY_PAGE, MAX_QUERY_CHARS, MODES, REPORT, RESEARCH, RUN, STYLES
+from .config import (AGENTS, COST_SOURCES, PRICES, DIST, GROUP_MAX, GUARDS, LEGACY_PAGE, MAX_QUERY_CHARS, MODES, REPORT,
+                     RESEARCH, RUN, STYLES, cost_confirm_on)
 from .engines import EngineError, catalog, choose
 from .engines.health import pct, unblock
 from .agents import create as maker
 from .events import sse
 from .jev import examples_for
 from .files import FILE_AGENTS, MAX_BYTES, FileError, extract
-from .pipeline import SANDBOX_QID0, USE_ACTIVE, Router, table_files, warm_up
+from .pipeline import SANDBOX_QID0, USE_ACTIVE, Router, checkpoint_info, public_run, table_files, warm_up
 from .sandbox import MAX_FILES as MAX_SANDBOX_FILES, SandboxError
 from .store import CREATED_ID, DEFAULT_DB, Store
 
@@ -108,6 +110,57 @@ def emit_config(router):
     router.bus.emit('config', **with_limits(router.config()))
 
 
+def validate_ask(router, body: dict, text: str) -> dict:
+    """Everything /ask and /api/estimate check before a run could start (raises Bad): the source, session, files, chat
+    options, engine or engines, and a sandbox run's own fields. Starts nothing."""
+    source = body.get('source') or 'you'
+    session_id = body.get('session_id') or None
+    files = body.get('files') or []
+    if source not in SOURCES:
+        raise Bad(f'source must be one of {", ".join(SOURCES)}')
+    if session_id is not None and not (isinstance(session_id, str) and 0 < len(session_id) <= 64):
+        raise Bad('session_id must be a short string')
+    if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+        raise Bad('files must be a list of file ids')
+    if source != 'sandbox':
+        known = {f['id'] for f in router.store.list_files()}
+        if missing := [f for f in files if f not in known]:
+            raise Bad(f'unknown file id {missing[0]!r}')
+    if 'confirm_cost' in body and not isinstance(body['confirm_cost'], bool):
+        raise Bad('confirm_cost must be true or false')
+    chat = chat_options(body)
+    out = {'source': source, 'session_id': session_id, 'chat': chat, 'files': list(dict.fromkeys(files)),
+           'sandbox': None, 'extras': None}
+    if body.get('retry_of') is not None:
+        out['retry'] = True
+        return out
+    engine = pick_engine(router, body['engine']) if body.get('engine') else USE_ACTIVE
+    if source == 'sandbox':
+        sandbox = body.get('sandbox_id')
+        # Nothing from the sandbox is stored, so it can't use a saved chat session (or stored files).
+        if not (isinstance(sandbox, str) and SANDBOX_ID.match(sandbox)):
+            raise Bad('sandbox_id must be 8-64 letters, digits, - or _')
+        if session_id:
+            raise Bad('sandbox runs take no session_id')
+        if body.get('engines') is not None:
+            raise Bad('sandbox runs take one engine')
+        engine, out['extras'] = sandbox_extras(router, sandbox, body, engine, out['files'])
+        out['sandbox'] = sandbox
+    if body.get('engines') is not None:
+        if body.get('engine'):
+            raise Bad('send engine or engines, not both')
+        engines = pick_engines(router, body['engines'])
+        runs = [mode_engine(router, chat, e) for e in engines]
+    else:
+        runs = [mode_engine(router, chat, engine)]
+    extras = out['extras']
+    attached = [meta for meta, _ in extras['files']] if extras else router.store.list_files(out['files']) if out['files'] else []
+    for e in runs:
+        check_agent(router, chat, e, attached, text)
+    out.update(runs=runs, attached=attached)
+    return out
+
+
 async def ask(request):
     body, router = await read_json(request), request.app[ROUTER]
     text = str(body.get('query', '')).strip()
@@ -115,51 +168,21 @@ async def ask(request):
         return err('empty query')
     if (resp := too_long(text)) is not None:
         return resp
-    source = body.get('source') or 'you'
-    session_id = body.get('session_id') or None
-    files = body.get('files') or []
     try:
-        if source not in SOURCES:
-            raise Bad(f'source must be one of {", ".join(SOURCES)}')
-        if session_id is not None and not (isinstance(session_id, str) and 0 < len(session_id) <= 64):
-            raise Bad('session_id must be a short string')
-        if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
-            raise Bad('files must be a list of file ids')
-        if source != 'sandbox':
-            known = {f['id'] for f in router.store.list_files()}
-            if missing := [f for f in files if f not in known]:
-                raise Bad(f'unknown file id {missing[0]!r}')
-        chat = chat_options(body)
-        if body.get('retry_of') is not None:
-            return retry(router, body, chat)
-        engine = pick_engine(router, body['engine']) if body.get('engine') else USE_ACTIVE
-        sandbox = body.get('sandbox_id') if source == 'sandbox' else None
-        extras = None
-        if source == 'sandbox':
-            # Nothing from the sandbox is stored, so it can't use a saved chat session (or stored files).
-            if not (isinstance(sandbox, str) and SANDBOX_ID.match(sandbox)):
-                raise Bad('sandbox_id must be 8-64 letters, digits, - or _')
-            if session_id:
-                raise Bad('sandbox runs take no session_id')
-            if body.get('engines') is not None:
-                raise Bad('sandbox runs take one engine')
-            engine, extras = sandbox_extras(router, sandbox, body, engine, list(dict.fromkeys(files)))
-        files = list(dict.fromkeys(files))
-        if body.get('engines') is not None:
-            if body.get('engine'):
-                raise Bad('send engine or engines, not both')
-            engines = pick_engines(router, body['engines'])
-            runs = [mode_engine(router, chat, e) for e in engines]
-        else:
-            runs = [mode_engine(router, chat, engine)]
-        attached = [meta for meta, _ in extras['files']] if extras else router.store.list_files(files) if files else []
-        for e in runs:
-            check_agent(router, chat, e, attached, text)
+        v = validate_ask(router, body, text)
+        if v.get('retry'):
+            return retry(router, body, v['chat'])
+        source, session_id, chat, files = v['source'], v['session_id'], v['chat'], v['files']
+        sandbox, extras, runs = v['sandbox'], v['extras'], v['runs']
+        ests = run_estimates(router, text, v)
     except Bad as e:
         return err(str(e), e.status)
+    if (resp := cost_guard(body, source, estimate_mod.combine(ests) if ests else None)) is not None:
+        return resp
     if source == 'chat' and not session_id:
         session_id = uuid.uuid4().hex[:12]
     if len(runs) == 1:
+        extras = with_estimate(extras, ests[0] if ests else None)
         qid = router.submit(text, source, session_id=session_id, engine=runs[0], files=files, sandbox=sandbox,
                             extras=extras, **chat)
         return web.json_response({'ok': True, 'qid': qid, 'session_id': session_id,
@@ -168,8 +191,243 @@ async def ask(request):
     gid, qids = uuid.uuid4().hex[:10], []
     for i, e in enumerate(runs):
         qids.append(router.submit(text, source, session_id=session_id, engine=e, files=files, group_id=gid,
-                                  chosen=i == 0, context_before=qids[0] if qids else None, **chat))
+                                  chosen=i == 0, context_before=qids[0] if qids else None,
+                                  extras=with_estimate(None, ests[i] if ests else None), **chat))
     return web.json_response({'ok': True, 'qid': qids[0], 'qids': qids, 'group_id': gid, 'session_id': session_id})
+
+
+# ---------- cost preflight (docs/PLAN-files-robust.md section 5) ----------
+
+
+def engine_views(router, chat: dict, engine):
+    """(the engine most calls go to, the engine a web search goes to, the healthy alternatives) as EngineViews. A pinned
+    engine is itself; Auto gives the head of its call chain and of its web chain; deep mode with none named gives the
+    strongest healthy engine; keyless gives (None, None, [])."""
+    if engine is USE_ACTIVE:
+        engine = router.deep_engine() if chat.get('mode') == 'deep' else router.engine
+    if engine is None:
+        return None, None, []
+    if hasattr(engine, 'chain'):
+        lead, webs = engine.chain(), engine.chain(web=True)
+        main = lead[0] if lead else None
+        web_e = next((e for e in webs if e.supports_web), None)
+    else:
+        main, web_e = engine, engine if engine.supports_web else None
+    alts = [router.engine_view(e) for e in router.backends() if e.available()[0]]
+    return router.engine_view(main), router.engine_view(web_e), alts
+
+
+def chat_state(router, session_id: str | None, sandbox: str | None, remember: bool = True) -> tuple[bool, dict | None]:
+    """(the chat has an earlier answer, the chat's newest created file) for the estimate's zero-token paths."""
+    from .agents import create as ca
+    if sandbox:
+        mem = router.sandboxes.peek(sandbox) if remember else None
+        recs = [t['record'] for t in (mem.thread if mem else [])][-ca.LOOKBACK:]
+    elif session_id:
+        recs = router.store.session_records(session_id, 10 ** 15, ca.LOOKBACK)
+    else:
+        recs = []
+    done = [r for r in recs if ca.answered(r)]
+    has_answer = any(not ca.only_created(r) and (r.get('merged') or {}).get('answer') for r in done)
+    last = next((f for r in reversed(done) for t in reversed(r.get('tasks') or [])
+                 for f in reversed(t.get('created_files') or [])), None)
+    return has_answer, last
+
+
+def draft_for(router, text: str, v: dict) -> estimate_mod.Draft:
+    """The estimate's view of a request: its text, mode, @agent, attached files (with the start of their text, so a
+    design file is recognised) and what the chat already holds."""
+    extras = v.get('extras') or {}
+    if v.get('sandbox'):
+        texts = {meta['id']: t for meta, t in extras.get('files', ())}
+    else:
+        texts = {}
+        for f in v.get('attached') or []:
+            try:
+                texts[f['id']] = router.store.file_text(f['id'])
+            except Exception:
+                texts[f['id']] = ''
+    files = [{**f, 'text': (texts.get(f['id']) or '')[:4000]} for f in v.get('attached') or []]
+    has_answer, last = chat_state(router, v.get('session_id'), v.get('sandbox'), extras.get('remember', True))
+    return estimate_mod.Draft(text, v['chat']['mode'], v['chat']['agent'], files, has_answer, last, v['source'])
+
+
+def estimate_for(router, draft: estimate_mod.Draft, chat: dict, engine, query: str) -> estimate_mod.Estimate:
+    main, web_e, alts = engine_views(router, chat, engine)
+    run_engine = (router.deep_engine() if chat.get('mode') == 'deep' else router.engine) if engine is USE_ACTIVE else engine
+    # the real price table: router.config()['prices'] is zeroed for display when the active engine is a subscription,
+    # which would price a pay-per-token run on another engine at $0
+    return estimate_mod.estimate(draft, main, web_e, deadline_s=router.deadline(query, run_engine), alternatives=alts,
+                                 prices=PRICES, lean=lean_chain(router, run_engine))
+
+
+def lean_chain(router, run_engine) -> list | None:
+    """On Auto a long file goes to the cheapest healthy backend (Router.lean_engine): Auto's chain as EngineViews, so
+    the estimate prices the file there too; None for a pinned engine or with lean long files off."""
+    if run_engine is not None and getattr(run_engine, 'name', None) == 'auto' and hasattr(run_engine, 'chain'):
+        from .config import lean_long_files_on
+        if lean_long_files_on():
+            return [router.engine_view(e) for e in run_engine.chain()]
+    return None
+
+
+def run_estimates(router, text: str, v: dict) -> list:
+    """One estimate per run the ask would start (never for evals), or [] when it cannot be made: a bug in pricing
+    must never stop a run."""
+    if v['source'] == 'eval':
+        return []
+    try:
+        draft = draft_for(router, text, v)
+        return [estimate_for(router, draft, v['chat'], e, text) for e in v['runs']]
+    except Exception:
+        return []
+
+
+def cost_guard(body: dict, source: str, est) -> web.Response | None:
+    """5.4: a costly run is not started until the user confirms it (409 NeedsConfirmation). Keyless runs and evals are
+    never asked; TG_COST_CONFIRM=0 turns the guard off."""
+    if est is None or not cost_confirm_on() or source not in COST_SOURCES or body.get('confirm_cost') is True:
+        return None
+    if not est.needs_confirmation:
+        return None
+    n = est.calls
+    return web.json_response({'error': f'This run needs about {n} model call{"" if n == 1 else "s"}. Confirm to go '
+                                       f'ahead.', 'needs_confirmation': True, 'estimate': est.to_dict()}, status=409)
+
+
+def with_estimate(extras: dict | None, est) -> dict | None:
+    if est is None:
+        return extras
+    return {**(extras or {}), 'estimate': est.to_dict()}
+
+
+async def estimate_run(request):
+    """POST /api/estimate (EstimateBody): what the draft's model calls would cost. Validates like /ask; never submits
+    a run or calls an engine."""
+    body, router = await read_json(request), request.app[ROUTER]
+    text = str(body.get('query', '')).strip()
+    if not text:
+        return err('empty query')
+    if (resp := too_long(text)) is not None:
+        return resp
+    try:
+        for key in ('retry_of', 'replaces', 'draft_agent'):
+            if body.get(key) is not None:
+                raise Bad(f'{key} is not part of an estimate')
+        base = {k: val for k, val in body.items() if k not in ('remember', 'confirm_cost')}
+        if base.get('source') == 'sandbox' and base.get('engines') is not None:
+            # a sandbox side-by-side sends one run per engine: price each as that run, then add them up
+            if base.get('engine'):
+                raise Bad('send engine or engines, not both')
+            names = base.pop('engines')
+            pick_engines(router, names)
+            ests = []
+            for n in names:
+                v = validate_ask(router, {**base, 'engine': n}, text)
+                draft = draft_for(router, text, v)
+                ests += [estimate_for(router, draft, v['chat'], e, text) for e in v['runs']]
+        else:
+            v = validate_ask(router, base, text)
+            draft = draft_for(router, text, v)
+            ests = [estimate_for(router, draft, v['chat'], e, text) for e in v['runs']]
+    except Bad as e:
+        return err(str(e), e.status)
+    return web.json_response(estimate_mod.combine(ests).to_dict())
+
+
+def run_for_resume(router, qid: int, sandbox: str | None) -> dict | None:
+    if sandbox:
+        mem = router.sandboxes.peek(sandbox)
+        held = next((t['record'] for t in (mem.thread if mem else []) if t['qid'] == qid), None)
+        if held is None and router.sandbox.get(qid) == sandbox:
+            held = router.inflight.get(qid)
+        return held
+    if qid in router.sandbox or qid >= SANDBOX_QID0:
+        return None
+    return router.get_run(qid)
+
+
+async def resume_created(request):
+    """POST /api/created/resume (ResumeBody): a new run that writes only the missing parts of a partial, failed or
+    timed-out file step, from its checkpoint. Priced and guarded like /ask; 202 ResumeResponse."""
+    body, router = await read_json(request), request.app[ROUTER]
+    try:
+        qid, tid, sid = body.get('qid'), body.get('tid'), body.get('sandbox_id')
+        if type(qid) is not int:
+            raise Bad('qid must be a run number')
+        if not isinstance(tid, str) or not tid or len(tid) > 40:
+            raise Bad('tid must be a step id')
+        if sid is not None and not (isinstance(sid, str) and SANDBOX_ID.match(sid)):
+            raise Bad('sandbox_id must be 8-64 letters, digits, - or _')
+        if 'confirm_cost' in body and not isinstance(body['confirm_cost'], bool):
+            raise Bad('confirm_cost must be true or false')
+        rec = run_for_resume(router, qid, sid)
+        state = ((rec or {}).get('checkpoints_state') or {}).get(tid)
+        if not isinstance(state, dict):
+            raise Bad('no checkpoint for that file step', 404)
+        if rec.get('status') == 'running':
+            raise Bad('That run is still going. Resume it once it has finished.', 409)
+        if (taken := resumed_by(router, state, sid)) is not None:
+            raise Bad(taken, 409)
+        if not checkpoint_info(state, qid, tid).get('resumable'):
+            raise Bad('That file is already complete.', 409)
+        mode = rec.get('mode') if rec.get('mode') in MODES and rec.get('mode') != 'research' else 'balanced'
+        chat = {'mode': mode, 'style': rec.get('style') if rec.get('style') in STYLES else 'default', 'agent': 'create'}
+        engine = pick_engine(router, body['engine']) if body.get('engine') else USE_ACTIVE
+        main, _, _ = engine_views(router, chat, engine)
+        run_engine = (router.deep_engine() if mode == 'deep' else router.engine) if engine is USE_ACTIVE else engine
+        lean = lean_chain(router, run_engine) if state.get('kind') != 'single' else None
+        est = estimate_mod.for_resume(state, main, deadline_s=router.deadline(rec['text'], run_engine), lean=lean,
+                                      prices=PRICES)
+    except Bad as e:
+        return err(str(e), e.status)
+    source = 'sandbox' if sid else rec.get('source') if rec.get('source') in SOURCES else 'chat'
+    if (resp := cost_guard(body, source, est)) is not None:
+        return resp
+    extras = {'resume': {'qid': qid, 'tid': tid, 'state': {k: v for k, v in state.items() if k != 'resumed_by'}},
+              'estimate': est.to_dict()}
+    if sid:
+        extras.update(files=[], remember=True)
+    if (taken := resumed_by(router, state, sid)) is not None:  # a second click while this one was being priced
+        return err(taken, 409)
+    new = router.submit(rec['text'], source, session_id=None if sid else rec.get('session_id'), engine=engine,
+                        files=[] if sid else rec.get('files') or [], sandbox=sid, extras=extras, **chat)
+    router.mark_resumed(rec, tid, new, sid)
+    return web.json_response({'ok': True, 'qid': new, 'session_id': None if sid else rec.get('session_id'),
+                              'estimate': est.to_dict()}, status=202)
+
+
+def resumed_by(router, state: dict, sid: str | None) -> str | None:
+    """Why a checkpoint cannot be resumed again, or None: a resume run for it is still going, or one already made its
+    file. A resume that ended with no file frees the checkpoint again."""
+    by = state.get('resumed_by') if isinstance(state, dict) else None
+    if not isinstance(by, dict) or type(by.get('qid')) is not int:
+        return None
+    n = by['qid']
+    if by.get('file_id'):
+        return f'That file was already resumed as run #{n}.'
+    if n in router.inflight:
+        return f'This file is already being resumed as run #{n}.'
+    done = run_for_resume(router, n, sid)
+    if isinstance(done, dict) and any(f.get('id') for t in done.get('tasks') or [] for f in t.get('created_files') or []):
+        return f'That file was already resumed as run #{n}.'
+    return None
+
+
+async def run_checkpoints(request):
+    """GET /api/runs/{qid}/checkpoints[?sandbox_id=]: the CheckpointInfo summaries of a run's file steps."""
+    router = request.app[ROUTER]
+    try:
+        qid = int(request.match_info['qid'])
+    except ValueError:
+        return err('bad qid', 404)
+    sid = request.query.get('sandbox_id') or None
+    if sid is not None and not SANDBOX_ID.match(sid):
+        return err('bad sandbox id')
+    rec = run_for_resume(router, qid, sid)
+    if rec is None:
+        return err('no such run', 404)
+    return web.json_response({'checkpoints': (public_run(rec) or {}).get('checkpoints') or []})
 
 
 def chat_options(body: dict) -> dict:
@@ -230,10 +488,16 @@ def retry(router, body: dict, chat: dict):
     if rec is None or qid in router.sandbox or qid >= SANDBOX_QID0:
         raise Bad(f'no run {qid}', 404)
     engine = mode_engine(router, chat, pick_engine(router, body['engine']) if body.get('engine') else USE_ACTIVE)
-    check_agent(router, chat, engine, router.store.list_files(rec['files']) if rec.get('files') else [], rec['text'])
+    attached = router.store.list_files(rec['files']) if rec.get('files') else []
+    check_agent(router, chat, engine, attached, rec['text'])
+    ests = run_estimates(router, rec['text'], {'source': rec['source'], 'session_id': rec.get('session_id'),
+                                               'chat': chat, 'attached': attached, 'runs': [engine], 'sandbox': None})
+    if (resp := cost_guard(body, body.get('source') or rec['source'], ests[0] if ests else None)) is not None:
+        return resp
     gid, first = router.join_group(qid)
     new = router.submit(rec['text'], rec['source'], session_id=rec.get('session_id'), engine=engine,
-                        files=rec.get('files') or [], group_id=gid, chosen=False, context_before=first, **chat)
+                        files=rec.get('files') or [], group_id=gid, chosen=False, context_before=first,
+                        extras=with_estimate(None, ests[0] if ests else None), **chat)
     return web.json_response({'ok': True, 'qid': new, 'qids': [new], 'group_id': gid, 'session_id': rec.get('session_id')})
 
 
@@ -374,7 +638,7 @@ async def list_runs(request):
         runs = router.store.list_runs(limit, before, q.get('q'), q.get('source'), q.get('status'), q.get('engine'))
     # a run saved before suspects were stored gets them computed now, so the Suspect column and filter can show it
     runs = [r if isinstance(r.get('suspects'), list) else {**r, 'suspects': evals_mod.suspects_of(r)} for r in runs]
-    return web.json_response({'runs': [router.inflight.get(r['qid'], r) for r in runs]})
+    return web.json_response({'runs': [public_run(router.inflight.get(r['qid'], r)) for r in runs]})
 
 
 async def promote_run(request):
@@ -396,7 +660,7 @@ async def get_run(request):
         rec = request.app[ROUTER].get_run(int(request.match_info['qid']))
     except ValueError:
         rec = None
-    return web.json_response(rec) if rec else err('no such run', 404)
+    return web.json_response(public_run(rec)) if rec else err('no such run', 404)
 
 
 async def choose_run(request):
@@ -450,7 +714,8 @@ async def get_session(request):
     s = router.store.get_session(sid)
     if not s:
         return err('no such session', 404)
-    return web.json_response({'id': s['id'], 'title': s['title'], 'runs': router.runs_where('session_id', sid)})
+    return web.json_response({'id': s['id'], 'title': s['title'],
+                              'runs': [public_run(r) for r in router.runs_where('session_id', sid)]})
 
 
 async def delete_session(request):
@@ -736,10 +1001,24 @@ async def compare(request):
         if not isinstance(names, list) or not 2 <= len(set(map(str, names))) == len(names) <= 4:
             raise Bad('engines must list 2 to 4 different engines')
         engines = [pick_engine(router, n) for n in names]
+        if 'confirm_cost' in body and not isinstance(body['confirm_cost'], bool):
+            raise Bad('confirm_cost must be true or false')
     except Bad as e:
         return err(str(e), e.status)
+    # 5.4: a costly comparison (a long file on up to 4 engines) is priced and confirmed like /ask
+    ests = []
+    try:
+        chat = {'mode': 'balanced', 'style': 'default', 'agent': None}
+        draft = estimate_mod.Draft(text, 'balanced', None, [], False, None, 'compare')
+        ests = [estimate_for(router, draft, chat, e, text) for e in engines]
+    except Exception:
+        ests = []  # a bug in pricing never stops a run
+    if (resp := cost_guard(body, 'compare', estimate_mod.combine(ests) if ests else None)) is not None:
+        return resp
     cid = uuid.uuid4().hex[:10]
-    runs = [{'engine': str(n), 'qid': router.submit(text, 'compare', engine=e, compare_id=cid)} for n, e in zip(names, engines)]
+    runs = [{'engine': str(n), 'qid': router.submit(text, 'compare', engine=e, compare_id=cid,
+                                                     extras=with_estimate(None, ests[i] if ests else None))}
+            for i, (n, e) in enumerate(zip(names, engines))]
     return web.json_response({'compare_id': cid, 'runs': runs})
 
 
@@ -748,7 +1027,7 @@ async def get_compare(request):
     runs = request.app[ROUTER].runs_where('compare_id', cid)
     if not runs:
         return err('no such comparison', 404)
-    return web.json_response({'compare_id': cid, 'query': runs[0]['text'], 'runs': runs})
+    return web.json_response({'compare_id': cid, 'query': runs[0]['text'], 'runs': [public_run(r) for r in runs]})
 
 
 # ---------- evals ----------
@@ -1011,7 +1290,7 @@ async def events(request):
     try:
         hello = with_limits(router.hello())
         if sid:  # a sandbox starts empty: only its own in-flight runs (after a reconnect) are replayed
-            hello['history'] = [r for qid, r in sorted(router.inflight.items()) if router.sandbox.get(qid) == sid]
+            hello['history'] = [public_run(r) for qid, r in sorted(router.inflight.items()) if router.sandbox.get(qid) == sid]
         await resp.write(sse(hello))
         while True:
             try:
@@ -1093,6 +1372,8 @@ def create_app(router_factory=None) -> web.Application:
 
     app.add_routes([
         web.get('/', index), web.get('/events', events), web.post('/ask', ask), web.post('/api/ask', ask),
+        web.post('/api/estimate', estimate_run), web.post('/api/created/resume', resume_created),
+        web.get('/api/runs/{qid}/checkpoints', run_checkpoints),
         web.post('/control', control),
         web.get('/api/config', config),
         web.get('/api/runs', list_runs), web.get('/api/runs/{qid}', get_run), web.post('/api/runs/{qid}/cancel', cancel_run),

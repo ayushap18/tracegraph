@@ -215,13 +215,19 @@ def guarded_session():
 
 
 def _figures(spec: dict) -> list[tuple[int, int, dict]]:
-    return [(si, bi, b) for si, s in enumerate(spec.get('sections') or []) if isinstance(s, dict)
-            for bi, b in enumerate(s.get('blocks') or []) if isinstance(b, dict) and b.get('type') == 'figure']
+    """(section, block, figure) for every figure block; odd shapes (a dict of sections, a string of blocks) have none."""
+    sections = spec.get('sections') if isinstance(spec, dict) else None
+    if not isinstance(sections, list):
+        return []
+    return [(si, bi, b) for si, s in enumerate(sections) if isinstance(s, dict) and isinstance(s.get('blocks'), list)
+            for bi, b in enumerate(s['blocks']) if isinstance(b, dict) and b.get('type') == 'figure']
 
 
 def _seed(spec: dict, seeds) -> None:
     """Research notes' `IMAGE: query | caption` ideas as figure blocks, one per section from the second on."""
-    sections = [s for s in spec.get('sections') or [] if isinstance(s, dict) and isinstance(s.get('blocks'), list)]
+    found = spec.get('sections') if isinstance(spec, dict) else None
+    sections = [s for s in found if isinstance(s, dict) and isinstance(s.get('blocks'), list)] \
+        if isinstance(found, list) else []
     if not sections:
         return
     start = 1 if len(sections) > 1 else 0
@@ -232,7 +238,8 @@ def _seed(spec: dict, seeds) -> None:
 
 def _drop(spec: dict, keep: dict) -> None:
     """Each figure replaced by its image block, or removed."""
-    for si, s in enumerate(spec.get('sections') or []):
+    sections = spec.get('sections') if isinstance(spec, dict) else None
+    for si, s in enumerate(sections if isinstance(sections, list) else []):
         if not isinstance(s, dict) or not isinstance(s.get('blocks'), list):
             continue
         out = []
@@ -254,7 +261,10 @@ async def resolve_figures(spec: dict, http, *, mono: bool,
                           seeds: list[tuple[str, str]] = ()) -> tuple[dict, list[Credit], list[str]]:
     """(the spec with figures resolved to images, their credits, caveats). Without `http` every figure is removed."""
     import copy
-    spec = copy.deepcopy(spec)
+    try:
+        spec = copy.deepcopy(spec)
+    except RecursionError:  # nesting too deep to copy: nothing in it is a figure the renderers would draw
+        return spec, [], []
     if not _figures(spec) and seeds:
         _seed(spec, seeds)
     figures = _figures(spec)

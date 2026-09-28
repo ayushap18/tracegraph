@@ -18,11 +18,13 @@ FIELDS = {
 # Fields an event may carry on top of FIELDS, only when they have something to say (older clients ignore them):
 # docs/PLAN-accuracy-v2.md adds the policy trace, Jev's signals, the @agent binding, a stated assumption and the frame
 # a keyless follow-up was completed from to `routed`; caveats and the frame a follow-up can build on to `answered`; and
-# what the run couldn't do and its primary file to `merged`.
+# what the run couldn't do and its primary file to `merged`. docs/PLAN-files-robust.md adds a create step's phases,
+# tokens and checkpoint summary to `answered` (H3), and estimated vs used and a failed file step to `done` (H4, 5.4).
 OPTIONAL = {
     'routed': {'input', 'cached', 'forced', 'bound', 'trace', 'signals', 'assumption', 'frame_used'},
-    'answered': {'created_files', 'checks', 'caveats', 'frame'},
+    'answered': {'created_files', 'checks', 'caveats', 'frame', 'phases', 'llm_in', 'llm_out', 'checkpoint'},
     'merged': {'caveats', 'primary_file'},
+    'done': {'cost', 'file_failed', 'checkpoints'},  # checkpoints: Resume for a timed-out or cancelled file step
 }
 STATS = {'queries', 'subtasks', 'errors', 'jev_input_tokens', 'claude_input_tokens', 'claude_output_tokens', 'by_agent'}
 
@@ -212,3 +214,205 @@ async def test_pipeline_with_llm_engine():
     assert s['claude_input_tokens'] == 30 and s['claude_output_tokens'] == 1 + 3 + 2
     assert claude.calls[1]['tools'][0]['type'] == 'web_search_20260209' and claude.calls[1]['output_config']['effort'] == 'medium'
     assert router.config()['claude'] is True
+
+
+# ---------- docs/PLAN-files-robust.md: pipeline hooks H2 to H8 (builder E) ----------
+
+STATE = {'v': 1, 'kind': 'longdoc', 'format': 'pptx', 'request': 'a 12 slide deck on phones', 'ctx': 'notes',
+         'parts': [{'heading': f'Part {i}', 'level': 1, 'words': 45, 'hints': [], 'diagrams': [], 'figures': 0}
+                   for i in range(3)],
+         'written': {'0': {'heading': 'Part 0', 'level': 1, 'blocks': [{'type': 'paragraph', 'text': 'x'}], 'notes': ''}},
+         'failed': [], 'phase': 'sections', 'engine': 'claude-code', 'tokens_in': 900, 'tokens_out': 300, 'calls': 2,
+         'at': 1.0, 'file_id': None}
+PHASES = [{'phase': 'outline', 'calls': 1, 'llm_in': 400, 'llm_out': 100, 'ms': 5},
+          {'phase': 'sections', 'calls': 1, 'llm_in': 500, 'llm_out': 200, 'ms': 7}]
+
+
+def file_route(text):
+    if 'deck' in text or 'slides' in text:
+        return 'create', 0.9
+    return by_keyword(text)
+
+
+def failing_make(seen: list, *, state=STATE, wait: float = 0.0):
+    """A create agent that spends tokens, saves a checkpoint, then (optionally after `wait` seconds) makes no file."""
+    from jevrouter.agents import create as create_agent
+
+    async def make(job, engine, jev, mode='balanced'):
+        seen.append(job)
+        job.checkpoint(dict(state))
+        if wait:
+            await asyncio.sleep(wait)
+        return create_agent.Made('No file was made: the engine failed (stream was interrupted).', False, 'claude-code',
+                                 900, 300, phases=list(PHASES))
+    return make
+
+
+async def test_a_failed_create_keeps_its_phases_and_tokens_marks_file_failed_and_merges_by_template(monkeypatch):
+    from jevrouter import pipeline
+    from jevrouter.agents import create as create_agent
+    from tests.fakes import ScriptEngine
+    seen = []
+    monkeypatch.setattr(create_agent, 'make', failing_make(seen))
+    engine = ScriptEngine(plan={'subtasks': [{'text': 'Who was Ada Lovelace', 'depends_on': []},
+                                             {'text': 'make a 12 slide deck about her', 'depends_on': [0]}]})
+    registry = fake_registry(knowledge=knowledge_agent)
+    router = Router(FakeJev(route_for=file_route, multi=0.6), engine=engine, registry=registry, engines={'claude-code': engine})
+    composed = []
+    real = pipeline.compose
+
+    async def compose(query, steps, emit, merge_engine, **kw):
+        composed.append(merge_engine)
+        return await real(query, steps, emit, merge_engine, **kw)
+    monkeypatch.setattr(pipeline, 'compose', compose)
+    events = await run(router, 'Who was Ada Lovelace and make a 12 slide deck about her')
+    check_fields(events)
+    create = next(e for e in events if e['type'] == 'answered' and e['agent'] == 'create')
+    assert not create['ok'] and 'created_files' not in create
+    assert create['phases'] == PHASES and (create['llm_in'], create['llm_out']) == (900, 300)
+    assert create['checkpoint']['resumable'] and create['checkpoint']['missing'] == ['Part 1', 'Part 2']
+    done = events[-1]
+    assert done['file_failed'] is True and done['tokens']['llm_in'] >= 900
+    assert composed == [None]  # the template joined the answers: no LLM call to wrap a failure
+    rec = router.store.get_run(done['qid'])
+    assert rec['file_failed'] and rec['timings']['merger'] == 'template'
+    assert rec['checkpoints_state'][create['tid']]['parts'] == STATE['parts']
+    task = next(t for t in rec['tasks'] if t['agent'] == 'create')
+    assert task['phases'] == PHASES and task['llm_in'] == 900
+    job = seen[0]
+    assert job.deadline is not None and job.deadline > 0 and job.tally is not None
+
+
+async def knowledge_agent(text, emit):
+    emit('Ada Lovelace was a mathematician.')
+    return AgentResult('Ada Lovelace was a mathematician.', True, 'wikipedia.org', 'claude-code', 10, 5)
+
+
+async def test_checkpoints_are_saved_on_timeout_and_never_leave_the_server(monkeypatch):
+    from jevrouter.agents import create as create_agent
+    from jevrouter.pipeline import public_run
+    from tests.fakes import ScriptEngine
+    seen = []
+    monkeypatch.setattr(create_agent, 'make', failing_make(seen, wait=5))
+    engine = ScriptEngine()
+    router = Router(FakeJev(route_for=file_route), engine=engine, registry=fake_registry(), engines={'claude-code': engine})
+    router.run_timeout = router.long_run_timeout = 0.3
+    events = await run(router, 'make slides about tea')
+    assert events[-1]['status'] == 'timeout' and 'cost' not in events[-1]
+    qid = events[-1]['qid']
+    stored = router.store.get_run(qid)
+    assert stored['status'] == 'timeout' and stored['checkpoints_state']['%d.1' % qid]['written']
+    shown = public_run(stored)
+    assert 'checkpoints_state' not in shown and shown['checkpoints'][0]['tid'] == '%d.1' % qid
+    assert shown['checkpoints'][0]['resumable'] and shown['checkpoints'][0]['planned'] == 3
+    hello = router.hello()
+    assert all('checkpoints_state' not in r for r in hello['history'])
+    assert any(r.get('checkpoints') for r in hello['history'])
+    assert 'checkpoints_state' in stored  # the full state stays in the store for Resume
+
+
+async def test_the_run_estimate_is_kept_and_actual_filled_in():
+    router = Router(FakeJev(route_for=by_keyword, multi=0.9), registry=fake_registry())
+    events = []
+    router.bus.taps.append(events.append)
+    estimate = {'version': 1, 'calls': 0, 'tokens_in': 0}
+    await router.handle('weather in Paris', 'you', extras={'estimate': estimate})
+    check_fields(events)
+    done = events[-1]
+    assert done['cost']['estimate'] == estimate
+    assert done['cost']['actual'] == {'calls': 0, 'tokens_in': 0, 'tokens_out': 0, 'seconds': round(done['total_ms'] / 1000, 1)}
+    assert router.store.get_run(done['qid'])['cost'] == done['cost']
+
+
+async def test_a_resume_run_skips_the_planner_and_routing(monkeypatch):
+    from jevrouter.agents import create as create_agent
+    from tests.fakes import ScriptEngine
+    seen = []
+
+    async def make(job, engine, jev, mode='balanced'):
+        seen.append(job)
+        return create_agent.Made('Created **x.pptx**, 4 slides', True, 'claude-code', 50, 20)
+    monkeypatch.setattr(create_agent, 'make', make)
+    engine = ScriptEngine()
+    jev = FakeJev(route_for=file_route)
+    router = Router(jev, engine=engine, registry=fake_registry(), engines={'claude-code': engine})
+    events = []
+    router.bus.taps.append(events.append)
+    await router.handle('the original question', 'chat', agent='create',
+                        extras={'resume': {'qid': 7, 'tid': '7.2', 'state': STATE}})
+    check_fields(events)
+    assert engine.calls == [] and jev.calls == []  # no planner call, no route question
+    routed = next(e for e in events if e['type'] == 'routed')
+    assert routed['agent'] == 'create' and routed['reason'] == 'resume a partial file'
+    assert seen[0].resume == {'qid': 7, 'tid': '7.2', 'state': STATE} and seen[0].request == 'the original question'
+    plan = next(e for e in events if e['type'] == 'plan')
+    assert [s['text'] for s in plan['subtasks']] == [STATE['request']]
+
+
+async def test_partial_files_get_their_resume_reference_and_cost(monkeypatch):
+    from jevrouter.agents import create as create_agent
+    from tests.fakes import ScriptEngine
+    from tests.test_create_api import SPEC
+
+    async def make(job, engine, jev, mode='balanced'):
+        job.checkpoint(dict(STATE))
+        meta, spec, data = create_agent.build(SPEC, 'pdf', source='llm')
+        meta['partial'] = {'planned': 3, 'written': 1, 'missing': ['Part 1', 'Part 2'], 'resume': None}
+        return create_agent.Made('Created', True, 'claude-code', 900, 300, file=meta, spec=spec, data=data,
+                                 phases=list(PHASES))
+    monkeypatch.setattr(create_agent, 'make', make)
+    engine = ScriptEngine()
+    router = Router(FakeJev(route_for=file_route), engine=engine, registry=fake_registry(), engines={'claude-code': engine})
+    events = []
+    router.bus.taps.append(events.append)
+    await router.handle('make slides about tea', 'chat', extras={'estimate': {'version': 1, 'calls': 3}})
+    done = events[-1]
+    f = next(e for e in events if e['type'] == 'answered')['created_files'][0]
+    assert f['partial']['resume'] == {'qid': done['qid'], 'tid': f'{done["qid"]}.1', 'sandbox': None}
+    assert f['cost']['estimate'] == {'version': 1, 'calls': 3}
+    assert f['cost']['actual']['calls'] == 2 and f['cost']['actual']['tokens_in'] == 900
+    assert router.store.get_created(f['id'])['partial']['resume']['tid'] == f'{done["qid"]}.1'
+    state = router.store.get_run(done['qid'])['checkpoints_state'][f'{done["qid"]}.1']
+    assert state['file_id'] == f['id']
+    assert not done.get('file_failed')
+
+
+async def test_tuned_prefer_steers_only_auto(monkeypatch):
+    from jevrouter import agents
+    from jevrouter.engines.auto import AutoEngine
+    from tests.fakes import ScriptEngine
+    a, b = ScriptEngine(name='agy', label='Antigravity'), ScriptEngine(name='claude-code', label='Claude Code')
+    auto = AutoEngine({'agy': a, 'claude-code': b}, order=['agy', 'claude-code'])
+    tuned = agents.Tuned(auto, prefer='claude-code')
+    await tuned.stream(system='s', prompt='p')
+    assert b.calls and not a.calls and tuned.billing == 'subscription'
+    plain = agents.Tuned(a, prefer='claude-code')
+    assert plain.prefer is None
+    await plain.stream(system='s', prompt='p')
+    assert len(a.calls) == 1
+
+
+async def test_lean_long_files_prefer_the_cheaper_engine_on_auto(monkeypatch):
+    from jevrouter.agents import create as create_agent
+    from jevrouter.engines.auto import AutoEngine
+    from tests.fakes import ScriptEngine
+    a, b = ScriptEngine(name='agy', label='Antigravity'), ScriptEngine(name='claude-code', label='Claude Code')
+    auto = AutoEngine({'agy': a, 'claude-code': b}, order=['agy', 'claude-code'])
+    seen = []
+
+    async def make(job, engine, jev, mode='balanced'):
+        seen.append(engine)
+        return create_agent.Made('No file was made: test.', False)
+    monkeypatch.setattr(create_agent, 'make', make)
+    router = Router(FakeJev(route_for=file_route), engine=auto, registry=fake_registry(),
+                    engines={'auto': auto, 'agy': a, 'claude-code': b})
+    await router.handle('make a 12 slide deck about tea', 'you')
+    assert seen[-1].prefer == 'claude-code'
+    await router.handle('make slides about tea', 'you')  # not a long file: Auto keeps its own order
+    assert seen[-1].prefer is None
+    monkeypatch.setenv('TG_LEAN_LONG_FILES', '0')
+    await router.handle('make a 12 slide deck about tea', 'you')
+    assert seen[-1].prefer is None
+    monkeypatch.delenv('TG_LEAN_LONG_FILES')
+    await router.handle('make a 12 slide deck about tea', 'you', engine=a)  # a pinned engine is never changed
+    assert getattr(seen[-1], 'prefer', None) is None

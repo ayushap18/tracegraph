@@ -13,6 +13,9 @@ import { Switch } from '@/components/ui/switch'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
+import { askOrConfirm, errorText } from '../api'
+import type { AskBody } from '../protocol'
+import { useCostConfirm } from './chat/CostDialog'
 
 /** An agent label. Kept as `Chip` for existing call sites; renders the shared AgentBadge. */
 export function Chip({ agent, pct }: { agent: string | undefined; pct?: number | string }) {
@@ -50,21 +53,26 @@ export function AskBox({ samples, state, inputRef, maxChars = DEFAULT_LIMITS.que
   const [error, setError] = useState<string | null>(null)
   const switchId = useId()
   useEffect(() => setIntervalV(state.interval), [state.interval])
+  // A costly run comes back with an estimate and starts only after Continue (docs/PLAN-files-robust.md 6.2).
+  const cost = useCostConfirm()
+  const sendBody = async (body: AskBody): Promise<void> => {
+    setBusy(true)
+    setError(null)
+    try {
+      const r = await askOrConfirm(body)
+      if (r.kind === 'confirm') cost.ask({ estimate: r.estimate, body, go: sendBody, onCancel: () => setQ(q => q || body.query) })
+    } catch (e) {
+      setError(`Could not send that query: ${errorText(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
   const ask = async (text: string) => {
     const v = text.trim().slice(0, maxChars)
     if (!v) return
     past.current = [v, ...past.current.filter(p => p !== v)].slice(0, 30)
     cursor.current = -1
-    setBusy(true)
-    setError(null)
-    try {
-      const res = await post('/ask', { query: v })
-      if (res == null) setError('Could not send that query. Check the server and try again.')
-    } catch {
-      setError('Could not send that query. Check the server and try again.')
-    } finally {
-      setBusy(false)
-    }
+    await sendBody({ query: v })
   }
   const submit = (e: FormEvent) => { e.preventDefault(); void ask(q); setQ('') }
   // Up/Down walk back through what you asked this session, like a shell.
@@ -122,6 +130,7 @@ export function AskBox({ samples, state, inputRef, maxChars = DEFAULT_LIMITS.que
         </div>
       </form>
       {error && <p className="m-0 text-[13px] text-destructive" role="alert">{error}</p>}
+      {cost.dialog}
       {samples.length > 0 && (
         <div role="group" aria-label="Sample queries"
           className="-mb-1 flex gap-1.5 overflow-x-auto pb-1 [scrollbar-width:none] [mask-image:linear-gradient(to_right,black_calc(100%-48px),transparent)] [&::-webkit-scrollbar]:hidden">

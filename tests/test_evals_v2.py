@@ -797,3 +797,29 @@ async def test_query_limit(client):
     assert (await client.post('/ask', json={'query': 'x' * 4000})).status == 200
     config = await json_of(await client.get('/api/config'))
     assert config['limits'] == {'query_chars': 4000} and config['fonts'] == {'body': None}
+
+
+def test_cassette_follows_only_the_cases_route_mode_runs(monkeypatch, tmp_path):
+    routed = {'id': 'r', 'query': 'weather in Paris', 'expect_agents': ['weather']}
+    p = tmp_path / 'cases.jsonl'
+    p.write_text(json.dumps(routed) + '\n')
+    before, whole = evals.route_sha(p), evals.suite_sha(p)
+    cli_only = {'id': 'c', 'query': 'make a deck', 'expect_agents': ['create'], 'run_on': ['cli', 'api']}
+    p.write_text(json.dumps(routed) + '\n' + json.dumps(cli_only) + '\n')
+    assert evals.route_sha(p) == before  # a case route mode never runs doesn't touch the cassette
+    assert evals.suite_sha(p) != whole  # while the whole-suite sha does move
+    p.write_text(json.dumps({**routed, 'query': 'weather in Rome'}) + '\n')
+    assert evals.route_sha(p) != before  # a routed case changing does
+    monkeypatch.setattr(evals, 'CASSETTE', tmp_path / 'c.jsonl')
+    (tmp_path / 'c.jsonl').write_text('')
+    monkeypatch.setattr(evals, 'CASSETTE_META', tmp_path / 'meta.json')
+    (tmp_path / 'meta.json').write_text(json.dumps({'suite_sha': 'old', 'route_sha': before}))
+    assert evals.cassette_problem('replay', 'new', before) is None
+    assert 'routed cases changed' in evals.cassette_problem('replay', 'new', 'other')
+    assert 'changed since the cassette' in evals.cassette_problem('replay', 'new')  # no route sha given: whole suite
+
+
+def test_committed_cassette_meta_matches_the_routed_cases():
+    meta = json.loads(evals.CASSETTE_META.read_text())
+    assert meta.get('route_sha') == evals.route_sha()
+    assert evals.cassette_problem('replay', evals.suite_sha(), evals.route_sha()) is None

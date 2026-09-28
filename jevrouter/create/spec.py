@@ -1,7 +1,9 @@
 """The DocSpec: the one compact JSON a model writes for a file (no layout), its schema, and the code that cleans it up.
 
-normalize() applies the content and size rules (S1-S7, L1-L3) for one format and returns the fixed spec with one
-RuleResult per check. from_markdown() and from_table() build a spec from an answer or an attached table with no LLM.
+parse_spec() reads a model reply tolerantly and repair() turns whatever it holds into a spec whose every block is
+readable (S1, S7, S8 and L1 are fixes: a file is refused only when nothing in it can be shown). normalize() is repair
+plus the format steps, and returns the fixed spec with one RuleResult per check. from_markdown() and from_table() build
+a spec from an answer or an attached table with no LLM.
 """
 import copy
 import html
@@ -25,6 +27,7 @@ CHART_ALIASES = {'column': 'bar', 'columns': 'bar', 'bars': 'bar', 'histogram': 
                  'scatter': 'line', 'donut': 'pie', 'doughnut': 'pie'}
 THEMES = ('clean', 'dark', 'warm', 'mono')
 
+NOTES_KEEP = 2_000  # speaker notes are cut to this before any content is (L1)
 MAX_SPEC_BYTES = 200_000  # a 40-page document (create/longdoc.py) fits; table rows are limited by L2 instead
 MAX_SECTIONS = 40
 MAX_BLOCKS = 30
@@ -77,7 +80,7 @@ DOCSPEC_SCHEMA = _obj({
 })
 
 # Keys each object may carry after normalize (anything else is dropped).
-KEYS = {'spec': ('title', 'subtitle', 'format', 'theme', 'paper', 'font', 'sections'),
+KEYS = {'spec': ('title', 'subtitle', 'format', 'theme', 'paper', 'font', 'design', 'sections'),
         'section': ('heading', 'level', 'blocks', 'notes'),
         'paragraph': ('type', 'text'), 'bullets': ('type', 'items', 'ordered'),
         'table': ('type', 'title', 'columns', 'rows', 'formats'), 'chart': ('type', 'kind', 'title', 'labels', 'series'),
@@ -215,26 +218,42 @@ def finite(v) -> bool:
     return math.isfinite(v)
 
 
+_SUFFIX = re.compile(r'^([+-]?[\d.,]*\d)(k|m|b|bn|mn|t)$', re.I)
+_SCALE = {'k': 1_000, 'm': 1_000_000, 'mn': 1_000_000, 'b': 1_000_000_000, 'bn': 1_000_000_000,
+          't': 1_000_000_000_000}
+
+
 def number(v, loose: bool = False):
     """A number from a cell or chart value, or None. Strict (tables): plain digits with optional thousands commas, so
-    ids with leading zeros, dates and codes stay text. Loose (charts): currency signs, %, spaces and (1,200) too."""
+    ids with leading zeros, dates and codes stay text. Loose (charts): currency signs, %, spaces, (1,200), a leading ~
+    and k/M/B/T suffixes (1.9B) too."""
     if isinstance(v, bool) or v is None:
         return None
     if isinstance(v, (int, float)):
         return v if finite(v) else None
     s = str(v).strip().replace('\u2212', '-')
+    scale = 1
     if loose:
         neg = s.startswith('(') and s.endswith(')')
-        s = re.sub(r'[\s\u00a0]', '', s.strip('()')).rstrip('%')
-        sign = s[0] if s[:1] in '+-' else ''
+        s = re.sub(r'[\s\u00a0]', '', s.strip('()')).lstrip('~\u2248').rstrip('%')
+        if not s:
+            return None
+        sign = s[0] if s[:1] and s[0] in '+-' else ''
         s = sign + s[len(sign):].lstrip(_CURRENCY)
         if neg and not sign:
             s = '-' + s
+        m = _SUFFIX.match(s)
+        if m:  # 3.5k, 1.9B, 12M, 2bn
+            s, scale = m.group(1), _SCALE[m.group(2).lower()]
     if not _NUM.match(s):
         return None
     digits = re.sub(r'\D', '', s.split('.')[0])
     if (len(digits) > 1 and digits[0] == '0') or len(digits) > 15:
         return None
+    if scale != 1:
+        from decimal import Decimal
+        f = float(Decimal(s.replace(',', '')) * scale)
+        return int(f) if f.is_integer() and abs(f) < 10 ** 15 else f
     f = float(s.replace(',', ''))
     if not math.isfinite(f):
         return None
@@ -340,27 +359,18 @@ def _size_without_rows(spec) -> int:
         if isinstance(x, list):
             return [strip(v) for v in x]
         return x
-    return len(json.dumps(strip(spec), ensure_ascii=False, default=str).encode())
+    return _json_len(strip(spec))
 
 
-def _find_fetch(x, where='spec'):
-    if isinstance(x, dict):
-        for k, v in x.items():
-            if str(k).lower() in FETCH_KEYS:
-                raise SpecError('S7', f'The spec asks for "{k}" in {where}; files are built only from the content given, '
-                                      'nothing is fetched.')
-            if isinstance(v, (dict, list)) and k not in ('rows',):
-                _find_fetch(v, where)
-    elif isinstance(x, list):
-        for v in x:
-            _find_fetch(v, where)
+def _json_len(x) -> int:
+    return len(json.dumps(x, ensure_ascii=False, default=str).encode('utf-8', 'replace'))
 
 
 def _cell(v, res):
     if isinstance(v, dict) and 'formula' in v:
         return {'formula': clean_chars(v['formula']).strip()}
     if isinstance(v, (dict, list)):
-        v = json.dumps(v, ensure_ascii=False)
+        v = json.dumps(v, ensure_ascii=False, default=str)
     if v is None or isinstance(v, (int, float)) and not isinstance(v, bool):
         if v is None or finite(v):
             return v
@@ -403,7 +413,7 @@ def _unit_columns(rows: list[list], width: int, given, res: dict) -> list[str | 
             out.append(unit_format(kind))
         else:
             g = given[j] if j < len(given) else None
-            out.append(g if g in NUMBER_FORMATS else None)
+            out.append(g if isinstance(g, str) and g in NUMBER_FORMATS else None)
     return out
 
 
@@ -422,6 +432,15 @@ def _check_block(b, where) -> str:
         if not isinstance(b[k], list):
             raise SpecError('S1', f'{where} ({t}): {k} must be a list.')
     return t
+
+
+def _cut_words(s: str, n: int) -> str:
+    """s at most n characters, cut at a word when there is one in the second half."""
+    if len(s) <= n:
+        return s
+    cut = s[:n]
+    sp = cut.rfind(' ')
+    return (cut[:sp] if sp > n // 2 else cut).rstrip(' ,;:')
 
 
 def _block(b: dict, t: str, res: dict) -> dict | None:
@@ -451,8 +470,13 @@ def _block(b: dict, t: str, res: dict) -> dict | None:
     if t in DIAGRAMS:
         if t == 'flow' and not isinstance(b.get('edges') if b.get('edges') is not None else [], list):
             raise SpecError('S1', 'A flow diagram: edges must be a list.')
-        return diagram.clean_block(b, lambda x: plain(x, emphasis=False).replace('\n', ' '),
-                                   lambda rid, note: _note(res, rid, 'fix', note))
+        clean = lambda x: plain(x, emphasis=False).replace('\n', ' ')  # noqa: E731
+        out = diagram.clean_block(b, clean, lambda rid, note: _note(res, rid, 'fix', note))
+        if out is None:  # too little for a picture: its words stay as a list
+            items = [clean(x) for x in diagram.raw_labels(b)]
+            items = [x for x in items if x]
+            return {'type': 'bullets', 'items': items, 'ordered': False} if items else None
+        return out
     if t == 'page_break':
         return {'type': t}
     if t == 'figure':
@@ -460,9 +484,12 @@ def _block(b: dict, t: str, res: dict) -> dict | None:
         caption = plain(b.get('caption') or '', emphasis=False).replace('\n', ' ')[:MAX_CAPTION]
         return {'type': t, 'query': query or caption[:MAX_FIGURE_QUERY], 'caption': caption} if query or caption else None
     if t == 'image':
-        return _image(b)
+        return _image(b, res)
     if t == 'table':
-        cols = [plain(c, emphasis=False) for c in b['columns']]
+        cols = [plain(c, emphasis=False).replace('\n', ' ') for c in b['columns']]
+        if any(len(c) > MAX_COLUMN for c in cols):
+            cols = [_cut_words(c, MAX_COLUMN) for c in cols]
+            _note(res, 'S6', 'fix', f'column names over {MAX_COLUMN} characters shortened')
         rows = [r if isinstance(r, list) else [r] for r in b['rows']]
         width = len(cols) or max((len(r) for r in rows), default=0)
         if not cols and width:
@@ -481,14 +508,16 @@ def _block(b: dict, t: str, res: dict) -> dict | None:
         if any(formats):
             out['formats'] = formats
         if b.get('title'):
-            out['title'] = plain(b['title'], emphasis=False)[:MAX_TITLE]
+            out['title'] = plain(b['title'], emphasis=False).replace('\n', ' ')[:MAX_TITLE]
         return out if cols else None
     # chart
     kind = str(b.get('kind') or 'bar').lower().strip()
     kind = CHART_ALIASES.get(kind, kind)
     if kind not in CHART_KINDS:
-        raise SpecError('S1', f'Chart kind {kind[:20]!r} is not one of {", ".join(CHART_KINDS)}.')
-    labels = [plain(x, emphasis=False) if x is not None else '' for x in b['labels']]
+        _note(res, 'S1', 'fix', 'a chart kind that is not bar, line or pie was drawn as a bar chart')
+        kind = 'bar'
+    given_labels = [plain(x, emphasis=False).replace('\n', ' ') if x is not None else '' for x in b['labels']]
+    labels = list(given_labels)
     series = []
     for i, s in enumerate(b['series']):
         if not isinstance(s, dict) or not isinstance(s.get('values'), list):
@@ -505,47 +534,84 @@ def _block(b: dict, t: str, res: dict) -> dict | None:
             labels = [str(j + 1) for j in range(len(vals))]
         vals = (vals + [None] * len(labels))[:len(labels)]
         if any(v is not None for v in vals):
-            series.append({'name': plain(s.get('name') or '', emphasis=False) or f'Series {len(series) + 1}',
-                           'values': vals})
+            series.append({'name': plain(s.get('name') or '', emphasis=False).replace('\n', ' ') or
+                           f'Series {len(series) + 1}', 'values': vals})
     if kind == 'pie' and series:
         s = series[0]
         keep = [(lab, v) for lab, v in zip(labels, s['values']) if v is not None and v > 0]
         if len(keep) < len(labels):
             _note(res, 'S5', 'fix', 'pie slices without a positive value were dropped')
         labels, series = [k[0] for k in keep], [{'name': s['name'], 'values': [k[1] for k in keep]}] if keep else []
+    title = plain(b.get('title') or '', emphasis=False).replace('\n', ' ')[:MAX_TITLE]
     if not series or not labels:
-        _note(res, 'S5', 'fix', 'a chart without any numeric values was dropped')
-        return None
-    title = plain(b.get('title') or '', emphasis=False)[:MAX_TITLE]
+        items = ([title] if title else []) + _chart_lines(given_labels, b['series'])
+        if not items:
+            _note(res, 'S5', 'fix', 'a chart without any numeric values was dropped')
+            return None
+        _note(res, 'S5', 'fix', 'a chart whose values are not plain numbers was kept as a list of its labels '
+                                'and values')
+        return {'type': 'bullets', 'items': items, 'ordered': False}
     if not title:
         title = ' and '.join(s['name'] for s in series[:2])
         _note(res, 'A3', 'warn', 'a chart without a title got one from its series names')
     return {'type': 'chart', 'kind': kind, 'title': title, 'labels': labels, 'series': series}
 
 
-def _image(b: dict) -> dict | None:
+def _raw_text(v) -> str:
+    if v is None or isinstance(v, bool):
+        return ''
+    if isinstance(v, float) and not finite(v):
+        return ''
+    return plain(str(v), emphasis=False).replace('\n', ' ').strip()
+
+
+def _chart_lines(labels: list[str], series: list) -> list[str]:
+    """A chart that cannot be drawn as lines of text: "label: value" for each label with a value as it was written
+    ("2015: 1.9B"), so the numbers stay in the file; labels alone when no value was given."""
+    series = [s for s in series if isinstance(s, dict) and isinstance(s.get('values'), list)]
+    named = len(series) > 1
+    n = max([len(labels)] + [len(s['values']) for s in series])
+    out = []
+    for j in range(n):
+        lab = labels[j] if j < len(labels) else ''
+        vals = []
+        for s in series:
+            v = _raw_text(s['values'][j]) if j < len(s['values']) else ''
+            if v:
+                name = plain(s.get('name') or '', emphasis=False).replace('\n', ' ').strip()
+                vals.append(f'{name} {v}' if named and name else v)
+        line = f'{lab}: {", ".join(vals)}' if lab and vals else lab or ', '.join(vals)
+        if line:
+            out.append(line)
+    return out
+
+
+def _image(b: dict, res: dict | None = None) -> dict | None:
     """X6: an image is only ever bytes from the local asset cache, re-encoded, with a credit line. One that is not in
-    the cache is left out; one with no credit blocks the file."""
+    the cache, or has no credit, is left out (never embedded)."""
     from . import assets
     asset = str(b.get('asset') or '').lower()
     if not ASSET_ID.match(asset) or not (assets.CACHE / f'{asset}.png').is_file():
         return None
     credit = plain(b.get('credit') or '', emphasis=False).replace('\n', ' ')[:MAX_CREDIT]
     if not credit:
-        raise SpecError('X6', 'An image in the file has no credit line (title, author, licence and source).')
+        if res is not None:
+            _note(res, 'X6', 'fix', 'an image without a credit line was left out')
+        return None
     return {'type': 'image', 'asset': asset, 'caption': plain(b.get('caption') or '', emphasis=False)[:MAX_CAPTION],
             'credit': credit}
 
 
 def strip_internal(spec):
     """A model's spec with what only code may write removed: internal `image` blocks (their asset ids point at local
-    files) and a `font` (the brief sets it). Everything else is left for normalize."""
+    files), a `font` (the brief sets it), a `design` (read from an attached design file) and a `format` (it marks a spec
+    normalize already fitted, whose slides may pass 40). Everything else is left for normalize, which repairs it."""
     if not isinstance(spec, dict):
         return spec
-    spec = {k: v for k, v in spec.items() if k != 'font'}
+    spec = {k: v for k, v in spec.items() if k not in ('font', 'design', 'format')}
     if isinstance(spec.get('sections'), list):
         spec['sections'] = [{**s, 'blocks': [b for b in s['blocks'] if not (isinstance(b, dict) and
-                                                                             b.get('type') == 'image')]}
+                                                                             b.get('type') == 'image' and 'asset' in b)]}
                             if isinstance(s, dict) and isinstance(s.get('blocks'), list) else s
                             for s in spec['sections']]
     return spec
@@ -557,7 +623,7 @@ def _fix_levels(sections: list, res: dict, fmt: str):
     for s in sections:
         try:
             lvl = int(s.get('level') or 1)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             lvl = 1
         lvl = min(max(lvl, 1), 3, prev + 1)
         if s.get('heading'):
@@ -689,94 +755,1147 @@ def _pptx_slides(sec: dict, res: dict) -> list[dict]:
     return out
 
 
+# ---------- repair: whatever the model wrote becomes a readable spec (S1, S7, S8, L1) ----------
+
+MAX_REPLY_BYTES = 2_000_000   # L6: a reply larger than this is not read as a file spec
+MAX_NEST = 40                 # deeper values are kept as their JSON text
+SALVAGE_CHARS = 2000          # a block that cannot be read keeps at most this much of its text
+SHORT_HEADING = 80            # S8: a section given as text up to this long becomes a heading
+MAX_FITTED = 2000             # sections of a spec normalize already fitted (a deck's slides can pass 40)
+MAX_COLUMN = 80               # S6: column names
+
+_TYPE_ALIASES = {
+    **dict.fromkeys(('bullets', 'list', 'ul', 'bullet', 'bulleted_list', 'bullet_list', 'unordered_list', 'points',
+                     'bullet_points', 'items'), 'bullets'),
+    **dict.fromkeys(('ol', 'numbered_list', 'numbered', 'ordered_list', 'number_list', 'steps'), 'ordered'),
+    **dict.fromkeys(('paragraph', 'text', 'para', 'p', 'body', 'markdown', 'description', 'prose', 'summary',
+                     'note', 'callout'), 'paragraph'),
+    **dict.fromkeys(('quote', 'blockquote', 'quotation'), 'quote'),
+    **dict.fromkeys(('code', 'pre', 'snippet', 'source_code', 'code_block', 'codeblock'), 'code'),
+    **dict.fromkeys(('table', 'grid', 'matrix', 'data_table', 'datatable'), 'table'),
+    **dict.fromkeys(('chart', 'graph', 'plot', *CHART_KINDS, *CHART_ALIASES, 'bar_chart', 'line_chart', 'pie_chart',
+                     'column_chart'), 'chart'),
+    **dict.fromkeys(('page_break', 'hr', 'divider', 'break', 'pagebreak', 'separator', 'rule'), 'page_break'),
+    **dict.fromkeys(('figure', 'picture', 'image', 'photo', 'img', 'illustration'), 'figure'),
+    **dict.fromkeys(('heading', 'header', 'h1', 'h2', 'h3', 'h4', 'subheading', 'title'), 'heading'),
+    'timeline': 'timeline', 'tree': 'tree', 'hierarchy': 'tree', 'org_chart': 'tree', 'flow': 'flow',
+    'flowchart': 'flow', 'process': 'flow', 'diagram': 'diagram',
+}
+# a salvaged block's text leaves these out: they name how to draw, not what to say
+_SALVAGE_SKIP = {'type', 'kind', 'lang', 'ordered', 'level', 'id', 'parent', 'from', 'to', 'formats', 'asset', 'credit',
+                 'query'} | FETCH_KEYS
+_TEXT_KEYS = ('text', 'label', 'title', 'content', 'name', 'value', 'description', 'heading')
+
+
+def _empty(v) -> bool:
+    return v is None or (isinstance(v, str) and not v.strip()) or (isinstance(v, (list, dict)) and not v)
+
+
+def _first(d: dict, *keys):
+    """(key, value) of the first key with a non-empty value; when every key given is empty ('', [], {}), the first
+    one present; else (None, None). An empty 'sections' or 'heading' never hides the content under an alias."""
+    present = None
+    for k in keys:
+        v = d.get(k)
+        if v is None:
+            continue
+        if not _empty(v):
+            return k, v
+        if present is None:
+            present = k
+    return (present, d[present]) if present is not None else (None, None)
+
+
+def _text(v) -> str:
+    """The words in a value: a string as it is, numbers as text, a list joined, a dict by its text-like key."""
+    if v is None or isinstance(v, bool):
+        return ''
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (int, float)):
+        return str(v) if finite(v) and not (isinstance(v, int) and abs(v) >= 10 ** 30) else ''
+    if isinstance(v, list):
+        return ' '.join(t for t in (_text(x) for x in v) if t.strip())
+    if isinstance(v, dict):
+        for k in _TEXT_KEYS:
+            if isinstance(v.get(k), str) and v[k].strip():
+                return v[k]
+        return next((x for x in v.values() if isinstance(x, str) and x.strip()), '')
+    return str(v)
+
+
+def _strings(v, out: list, key=None) -> list[str]:
+    """Every string in a block (a salvaged block keeps these), skipping keys that name how to draw it."""
+    if isinstance(v, str):
+        if v.strip():
+            out.append(v.strip())
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            if str(k).lower() not in _SALVAGE_SKIP:
+                _strings(x, out, k)
+    elif isinstance(v, list):
+        for x in v:
+            _strings(x, out, key)
+    return out
+
+
+def _clean_tree(v, depth: int = 0):
+    """Step 1: every string without the characters XML cannot hold (a lone surrogate included), every key a string,
+    tuples as lists, and nothing deeper than MAX_NEST (deeper values become their JSON text)."""
+    if isinstance(v, str):
+        return clean_chars(v)
+    if v is None or isinstance(v, (bool, int, float)):
+        return v
+    if depth >= MAX_NEST:
+        try:
+            return clean_chars(json.dumps(v, ensure_ascii=False, default=str))
+        except (ValueError, TypeError, RecursionError):
+            return ''
+    if isinstance(v, dict):
+        return {clean_chars(k): _clean_tree(x, depth + 1) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_clean_tree(x, depth + 1) for x in v]
+    return clean_chars(str(v))
+
+
+class _Log:
+    """Repairs noted once per kind with the sections they happened in ("bullets without items repaired in sections
+    7 and 9"), so a badly written deck gets a few readable notes, not one per block."""
+
+    def __init__(self):
+        self.seen: dict[tuple, list] = {}
+
+    def add(self, rid: str, one: str, many: str, where):
+        self.seen.setdefault((rid, one, many), []).append(where)
+
+    def flush(self, res: dict):
+        for (rid, one, many), wheres in self.seen.items():
+            _note(res, rid, 'fix', (many if len(wheres) > 1 else one).format(w=_where(wheres)))
+
+
+def _where(wheres: list) -> str:
+    secs = sorted({w for w in wheres if isinstance(w, int)})
+    parts = []
+    if None in wheres:
+        parts.append('the spec')
+    if secs:
+        shown = [str(n) for n in secs[:6]] + ([f'{len(secs) - 6} more'] if len(secs) > 6 else [])
+        names = shown[0] if len(shown) == 1 else ', '.join(shown[:-1]) + ' and ' + shown[-1]
+        parts.append(('section ' if len(secs) == 1 else 'sections ') + names)
+    return ' and '.join(parts) or 'the spec'
+
+
+# the keys a table's rows may be given under (_table reads them in this order)
+_ROW_KEYS = ('rows', 'data', 'cells', 'body', 'values')
+
+
+def _strip_fetch(d, where, log: _Log, top: bool = False):
+    """S7: link, image and path keys removed in place (table cells are content and are left alone)."""
+    if isinstance(d, dict):
+        for k in [k for k in d if k.lower() in FETCH_KEYS]:
+            del d[k]
+            log.add('S7', 'link or image addresses in {w} were removed; nothing is fetched',
+                    'link or image addresses in {w} were removed; nothing is fetched', where)
+        kind = str(d.get('type') or d.get('kind') or '').lower().strip().replace('-', '_').replace(' ', '_')
+        table = _TYPE_ALIASES.get(kind) == 'table' or any(k in d for k in ('columns', 'headers', 'header', 'cols',
+                                                                           'column_names'))
+        for k, v in d.items():
+            if k == 'rows' or (table and k in _ROW_KEYS) or (top and k in ('sections', 'slides', 'pages', 'parts',
+                                                                             'chapters')):
+                continue
+            _strip_fetch(v, where, log)
+    elif isinstance(d, list):
+        for v in d:
+            _strip_fetch(v, where, log)
+
+
+def _split_items(s: str) -> list[str]:
+    """A string where a list was expected: split on list markers, then lines, then "; " when that gives 2 or more."""
+    lines = [ln for ln in s.replace('\r\n', '\n').replace('\r', '\n').split('\n') if ln.strip()]
+    if len(lines) > 1:
+        return lines
+    one = lines[0] if lines else ''
+    for sep in (' • ', '; '):
+        parts = [p.strip() for p in one.strip().lstrip('•').split(sep) if p.strip()]
+        if len(parts) >= 2:
+            return parts
+    return [one] if one.strip() else []
+
+
+def _items(v, ctx) -> list[str]:
+    """Bullet items from whatever was given: a string is split, dicts give their text, nested lists are flattened
+    one level (a dict item with sub-items gives its text, then theirs)."""
+    if v is None or isinstance(v, bool):
+        return []
+    if isinstance(v, str):
+        got = _split_items(v)
+        if len(got) > 1:
+            ctx.flag('split')
+        return got
+    if isinstance(v, dict):
+        if any(k in v for k in _TEXT_KEYS + ('items', 'children')):
+            v = [v]
+        else:
+            return [f'{k}: {_text(x)}' if _text(x) else str(k) for k, x in v.items()]
+    if not isinstance(v, list):
+        return [_text(v)] if _text(v) else []
+    out = []
+    for x in v:
+        if isinstance(x, list):
+            out.extend(_text(y) for y in x)
+        elif isinstance(x, dict):
+            out.append(_text({k: y for k, y in x.items() if k not in ('items', 'children', 'sub', 'subitems')}))
+            sub = x.get('items') or x.get('children') or x.get('sub') or x.get('subitems')
+            if isinstance(sub, list):
+                out.extend(_text(y) for y in sub)
+        else:
+            out.append(_text(x))
+    return [x for x in out if x and x.strip()]
+
+
+# a comma that separates cells, not one inside a number's thousands ("Apple, $1,200" is two cells, not three)
+_CELL_COMMA = re.compile(r',(?!\d{3}(?:\D|$))')
+
+
+def _cells_line(line: str) -> list[str]:
+    s = line.strip().strip('|')
+    return [c.strip() for c in (s.split('|') if '|' in s else _CELL_COMMA.split(s))]
+
+
+def _table(b: dict, ctx) -> dict:
+    ck, cols = _first(b, 'columns', 'headers', 'header', 'cols', 'column_names')
+    rk, rows = _first(b, *_ROW_KEYS)
+    if ck not in (None, 'columns') or rk not in (None, 'rows'):
+        ctx.flag('fields')
+    if isinstance(cols, str):
+        cols = _cells_line(cols)
+    elif isinstance(cols, dict):
+        cols = list(cols.values()) if all(isinstance(k, str) and k.isdigit() for k in cols) else list(cols)
+    elif not isinstance(cols, list):
+        cols = []
+    cols = [_text(c) for c in cols]
+    if isinstance(rows, str):
+        lines = [ln for ln in rows.split('\n') if ln.strip() and not _TABLE_SEP.match(ln)]
+        rows = [_cells_line(ln) for ln in lines]
+        ctx.flag('split')
+    elif isinstance(rows, dict):
+        rows = [[k, *(x if isinstance(x, list) else [x])] for k, x in rows.items()]
+    elif not isinstance(rows, list):
+        rows = []
+    dict_rows = [r for r in rows if isinstance(r, dict) and not (len(r) == 1 and 'formula' in r)]
+    if dict_rows:
+        if not cols:
+            for r in dict_rows:
+                cols += [k for k in r if k not in cols]
+        low = {c.lower(): c for c in cols}
+        keys = {str(k).lower() for r in dict_rows for k in r}
+        if not keys & set(low) and not all(len(r) == len(cols) for r in dict_rows):
+            # no row key names a column, and the rows do not line up with the columns: the keys are the columns
+            cols = []
+            for r in dict_rows:
+                cols += [str(k) for k in r if str(k) not in cols]
+            low = {c.lower(): c for c in cols}
+            ctx.flag('rowkeys')
+        fixed, in_order = [], False
+        for r in rows:
+            if isinstance(r, dict) and r in dict_rows:
+                by = {str(k).lower(): x for k, x in r.items()}
+                if len(set(low)) == len(cols) and set(by) & set(low):
+                    fixed.append([by.get(c.lower()) for c in cols])
+                else:  # keys that match no column: the values in the order given
+                    fixed.append(list(r.values()))
+                    in_order = in_order or len(set(low)) == len(cols)
+            else:
+                fixed.append(r)
+        if in_order:
+            ctx.flag('rowkeys')
+        rows = fixed
+    out = {'type': 'table', 'columns': cols, 'rows': [r if isinstance(r, list) else [r] for r in rows]}
+    if b.get('title') is not None:
+        out['title'] = _text(b['title'])
+    if isinstance(b.get('formats'), list):
+        out['formats'] = b['formats']
+    return out
+
+
+def _values(v) -> list:
+    """Chart values as a list; {'x': .., 'y': ..} or {'label': .., 'value': ..} points give their value. A string is
+    split on commas that are not thousands separators ("10, 20, 30"), else on spaces or semicolons."""
+    if isinstance(v, dict):
+        v = list(v.values())
+    if isinstance(v, str):
+        parts = [p.strip() for p in _CELL_COMMA.split(v) if p.strip()]
+        if len(parts) < 2:
+            parts = [p for p in re.split(r'[\s;]+', v.strip()) if p]
+        return parts
+    if not isinstance(v, list):
+        return [v]
+    return [_first(x, 'value', 'y', 'v', 'count', 'amount')[1] if isinstance(x, dict) else x for x in v]
+
+
+def _chart(b: dict, kind: str | None, ctx) -> dict:
+    lk, labels = _first(b, 'labels', 'categories', 'x', 'xlabels', 'x_labels', 'x_axis', 'keys')
+    sk, series = _first(b, 'series', 'datasets', 'values', 'data', 'y')
+    if lk not in (None, 'labels') or sk not in (None, 'series'):
+        ctx.flag('fields')
+    if isinstance(series, dict) and ('datasets' in series or 'labels' in series):
+        # Chart.js: data: {labels, datasets: [{label, data}]}
+        return _chart({**{k: v for k, v in b.items() if k != sk}, **series}, kind, ctx)
+    if isinstance(labels, str):
+        labels = _split_items(labels) if '\n' in labels or ';' in labels else _cells_line(labels)
+    elif isinstance(labels, dict):
+        labels = list(labels.values())
+    labels = [_text(x) for x in labels] if isinstance(labels, list) else []
+    if isinstance(series, dict):
+        if any(k in series for k in ('values', 'data', 'points', 'y')):
+            series = [series]
+        elif all(isinstance(x, list) for x in series.values()):
+            series = [{'name': k, 'values': x} for k, x in series.items()]
+        else:  # {label: value}
+            labels = labels or [str(k) for k in series]
+            series = [{'name': '', 'values': list(series.values())}]
+    if isinstance(series, list) and series and all(isinstance(x, dict) and _first(x, 'value', 'y', 'count', 'amount')[0]
+                                                   and not _first(x, 'values', 'data')[0] for x in series):
+        # data: [{label, value}] is labels and one series
+        labels = labels or [_text(_first(x, 'label', 'name', 'x', 'category', 'key')[1]) for x in series]
+        series = [{'name': '', 'values': _values(series)}]
+    out_series, loose = [], []
+    for s in series if isinstance(series, list) else []:
+        if isinstance(s, dict):
+            _, vals = _first(s, 'values', 'data', 'points', 'y', 'value')
+            if not labels and isinstance(vals, list) and vals and all(isinstance(x, dict) for x in vals):
+                # points written as {label|x: .., value|y: ..} name their own categories
+                got = [_text(_first(x, 'label', 'x', 'name', 'category', 'key')[1]) for x in vals]
+                if any(got):
+                    labels = [g or str(j + 1) for j, g in enumerate(got)]
+            out_series.append({'name': _text(_first(s, 'name', 'label', 'title', 'key')[1]), 'values': _values(vals)
+                               if vals is not None else []})
+        elif isinstance(s, list):
+            out_series.append({'name': '', 'values': _values(s)})
+        elif isinstance(s, str) and number(s, loose=True) is None:
+            ctx.res_note('S5', 'a chart series written as text was dropped')
+        else:
+            loose.append(s)
+    if loose:  # a bare list of numbers is one series
+        out_series.insert(0, {'name': '', 'values': loose})
+    k = kind or b.get('kind') or b.get('chart_type') or b.get('style')
+    k = str(k or 'bar').lower().strip().replace('_chart', '')
+    return {'type': 'chart', 'kind': k, 'title': _text(b.get('title') or b.get('caption') or b.get('name')),
+            'labels': labels, 'series': out_series}
+
+
+def _event(e) -> dict | None:
+    if isinstance(e, (list, tuple)):
+        e = {'date': e[0] if e else '', 'label': ' '.join(_text(x) for x in e[1:])}
+    if isinstance(e, dict):
+        return {'date': _text(_first(e, 'date', 'year', 'when', 'time', 'period', 'era')[1]),
+                'label': _text(_first(e, 'label', 'title', 'text', 'event', 'description', 'name', 'what')[1])}
+    s = _text(e).strip()
+    return diagram.parse_event(s) if s else None
+
+
+def _slug(s: str, used: set) -> str:
+    base = re.sub(r'[^a-z0-9]+', '-', s.lower()).strip('-')[:32] or 'node'
+    nid, n = base, 2
+    while nid in used:
+        nid, n = f'{base}-{n}', n + 1
+    used.add(nid)
+    return nid
+
+
+def _nodes(raw, used: set, parent: str = '', depth: int = 0) -> list[dict]:
+    """Tree and flow nodes: strings become {id, label}; nested children become parent links."""
+    out = []
+    if isinstance(raw, dict):
+        raw = [raw] if any(k in raw for k in ('id', 'label', 'text', 'name', 'children')) else \
+            [{'label': k, 'children': v} if isinstance(v, (list, dict)) else {'label': f'{k}: {_text(v)}'}
+             for k, v in raw.items()]
+    for n in raw if isinstance(raw, list) else [raw]:
+        if isinstance(n, dict):
+            label = _text(_first(n, 'label', 'text', 'title', 'name', 'value')[1])
+            nid = _text(_first(n, 'id', 'key', 'name')[1]) or label
+            if not nid.strip():
+                continue
+            used.add(nid)
+            par = _text(_first(n, 'parent', 'parent_id', 'parentId', 'under')[1]) or parent
+            out.append({'id': nid, 'label': label or nid, 'parent': par})
+            kids = _first(n, 'children', 'nodes', 'items')[1]
+            if kids is not None and depth < 8:
+                out += _nodes(kids, used, nid, depth + 1)
+        elif _text(n).strip():
+            label = _text(n).strip()
+            out.append({'id': _slug(label, used), 'label': label, 'parent': parent})
+    return out
+
+
+_ARROW = re.compile(r'\s*(?:-+>|→|=+>|\s+to\s+)\s*')
+
+
+def _edges(raw) -> list[dict]:
+    if isinstance(raw, dict):
+        raw = [raw] if any(k in raw for k in ('from', 'to', 'source', 'target')) else \
+            [{'from': k, 'to': v} for k, v in raw.items() if isinstance(v, str)]
+    out = []
+    for e in raw if isinstance(raw, list) else []:
+        if isinstance(e, str):
+            parts = [p.strip() for p in _ARROW.split(e) if p.strip()]
+            out += [{'from': a, 'to': b, 'label': ''} for a, b in zip(parts, parts[1:])]
+        elif isinstance(e, (list, tuple)) and len(e) >= 2:
+            out.append({'from': _text(e[0]), 'to': _text(e[1]), 'label': _text(e[2]) if len(e) > 2 else ''})
+        elif isinstance(e, dict):
+            a, b = _first(e, 'from', 'source', 'start', 'a')[1], _first(e, 'to', 'target', 'end', 'b')[1]
+            if a is None and b is None and len(e) == 1:
+                (a, b), = e.items()
+            out.append({'from': _text(a), 'to': _text(b), 'label': _text(_first(e, 'label', 'text', 'name')[1])})
+    return out
+
+
+def _diagram(b: dict, kind: str, ctx) -> dict:
+    title = _text(b.get('title') or b.get('caption') or b.get('name'))
+    if kind == 'timeline':
+        _, events = _first(b, 'events', 'items', 'milestones', 'entries', 'dates', 'steps')
+        if isinstance(events, dict):
+            events = [{'date': k, 'label': _text(v)} for k, v in events.items()]
+        elif isinstance(events, str):
+            events = _split_items(events)
+        events = [x for x in (_event(e) for e in (events if isinstance(events, list) else [])) if x]
+        return {'type': 'timeline', 'title': title, 'events': events}
+    used: set = set()
+    _, nodes = _first(b, 'nodes', 'items', 'steps', 'children', 'elements')
+    nodes = _nodes(nodes if nodes is not None else [], used)
+    edges = _edges(_first(b, 'edges', 'connections', 'arrows')[1])
+    if kind == 'tree':
+        return {'type': 'tree', 'title': title, 'nodes': nodes}
+    if not nodes and edges:  # arrows only: their ends are the steps, in order
+        for e in edges:
+            for end in (e['from'], e['to']):
+                if end and end not in used:
+                    used.add(end)
+                    nodes.append({'id': end, 'label': end, 'parent': ''})
+    if not edges and len(nodes) > 1:
+        edges = [{'from': a['id'], 'to': c['id'], 'label': ''} for a, c in zip(nodes, nodes[1:])]
+        ctx.res_note('S6', 'a flow without arrows was drawn in the order its steps were given')
+    return {'type': 'flow', 'title': title, 'nodes': nodes, 'edges': edges}
+
+
+def _infer(b: dict) -> str | None:
+    """A block's type from its keys, first match wins."""
+    has = lambda *ks: any(b.get(k) is not None for k in ks)  # noqa: E731
+    if has('items', 'points', 'bullets'):
+        return 'bullets'
+    if has('rows', 'columns', 'headers'):
+        return 'table'
+    if has('series', 'datasets') or (has('data', 'values') and has('labels', 'categories')):
+        return 'chart'
+    if has('events', 'milestones'):
+        return 'timeline'
+    if has('edges'):
+        return 'flow'
+    if has('nodes'):
+        nodes = b['nodes'] if isinstance(b['nodes'], list) else []
+        return 'tree' if any(isinstance(n, dict) and (n.get('parent') or n.get('children')) for n in nodes) else 'flow'
+    if has('text', 'content', 'body', 'paragraph', 'value', 'description'):
+        return 'paragraph'
+    if has('code', 'lang', 'language'):
+        return 'code'
+    if has('quote'):
+        return 'quote'
+    if has('query', 'caption', 'alt'):
+        return 'figure'
+    return None
+
+
+class _Ctx:
+    """What the block reader needs to note a repair against the section it is in."""
+
+    def __init__(self, res: dict, log: _Log, si: int, level):
+        self.res, self.log, self.si, self.level = res, log, si, level
+
+    NOTES = {
+        'alias': ('S1', 'block types written another way were read in {w}', 'block types written another way were read in {w}'),
+        'infer': ('S1', 'a block without a known type was read by its fields in {w}',
+                  'blocks without a known type were read by their fields in {w}'),
+        'fields': ('S1', 'fields written another way were read in {w}', 'fields written another way were read in {w}'),
+        'split': ('S1', 'text where a list was expected was split into items in {w}',
+                  'text where a list was expected was split into items in {w}'),
+        'salvage': ('S1', 'a block in {w} could not be read and was kept as text',
+                    'blocks in {w} could not be read and were kept as text'),
+        'empty': ('S1', 'an empty block in {w} was left out', 'empty blocks in {w} were left out'),
+        'heading': ('S8', 'a heading written as a block started a new section in {w}',
+                    'headings written as blocks started new sections in {w}'),
+        'rowkeys': ('S1', 'table rows with other key names were read in order in {w}',
+                    'table rows with other key names were read in order in {w}'),
+    }
+
+    def flag(self, what: str):
+        rid, one, many = self.NOTES[what]
+        self.log.add(rid, one, many, self.si)
+
+    def res_note(self, rid: str, note: str):
+        _note(self.res, rid, 'fix', note)
+
+
+def _coerce(b, ctx: _Ctx) -> list[dict]:
+    """One block as the model wrote it -> blocks in the DocSpec shape (a heading block comes back as
+    {'type': '_heading'}). Raises on shapes it cannot read, which the caller salvages."""
+    if b is None or isinstance(b, bool):
+        return []
+    if isinstance(b, (int, float)):
+        b = _text(b)
+    if isinstance(b, str):
+        return [{'type': 'paragraph', 'text': b}] if b.strip() else []
+    if isinstance(b, list):
+        if all(not isinstance(x, (dict, list)) for x in b):
+            ctx.flag('fields')
+            return [{'type': 'bullets', 'items': _items(b, ctx)}]
+        return [c for x in b for c in _coerce(x, ctx)]
+    if not isinstance(b, dict):
+        raise ValueError('not a block')
+    raw_type = b.get('type')
+    t = re.sub(r'[\s-]+', '_', str(raw_type).strip().lower()) if isinstance(raw_type, str) else ''
+    if t == 'image' and 'asset' in b:
+        return [b]  # an internal image block (code wrote it); normalize checks it against the asset cache (X6)
+    kind = _TYPE_ALIASES.get(t)
+    if kind is None:
+        kind = _infer(b)
+        if kind is None:
+            raise ValueError('unknown block')
+        ctx.flag('infer')
+    elif t != kind and not (t in CHART_KINDS or t in ('ordered', 'diagram')):
+        ctx.flag('alias')
+    if kind == 'diagram':
+        k = str(b.get('kind') or '').lower()
+        kind = k if k in diagram.KINDS else 'timeline' if b.get('events') is not None else 'flow' \
+            if b.get('edges') is not None else _infer({'nodes': b.get('nodes')}) or 'flow'
+    if kind == 'heading':
+        text = _text(_first(b, 'text', 'content', 'title', 'heading', 'value', 'label')[1])
+        level = {'h1': 1, 'h2': 2, 'h3': 3, 'h4': 3}.get(t)
+        if level is None:
+            try:
+                base = int(ctx.level or 1)
+            except (TypeError, ValueError, OverflowError):
+                base = 1
+            level = min(base + 1, 3) if t == 'subheading' else b.get('level') or base
+        return [{'type': '_heading', 'text': text, 'level': level}]
+    if kind in ('bullets', 'ordered'):
+        k, v = _first(b, 'items', 'points', 'list', 'bullets', 'lines', 'content', 'text', 'entries')
+        if k not in (None, 'items'):
+            ctx.flag('fields')
+        ordered = kind == 'ordered' or bool(b.get('ordered')) or t in ('ordered', 'steps')
+        return [{'type': 'bullets', 'items': _items(v, ctx), 'ordered': ordered}]
+    if kind == 'paragraph':
+        k, v = _first(b, 'text', 'content', 'body', 'value', 'paragraph', 'description', 'markdown')
+        if k not in (None, 'text'):
+            ctx.flag('fields')
+        if isinstance(v, list) and v and all(isinstance(x, str) for x in v) and any('\n' in x for x in v):
+            v = '\n'.join(v)
+        return [{'type': 'paragraph', 'text': _text(v)}]
+    if kind == 'quote':
+        by = _first(b, 'by', 'author', 'source', 'cite', 'attribution')[1]
+        return [{'type': 'quote', 'text': _text(_first(b, 'text', 'quote', 'content', 'body')[1]),
+                 'by': by if isinstance(by, str) else ''}]
+    if kind == 'code':
+        v = _first(b, 'text', 'code', 'content', 'source', 'body')[1]
+        if isinstance(v, list):
+            v = '\n'.join(_text(x) for x in v)
+        return [{'type': 'code', 'lang': _text(_first(b, 'lang', 'language')[1]), 'text': _text(v)}]
+    if kind == 'table':
+        return [_table(b, ctx)]
+    if kind == 'chart':
+        return [_chart(b, t if t in CHART_KINDS or t in CHART_ALIASES else
+                       t.replace('_chart', '') if t.endswith('_chart') else None, ctx)]
+    if kind in diagram.KINDS:
+        return [_diagram(b, kind, ctx)]
+    if kind == 'page_break':
+        return [{'type': 'page_break'}]
+    # figure: a picture the create agent looks up; its address was removed by S7, its caption is the search
+    caption = _text(_first(b, 'caption', 'alt', 'title', 'text', 'description', 'label')[1])
+    return [{'type': 'figure', 'query': _text(_first(b, 'query', 'search', 'alt', 'prompt')[1]) or caption,
+             'caption': caption}]
+
+
+def _salvage(b, ctx: _Ctx) -> list[dict]:
+    """A block that could not be read keeps its words as a paragraph; a figure never does (its query is a search, not
+    content); a block with no words is left out."""
+    t = b.get('type') if isinstance(b, dict) else None
+    if isinstance(t, str) and _TYPE_ALIASES.get(t.strip().lower()) == 'figure':
+        ctx.flag('empty')
+        return []
+    text = plain(' '.join(_strings(b, [])))[:SALVAGE_CHARS].strip()
+    if not text:
+        ctx.flag('empty')
+        return []
+    ctx.flag('salvage')
+    return [{'type': 'paragraph', 'text': text}]
+
+
+def _read_block(raw, ctx: _Ctx) -> list:
+    """[('block', dict) | ('heading', text, level)] for one block as written: repaired, cleaned (S4-S6), salvaged."""
+    try:
+        coerced = _coerce(raw, ctx)
+    except SpecError:
+        raise
+    except Exception:
+        return [('block', b) for b in _salvage(raw, ctx)]
+    out = []
+    for cb in coerced:
+        if cb.get('type') == '_heading':
+            out.append(('heading', cb['text'], cb['level']))
+            continue
+        try:
+            t = _check_block(cb, f'Section {ctx.si}')
+            nb = _block(cb, t, ctx.res)
+        except Exception:
+            out += [('block', b) for b in _salvage(cb, ctx)]
+            continue
+        if nb is None:
+            # nothing readable in its own fields: its words (in fields with other names) are still kept
+            src = raw if len(coerced) == 1 else cb
+            if t not in ('image', 'figure', 'page_break') and _strings(src, []):
+                out += [('block', b) for b in _salvage(src, ctx)]
+            elif t != 'image':
+                ctx.flag('empty')
+            continue
+        if nb['type'] == 'paragraph' and '\n' in nb['text']:
+            for p in (p.strip() for p in nb['text'].split('\n\n')):
+                if not p:
+                    continue
+                lines = p.split('\n')
+                items = [_LIST_LINE.match(ln) for ln in lines]
+                if len(lines) > 1 and all(items):
+                    _note(ctx.res, 'S4', 'fix', 'Markdown lists inside paragraphs turned into bullets')
+                    ordered = all(re.match(r'\s*\d', ln) for ln in lines)
+                    out.append(('block', {'type': 'bullets', 'items': [m.group(1) for m in items], 'ordered': ordered}))
+                else:
+                    out.append(('block', {'type': 'paragraph', 'text': ' '.join(ln.strip() for ln in lines)}))
+            continue
+        out.append(('block', nb))
+    return out
+
+
+def _level(v):
+    if isinstance(v, bool) or v is None:
+        return None
+    try:
+        n = int(float(v)) if isinstance(v, (str, float)) else int(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return max(-1000, min(n, 1000))
+
+
+def _heading(v, res: dict) -> str:
+    h = plain(_text(v), emphasis=False).replace('\n', ' ')[:200]
+    if isinstance(v, str) and h != v.strip():
+        _note(res, 'S4', 'fix', 'HTML or Markdown syntax in text converted to plain text')
+    return h
+
+
+def _read_section(raw, si: int, res: dict, log: _Log) -> list[dict]:
+    """One section as written -> sections in the DocSpec shape (a heading block starts another one)."""
+    if raw is None or isinstance(raw, bool):
+        return []
+    if isinstance(raw, (int, float)):
+        raw = _text(raw)
+    if isinstance(raw, str):
+        text = plain(raw).strip()
+        if not text:
+            return []
+        if '\n' not in text and len(text) <= SHORT_HEADING:
+            log.add('S8', 'a section written as text became a heading in {w}',
+                    'sections written as text became headings in {w}', si)
+            return [{'heading': plain(text, emphasis=False), 'level': None, 'blocks': [], 'notes': ''}]
+        log.add('S8', 'a section written as text became a paragraph in {w}',
+                'sections written as text became paragraphs in {w}', si)
+        raw = {'blocks': [raw]}
+    elif isinstance(raw, list):
+        log.add('S1', 'a section written as a list of blocks was read in {w}',
+                'sections written as lists of blocks were read in {w}', si)
+        raw = {'blocks': raw}
+    if not isinstance(raw, dict):
+        return []
+    _strip_fetch(raw, si, log)
+    hk, hv = _first(raw, 'heading', 'title', 'name', 'header', 'headline')
+    if hk not in (None, 'heading'):
+        log.add('S8', 'a section heading written as "{k}" was read in {{w}}'.format(k=hk),
+                'section headings written another way were read in {w}', si)
+    heading = _heading(hv, res)
+    level = _level(raw.get('level'))
+    bk, blocks = _first(raw, 'blocks', 'content', 'body', 'items', 'elements')
+    if bk is None and isinstance(raw.get('type'), str) and \
+            re.sub(r'[\s-]+', '_', raw['type'].strip().lower()) in _TYPE_ALIASES:
+        log.add('S1', 'a block written as a section was read in {w}', 'blocks written as sections were read in {w}', si)
+        raw = {k: v for k, v in raw.items() if k not in ('heading', 'title', 'name', 'header', 'headline', 'level',
+                                                         'notes') or raw.get('type') in ('chart', 'table')}
+        blocks, bk = [raw], 'blocks'
+    if bk not in (None, 'blocks'):
+        log.add('S1', 'section blocks written as "{k}" were read in {{w}}'.format(k=bk),
+                'section blocks written another way were read in {w}', si)
+    if isinstance(blocks, str):
+        blocks = [blocks]
+    elif isinstance(blocks, dict):
+        blocks = [blocks]
+    elif isinstance(blocks, list) and blocks and all(isinstance(x, str) for x in blocks) and bk != 'blocks':
+        blocks = [{'type': 'bullets', 'items': blocks}]
+    elif not isinstance(blocks, list):
+        blocks = []
+    lead = [] if blocks and blocks[0] is raw else \
+        [{'type': 'paragraph', 'text': raw[k]} for k in ('text', 'paragraph') if isinstance(raw.get(k), str)]
+    tail = [{'type': 'bullets', 'items': raw[k]} for k in ('bullets', 'points') if raw.get(k) is not None]
+    blocks = lead + blocks + tail
+    notes = plain(_text(_first(raw, 'notes', 'speaker_notes', 'speakerNotes', 'note')[1]), emphasis=False)
+    ctx = _Ctx(res, log, si, level)
+    out = []
+    cur = {'heading': heading, 'level': level, 'blocks': [], 'notes': notes}
+    for b in blocks:
+        for item in _read_block(b, ctx):
+            if item[0] == 'heading':
+                text = plain(item[1], emphasis=False).replace('\n', ' ')[:200]
+                if not text or (text == cur['heading'] and not cur['blocks']):
+                    continue
+                ctx.flag('heading')
+                if cur['heading'] or cur['blocks']:
+                    out.append(cur)
+                    cur = {'heading': text, 'level': item[2], 'blocks': [], 'notes': ''}
+                else:
+                    cur.update(heading=text, level=item[2])
+                continue
+            nb = item[1]
+            if nb['type'] == 'page_break' and cur['blocks'] and cur['blocks'][-1]['type'] == 'page_break':
+                continue
+            cur['blocks'].append(nb)
+    out.append(cur)
+    kept = []
+    for s in out:
+        if not s['heading'] and not s['blocks'] and s['notes']:
+            # a section with only speaker notes: its words become the section's text
+            s = {**s, 'blocks': [{'type': 'paragraph', 'text': s['notes']}], 'notes': ''}
+            log.add('S8', 'a section with only notes kept them as its text in {w}',
+                    'sections with only notes kept them as their text in {w}', si)
+        if s['heading'] or s['blocks']:
+            kept.append(s)
+    return kept
+
+
+def _top(spec, log: _Log) -> dict:
+    """Step 2: the spec's own fields and its list of sections, however they were written."""
+    if isinstance(spec, list):
+        log.add('S1', 'the reply was a list of sections and was read as one file', '', None)
+        return {'sections': spec}
+    if isinstance(spec, str):
+        return {'sections': [{'heading': '', 'blocks': [spec]}] if spec.strip() else []}
+    if not isinstance(spec, dict):
+        return {'sections': []}
+    spec = dict(spec)
+    _strip_fetch(spec, None, log, top=True)
+    k, sections = _first(spec, 'sections', 'slides', 'pages', 'parts', 'chapters')
+    if k not in (None, 'sections'):
+        log.add('S1', f'sections written as "{k}" were read', '', None)
+    if _empty(sections):
+        bk, blocks = _first(spec, 'blocks', 'content', 'body')
+        if not _empty(blocks):
+            sections = [{'heading': '', 'blocks': blocks}]
+            log.add('S1', 'blocks written without a section were read as one section', '', None)
+    if isinstance(sections, dict):
+        if any(x in sections for x in ('heading', 'blocks', 'title', 'content')):
+            sections = [sections]
+        else:
+            sections = [({**v, 'heading': v.get('heading') or v.get('title') or str(key)} if isinstance(v, dict) else
+                         {'heading': str(key), 'blocks': v}) for key, v in sections.items()]
+        log.add('S1', 'sections written as an object were read as a list', '', None)
+    elif isinstance(sections, str):
+        sections = [sections]
+    elif not isinstance(sections, list):
+        sections = []
+    out = {'sections': sections, 'title': _first(spec, 'title', 'name', 'heading')[1], 'subtitle': spec.get('subtitle')}
+    for key in ('theme', 'paper', 'font', 'design', 'format'):
+        if spec.get(key) is not None:
+            out[key] = spec[key]
+    return out
+
+
+def _fold(sections: list[dict], res: dict, capped: bool) -> list[dict]:
+    """L1: blocks past 30 continue in a section headed "<heading> (cont.)"; sections past 40 are folded into the last
+    one while it has room, and the rest are cut from the end with a note saying how many."""
+    out, split = [], 0
+    for s in sections:
+        bl = s['blocks']
+        if len(bl) <= MAX_BLOCKS:
+            out.append(s)
+            continue
+        split += 1
+        for i in range(0, len(bl), MAX_BLOCKS):
+            out.append({**s, 'heading': s['heading'] if i == 0 else f'{s["heading"] or "More"} (cont.)',
+                        'blocks': bl[i:i + MAX_BLOCKS], 'notes': s['notes'] if i == 0 else ''})
+    if split:
+        _note(res, 'L1', 'fix', f'sections with more than {MAX_BLOCKS} blocks continue in a section headed "(cont.)"')
+    if not capped and len(out) > MAX_FITTED:  # a spec normalize already fitted (a deck's slides) still has an end
+        _note(res, 'L1', 'fix', f'{len(out) - MAX_FITTED:,} sections past {MAX_FITTED:,} were cut from the end')
+        out = out[:MAX_FITTED]
+    if capped and len(out) > MAX_SECTIONS:
+        last = {**out[MAX_SECTIONS - 1], 'blocks': list(out[MAX_SECTIONS - 1]['blocks'])}
+        folded = cut = 0
+        for s in out[MAX_SECTIONS:]:
+            add = ([{'type': 'paragraph', 'text': f'**{s["heading"]}**'}] if s['heading'] else []) + s['blocks']
+            if not cut and len(last['blocks']) + len(add) <= MAX_BLOCKS:
+                last['blocks'] += add
+                folded += 1
+            else:
+                cut += 1
+        out = out[:MAX_SECTIONS - 1] + [last]
+        if folded:
+            _note(res, 'L1', 'fix', f'{folded} section{"" if folded == 1 else "s"} past the limit of {MAX_SECTIONS} '
+                                    f'{"was" if folded == 1 else "were"} folded into the last one')
+        if cut:
+            _note(res, 'L1', 'fix', f'{cut} section{"" if cut == 1 else "s"} past the limit of {MAX_SECTIONS} '
+                                    f'{"was" if cut == 1 else "were"} cut from the end')
+    return out
+
+
+def _shrink(b: dict, budget: int) -> dict | None:
+    """A block cut to about `budget` bytes of JSON, or None when it can't be."""
+    chars = max(budget // 4, 0)
+    if b['type'] in ('paragraph', 'quote', 'code') and chars > 20:
+        return {**b, 'text': _cut_words(b['text'], chars) + ' ...'}
+    if b['type'] == 'bullets':
+        items, used = [], 0
+        for it in b['items']:
+            if used + len(it) > chars:
+                if chars - used > 20:
+                    items.append(_cut_words(it, chars - used) + ' ...')
+                break
+            items.append(it)
+            used += len(it) + 4
+        return {**b, 'items': items} if items else None
+    return None
+
+
+def _fit_size(doc: dict, res: dict) -> None:
+    """L1: past 200 KB of JSON (table rows not counted), blocks are cut from the end; a single block that is still too
+    large is shortened. The note says how much."""
+    total = _size_without_rows(doc)
+    if total <= MAX_SPEC_BYTES:
+        return
+    # speaker notes are shortened first (the longest first): they never cost a block or a slide
+    cut_notes = 0
+    for sec in sorted(doc['sections'], key=lambda x: -len(x.get('notes') or '')):
+        if total <= MAX_SPEC_BYTES or len(sec.get('notes') or '') <= NOTES_KEEP:
+            break
+        sec['notes'] = _cut_words(sec['notes'], NOTES_KEEP)
+        cut_notes += 1
+        total = _size_without_rows(doc)
+    if cut_notes:
+        _note(res, 'L1', 'fix', f'speaker notes on {cut_notes} slide{"" if cut_notes == 1 else "s"} shortened to '
+                                f'{NOTES_KEEP:,} characters to keep the spec within {MAX_SPEC_BYTES // 1000} KB')
+    if total <= MAX_SPEC_BYTES:
+        return
+    sections, cut = doc['sections'], 0
+    while total > MAX_SPEC_BYTES and sections:
+        s = sections[-1]
+        if not s['blocks']:
+            if len(sections) == 1:
+                break
+            sections.pop()
+            total = _size_without_rows(doc)
+            continue
+        n_blocks = sum(len(x['blocks']) for x in sections)
+        b = s['blocks'][-1]
+        size = _size_without_rows(b)
+        if n_blocks == 1 or total - size <= MAX_SPEC_BYTES:
+            small = _shrink(b, MAX_SPEC_BYTES - (total - size) - 2000)
+            s['blocks'][-1:] = [small] if small else []
+            if small:
+                _note(res, 'L1', 'fix', f'a block was shortened to keep the spec within {MAX_SPEC_BYTES // 1000} KB')
+            else:
+                cut += 1
+        else:
+            s['blocks'].pop()
+            cut += 1
+        total = _size_without_rows(doc)
+    if cut:
+        _note(res, 'L1', 'fix', f'{cut} block{"" if cut == 1 else "s"} cut from the end to keep the spec within '
+                                f'{MAX_SPEC_BYTES // 1000} KB')
+
+
+def _repair(spec, res: dict, keep_notes: bool = True) -> dict:
+    """Steps 1 to 6 of the repair (docs/PLAN-files-robust.md 2.3), recording notes in `res`. keep_notes False (a
+    format with no speaker notes) clears the notes before the size check, so they never cost content."""
+    log = _Log()
+    try:
+        cleaned = _clean_tree(spec)
+    except RecursionError:
+        cleaned = None
+    top = _top(cleaned, log)
+    sections = []
+    for si, raw in enumerate(top['sections'], 1):
+        sections += _read_section(raw, si, res, log)
+    log.flush(res)
+    sections = _fold(sections, res, capped=top.get('format') not in FORMATS)
+    title = plain(_text(top.get('title')), emphasis=False).replace('\n', ' ')[:1000]
+    subtitle = plain(_text(top.get('subtitle')), emphasis=False).replace('\n', ' ')[:1000]
+    doc = {'title': title, 'subtitle': subtitle, 'sections': sections}
+    if not keep_notes:
+        for sec in sections:
+            sec['notes'] = ''
+    _fit_size(doc, res)
+    for key in ('theme', 'paper', 'font', 'design', 'format'):
+        if key in top:
+            doc[key] = top[key]
+    return doc
+
+
+_REPAIR_RULES = (('S1', 'fix'), ('S7', 'fix'), ('S8', 'fix'), ('L1', 'fix'))
+
+
+def _fresh() -> dict:
+    return {rid: RuleResult(rid, sev, True, '') for rid, sev in
+            (('S1', 'fix'), ('S2', 'block'), ('S3', 'fix'), ('S4', 'fix'), ('S5', 'fix'), ('S6', 'fix'),
+             ('S7', 'fix'), ('L1', 'fix'), ('L2', 'fix'), ('L3', 'fix'), ('S8', 'fix'))}
+
+
+def repair(spec) -> tuple[dict, list[RuleResult]]:
+    """The format-independent half of normalize: never raises. {'title', 'subtitle', 'sections': [{'heading',
+    'level', 'blocks', 'notes'}], plus 'theme', 'paper', 'font', 'design' when present}, with every block valid for
+    the renderers, and the S1, S7, S8 and L1 results (and any other rule a repair touched)."""
+    res = _fresh()
+    try:
+        doc = _repair(spec, res)
+    except Exception as e:  # never raises: garbage is an empty spec
+        _note(res, 'S1', 'fix', f'the spec could not be read ({type(e).__name__})')
+        doc = {'title': '', 'subtitle': '', 'sections': []}
+    keep = [res[r] for r, _ in _REPAIR_RULES] + [r for k, r in res.items() if k not in dict(_REPAIR_RULES) and
+                                                 k != 'S2' and not r.ok]
+    return doc, keep
+
+
+def _shows(sections: list[dict]) -> bool:
+    """S2: something to show: a heading, or a block that is not a page break or a figure that found no image."""
+    return any(s['heading'] or any(b['type'] not in ('page_break', 'figure') for b in s['blocks']) for s in sections)
+
+
+def has_text(spec) -> bool:
+    """True when repair(spec) keeps at least one section with a heading or a non-empty block (the S2 test)."""
+    return _shows(repair(spec)[0]['sections'])
+
+
+_JSON_FENCE = re.compile(r'```[ \t]*(?:json|JSON|javascript|js)?[ \t]*\n?(.*?)(?:```|$)', re.S)
+
+
+def _close_json(t: str) -> str:
+    """A cut-off reply closed: an open string ended, a dangling key, colon, comma or partial word dropped or given a
+    null, and every open bracket closed."""
+    stack, in_str, esc = [], False, False
+    for ch in t:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in '{[':
+            stack.append('}' if ch == '{' else ']')
+        elif ch in '}]' and stack:
+            stack.pop()
+    if in_str:
+        t = (t[:-1] if esc else t) + '"'
+    t = t.rstrip()
+    for _ in range(4):
+        m = re.search(r'([\[{,:])\s*(?:t|tr|tru|f|fa|fal|fals|n|nu|nul|-|-?\d+\.|-?\d+[eE][-+]?)$', t)
+        if m:
+            t = t[:m.end(1)]
+        if t.endswith(','):
+            t = t[:-1].rstrip()
+        elif t.endswith(':'):
+            t += ' null'
+        elif stack and stack[-1] == '}' and re.search(r'[{,]\s*"(?:[^"\\]|\\.)*"$', t):
+            t += ': null'
+        else:
+            break
+    return t + ''.join(reversed(stack))
+
+
+def parse_spec(text: str) -> dict | None:
+    """Tolerant JSON read of a model reply: strips code fences and text around the outermost {...} or [...], removes
+    trailing commas, closes brackets and quotes left open by a cut-off reply. A top-level list becomes
+    {'sections': list}. None when no JSON object can be read. Raises SpecError('L6') for a reply over 2 MB."""
+    if isinstance(text, (dict, list)):
+        got = text
+    else:
+        text = '' if text is None else str(text)
+        if len(text) > MAX_REPLY_BYTES or len(text.encode('utf-8', 'replace')) > MAX_REPLY_BYTES:
+            raise SpecError('L6', f'The reply is {len(text.encode("utf-8", "replace")) / 1e6:.1f} MB; a file spec is '
+                                  f'read only up to {MAX_REPLY_BYTES // 1_000_000} MB.')
+        got = _parse_json_text(text)
+    if isinstance(got, list):
+        return {'sections': got}
+    return got if isinstance(got, dict) else None
+
+
+def _open_depth(t: str) -> int:
+    """How many brackets are still open at the end of t (strings skipped)."""
+    depth, in_str, esc = 0, False, False
+    for ch in t:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in '{[':
+            depth += 1
+        elif ch in '}]' and depth:
+            depth -= 1
+    return depth
+
+
+def _useful(got) -> bool:
+    return isinstance(got, dict) or isinstance(got, list) and any(isinstance(x, (dict, str)) for x in got)
+
+
+def _parse_json_text(text: str):
+    t = text.strip().lstrip('\ufeff')
+    fenced = _JSON_FENCE.search(t)
+    candidates = [t] + ([fenced.group(1).strip()] if fenced else [])
+    for c in candidates:
+        try:
+            return json.loads(c)
+        except (ValueError, RecursionError):
+            pass
+    dec = json.JSONDecoder()
+    for c in candidates:
+        starts = [i for i in (c.find('{'), c.find('[')) if i >= 0]
+        if not starts:
+            continue
+        body = c[min(starts):]
+        # 1. the outermost object complete, with text after it
+        try:
+            got = dec.raw_decode(body)[0]
+            if _useful(got):
+                return got
+        except (ValueError, RecursionError):
+            pass
+        # 2. the outermost object cut off (max_tokens): closed as a whole, so the title and every complete section
+        # before the cut are kept (an inner object alone would lose them)
+        end = max(body.rfind('}'), body.rfind(']'))
+        for x in [body] + ([body[:end + 1]] if end > 0 else []):
+            fixed = re.sub(r',(\s*[}\]])', r'\1', x)
+            for y in (fixed, _close_json(fixed)):
+                try:
+                    got = json.loads(y, strict=False)
+                except (ValueError, RecursionError):
+                    continue
+                if _useful(got):
+                    return got
+        # 3. a complete object after prose that has brackets of its own ("Sure {here}: {...}"); a hit nested inside
+        # an unclosed bracket is part of a cut-off object, not the reply
+        opens = [m.start() for m in list(re.finditer(r'[{\[]', c))[:50]]
+        for i in opens:
+            if _open_depth(c[:i]):
+                continue
+            try:
+                got = dec.raw_decode(c[i:])[0]
+            except (ValueError, RecursionError):
+                continue
+            if _useful(got):
+                return got
+        for i in opens:
+            if _open_depth(c[:i]):
+                continue
+            fixed = re.sub(r',(\s*[}\]])', r'\1', c[i:])
+            try:
+                got = json.loads(_close_json(fixed), strict=False)
+            except (ValueError, RecursionError):
+                continue
+            if _useful(got):
+                return got
+    return None
+
+
 def normalize(spec: dict, fmt: str) -> tuple[dict, list[RuleResult]]:
-    """The spec fixed for one format, plus one RuleResult per content and size rule. Raises SpecError on a block."""
+    """The spec fixed for one format, plus one RuleResult per content and size rule. The spec is repaired first
+    (S1, S7, S8, L1 are fixes); raises SpecError only for S2 (nothing to show), X1 (unknown format) or X6 when an
+    image check itself fails."""
     if fmt not in FORMATS:
         raise SpecError('X1', f'Files are made as {", ".join(FORMATS)} only, not {str(fmt)[:12]!r}.')
-    if not isinstance(spec, dict):
-        raise SpecError('S1', 'The spec is not a JSON object.')
-    res = {rid: RuleResult(rid, sev, True, '') for rid, sev in
-           (('S1', 'block'), ('S2', 'block'), ('S3', 'fix'), ('S4', 'fix'), ('S5', 'fix'), ('S6', 'fix'),
-            ('S7', 'block'), ('L1', 'block'), ('L2', 'fix'), ('L3', 'fix'))}
-    try:
-        size = _size_without_rows(spec)
-    except (TypeError, ValueError, RecursionError):
-        raise SpecError('S1', 'The spec could not be read as JSON.')
-    if size > MAX_SPEC_BYTES:
-        raise SpecError('L1', f'The spec is {size // 1000} KB; the limit is {MAX_SPEC_BYTES // 1000} KB.')
-    _find_fetch(spec)
-    sections = spec.get('sections')
-    if not isinstance(sections, list):
-        raise SpecError('S1', 'The spec needs a list of sections.')
-    if len(sections) > MAX_SECTIONS:
-        raise SpecError('L1', f'The spec has {len(sections)} sections; the limit is {MAX_SECTIONS}.')
-    out_sections = []
-    for si, sec in enumerate(sections, 1):
-        if not isinstance(sec, dict):
-            raise SpecError('S1', f'Section {si} is not an object.')
-        blocks = sec.get('blocks') if sec.get('blocks') is not None else []
-        if not isinstance(blocks, list):
-            raise SpecError('S1', f'Section {si}: blocks must be a list.')
-        if len(blocks) > MAX_BLOCKS:
-            raise SpecError('L1', f'Section {si} has {len(blocks)} blocks; the limit is {MAX_BLOCKS}.')
-        heading = plain(sec.get('heading') or '', emphasis=False).replace('\n', ' ')[:200]
-        if heading != str(sec.get('heading') or '').strip():
-            _note(res, 'S4', 'fix', 'HTML or Markdown syntax in text converted to plain text')
-        cleaned = []
-        for bi, b in enumerate(blocks, 1):
-            t = _check_block(b, f'Section {si}, block {bi}')
-            nb = _block(b, t, res)
-            if nb is None or (t == 'page_break' and cleaned and cleaned[-1]['type'] == 'page_break'):
-                continue
-            if t == 'paragraph' and '\n' in nb['text']:
-                parts = [p.strip() for p in nb['text'].split('\n\n') if p.strip()]
-                for p in parts:
-                    lines = p.split('\n')
-                    items = [_LIST_LINE.match(ln) for ln in lines]
-                    if len(lines) > 1 and all(items):
-                        _note(res, 'S4', 'fix', 'Markdown lists inside paragraphs turned into bullets')
-                        ordered = all(re.match(r'\s*\d', ln) for ln in lines)
-                        cleaned.append({'type': 'bullets', 'items': [m.group(1) for m in items], 'ordered': ordered})
-                    else:
-                        cleaned.append({'type': 'paragraph', 'text': ' '.join(ln.strip() for ln in lines)})
-                continue
-            cleaned.append(nb)
-        notes = plain(sec.get('notes') or '', emphasis=False) if fmt == 'pptx' else ''
-        if heading or cleaned:
-            out_sections.append({'heading': heading, 'level': sec.get('level'), 'blocks': cleaned, 'notes': notes})
-    if not any(s['blocks'] for s in out_sections):
-        raise SpecError('S2', 'The spec has no content: it needs at least one section with at least one '
+    res = _fresh()
+    rep = _repair(spec, res, keep_notes=fmt == 'pptx')
+    out_sections = rep['sections']
+    if not _shows(out_sections):
+        raise SpecError('S2', 'The spec has no content: it needs at least one section with a heading or a '
                               'non-empty block.')
+    for s in out_sections:
+        if fmt != 'pptx':
+            s['notes'] = ''
     _fix_levels(out_sections, res, fmt)
-    title = plain(spec.get('title') or '', emphasis=False).replace('\n', ' ')
+    title = rep['title']
     if not title:
         first = next((s['heading'] for s in out_sections if s['heading']), '')
         if not first:
-            b = next(b for s in out_sections for b in s['blocks'])
-            first = strip_emphasis(b.get('text') or ' '.join(b.get('items') or b.get('columns') or [b.get('title', '')]))
+            b = next(b for s in out_sections for b in s['blocks'] if b['type'] not in ('page_break', 'figure'))
+            first = strip_emphasis(b.get('text') or ' '.join(b.get('items') or b.get('columns') or
+                                                             [b.get('title') or '']))
             first = ' '.join(words(first)[:8])
         title = first or 'Document'
         _note(res, 'S3', 'fix', 'the file had no title; took it from the first heading')
     if len(title) > MAX_TITLE:
         title = title[:MAX_TITLE].rsplit(' ', 1)[0].rstrip(' ,;:') or title[:MAX_TITLE]
         _note(res, 'S3', 'fix', f'title shortened to {MAX_TITLE} characters')
-    out = {'title': title, 'subtitle': plain(spec.get('subtitle') or '', emphasis=False).replace('\n', ' ')[:300],
-           'format': fmt, 'theme': spec.get('theme') if spec.get('theme') in THEMES else 'clean',
-           'paper': 'letter' if str(spec.get('paper') or '').lower() == 'letter' else 'a4', 'sections': out_sections}
-    font = ' '.join(plain(spec.get('font') or '', emphasis=False).lower().split())[:60]
+    theme = rep.get('theme')
+    out = {'title': title, 'subtitle': rep['subtitle'][:300], 'format': fmt,
+           'theme': theme if isinstance(theme, str) and theme in THEMES else 'clean',
+           'paper': 'letter' if str(rep.get('paper') or '').lower() == 'letter' else 'a4', 'sections': out_sections}
+    font = ' '.join(plain(_text(rep.get('font')), emphasis=False).lower().split())[:60]
     if font:
         out['font'] = font
+    if rep.get('design') is not None:
+        design = _clean_design(rep['design'])
+        if design is not None:
+            out['design'] = design
     if fmt == 'pptx':
         slides = []
         for s in out_sections:
             if not s['heading']:
                 s['heading'] = slides[-1]['heading'].removesuffix(' (cont.)') + ' (cont.)' if slides else 'Overview'
+                _note(res, 'S8', 'fix', 'slides without a heading continue the previous slide\'s heading')
             slides.extend(_pptx_slides(s, res))
         out['sections'] = slides
     else:
+        named = 0
+        for i, s in enumerate(out_sections):
+            # S8: a section after the first always has a heading (the first may be the text under the title): its
+            # first line of text when that is a short line of its own, else "Section N"
+            if not s['heading'] and i and any(b['type'] not in ('page_break', 'figure') for b in s['blocks']):
+                first = s['blocks'][0]
+                line = strip_emphasis(first['text']) if first['type'] == 'paragraph' else ''
+                if line and len(line) <= SHORT_HEADING and len(s['blocks']) > 1:
+                    s['heading'], s['blocks'] = line, s['blocks'][1:]
+                else:
+                    s['heading'] = f'Section {i + 1}'
+                named += 1
+        if named:
+            _note(res, 'S8', 'fix', f'{named} section{"" if named == 1 else "s"} without a heading '
+                                    f'{"was" if named == 1 else "were"} given one')
         _limit_tables(out_sections, fmt, res)
-    order = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'L1', 'L2', 'L3'] + [k for k in ('F5', 'A3') if k in res]
+    order = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'L1', 'L2', 'L3', 'S8'] + \
+        [k for k in ('F5', 'A3', 'X6') if k in res]
     return out, [res[k] for k in order]
+
+
+def _clean_design(d):
+    """spec['design'] validated by the design module (create/design.py via themes.clean_design) when it exists."""
+    from . import themes
+    fn = getattr(themes, 'clean_design', None)
+    if fn is None:
+        return None
+    try:
+        return fn(d)
+    except Exception:
+        return None
 
 
 # ---------- zero-token specs ----------

@@ -1,13 +1,19 @@
-import { useEffect, useState } from 'react'
-import { convertCreated, createdUrl, errorText, previewCreated } from '../../api'
-import type { CreatedFile, FileFormat, FilePhase, FilePreview, ImageCredit, RuleResult, ThemeName } from '../../protocol'
-import { Button, IconButton, Skeleton, buttonClass, timeAgo, useToast } from '../../ui'
+import { createContext, useContext, useEffect, useState } from 'react'
+import { convertCreated, createdUrl, errorText, previewCreated, resumeFile } from '../../api'
+import type {
+  CheckpointInfo, CreatedFile, DesignApplied, DesignRole, FileFormat, FilePhase, FilePreview, ImageCredit, PartialInfo, ResumeBody,
+  ResumeRef, ResumeResponse, RuleResult, RunCost, ThemeName,
+} from '../../protocol'
+import { Button, IconButton, Skeleton, badgeClass, buttonClass, navigate, timeAgo, useToast } from '../../ui'
 import { safeHref } from '../../lib'
 import { Icon, type UiIconName } from '../../icons'
 import Markdown from '../Markdown'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { aboutTokens, costRemembered, fileTokens, rememberCost, useCostConfirm } from './CostDialog'
 
 // Files the `create` agent made (docs/PLAN-files.md): one card per file with its format, size and shape, the tokens
 // its content cost, a download link, "Convert to…" (re-rendered from the stored spec, 0 tokens), an inline preview and
@@ -75,6 +81,138 @@ export function primaryOf(files: CreatedFile[], primary?: string | null): Create
   if (primary) { const hit = files.find(f => f.id === primary); if (hit) return hit }
   if (!files.some(f => f.role)) return null
   return [...files].reverse().find(f => f.role === 'primary') ?? null
+}
+
+// ---------- Resume (docs/PLAN-files-robust.md 3, 6.2): write only what a partial or failed file is missing ----------
+
+/** What the page around the cards does after a resume starts. Chat scrolls to the new run, the sandbox adds it to its
+ *  thread; without a provider the card opens the new run's page. `rememberKey` is the chat (or sandbox) whose
+ *  "Don't ask again in this chat" applies. */
+export interface FileActions {
+  onResumed?: (res: ResumeResponse) => void
+  rememberKey?: string | null
+  sandbox?: string | null // sandbox id, for failed steps whose checkpoint does not name it
+  /** `qid:tid` of every file step a file in view was resumed from: those steps no longer offer Resume. */
+  resumed?: ReadonlySet<string>
+}
+
+/** The `qid:tid` keys of the file steps these files were resumed from (FileActions.resumed). */
+export function resumedKeys(files: Iterable<CreatedFile>): Set<string> {
+  const out = new Set<string>()
+  for (const f of files) if (f.resumed_from) out.add(`${f.resumed_from.qid}:${f.resumed_from.tid}`)
+  return out
+}
+
+/** Whether Resume is gone for a file step: the server says it was resumed, or a file in view continues it. */
+function wasResumed(ctx: FileActions, qid: number, tid: string, by?: number | null) {
+  return by != null || !!ctx.resumed?.has(`${qid}:${tid}`)
+}
+export const FileActionsContext = createContext<FileActions>({})
+
+/** Starts a resume, asking first when the server says it is costly. */
+export function useResume() {
+  const ctx = useContext(FileActionsContext)
+  const toast = useToast()
+  const cost = useCostConfirm()
+  const [busy, setBusy] = useState(false)
+  const send = async (body: ResumeBody): Promise<void> => {
+    setBusy(true)
+    try {
+      const r = await resumeFile(body)
+      if (r.kind === 'confirm') {
+        cost.ask({ estimate: r.estimate, body, go: send, ...(ctx.rememberKey ? { onRemember: () => rememberCost(ctx.rememberKey) } : {}) })
+        return
+      }
+      toast.info(`Writing the missing parts as run #${r.res.qid}`)
+      if (ctx.onResumed) ctx.onResumed(r.res)
+      else navigate('/runs/' + r.res.qid)
+    } catch (e) {
+      toast.error(`Could not resume: ${errorText(e)}`)
+    } finally { setBusy(false) }
+  }
+  const start = (ref: ResumeRef) => {
+    const sandbox = ref.sandbox ?? ctx.sandbox ?? null
+    void send({ qid: ref.qid, tid: ref.tid, ...(sandbox ? { sandbox_id: sandbox } : {}), ...(costRemembered(ctx.rememberKey) ? { confirm_cost: true } : {}) })
+  }
+  return { start, busy, dialog: cost.dialog }
+}
+
+function ResumeButton({ target, label = 'Resume' }: { target: ResumeRef; label?: string }) {
+  const { start, busy, dialog } = useResume()
+  return (
+    <>
+      <Button variant="primary" size="sm" icon="replay" loading={busy} onClick={() => start(target)}
+        title="Write only the missing parts. Everything already written is reused.">
+        {busy ? 'Starting' : label}
+      </Button>
+      {dialog}
+    </>
+  )
+}
+
+type StepLike = { tid: string; error?: string; answered?: { ok?: boolean; answer?: string; checkpoint?: CheckpointInfo | null; llm_in?: number; llm_out?: number; created_files?: CreatedFile[] } }
+
+/** File steps that made no file but saved a checkpoint Resume can continue from: the ones that answered with a
+ *  failure, and (from the run's own `checkpoints`) the ones that timed out or were cancelled before answering. */
+export function failedFileSteps(tasks: StepLike[], checkpoints: CheckpointInfo[] = []) {
+  const out = tasks.flatMap(t => {
+    const a = t.answered
+    return a && a.ok === false && a.checkpoint?.resumable
+      ? [{ tid: t.tid, reason: a.answer ?? '', checkpoint: a.checkpoint, tokens: (a.llm_in ?? 0) + (a.llm_out ?? 0) }]
+      : []
+  })
+  for (const c of checkpoints) {
+    if (!c.resumable || c.file_id || out.some(f => f.tid === c.tid)) continue
+    const t = tasks.find(x => x.tid === c.tid)
+    if (t?.answered?.ok !== false && t?.answered) continue // it answered: a file card (or nothing to resume) shows it
+    out.push({ tid: c.tid, reason: t?.error ?? '', checkpoint: c, tokens: c.tokens_in + c.tokens_out })
+  }
+  return out
+}
+
+const unitOf = (format: FileFormat, n: number) => (format === 'pptx' ? (n === 1 ? 'slide' : 'slides') : n === 1 ? 'section' : 'sections')
+
+/** "No file was made", with what was spent and a Resume button. */
+export function NoFileCard({ checkpoint: c, reason, tokens, className }: { checkpoint: CheckpointInfo; reason?: string; tokens?: number; className?: string }) {
+  const ctx = useContext(FileActionsContext)
+  const resumed = wasResumed(ctx, c.qid, c.tid, c.resumed_by)
+  const info = infoOf(c.format)
+  const why = reason?.replace(/^No file was made:?\s*/i, '').trim()
+  const spent = tokens || c.tokens_in + c.tokens_out
+  return (
+    <article className={cn('min-w-0 rounded-lg border border-destructive/30 bg-surface', className)} aria-label="No file was made">
+      <div className="flex min-w-0 flex-wrap items-start gap-x-3 gap-y-2.5 p-3 sm:flex-nowrap sm:items-center">
+        <span className="grid size-10 shrink-0 place-items-center rounded-md bg-destructive/10 text-destructive" aria-hidden="true">
+          <Icon name={info.icon} size={20} strokeWidth={1.8} />
+        </span>
+        <div className="flex min-w-0 flex-1 basis-[calc(100%-52px)] flex-col gap-0.5 sm:basis-auto">
+          <p className="m-0 text-sm font-medium text-foreground">No file was made</p>
+          <p className="m-0 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
+            <span className="font-medium">{info.short}</span>
+            {c.planned > 0 && <><Dot /><span className="tabular-nums">{c.written} of {c.planned} {unitOf(c.format, c.planned)} written</span></>}
+            <Dot /><span className="tabular-nums" title="Tokens already spent. Resume reuses what they paid for.">{tokensText(spent)} spent</span>
+          </p>
+          {why && <p className="m-0 mt-0.5 text-xs text-muted-foreground [overflow-wrap:anywhere]">{why}</p>}
+        </div>
+        <div className="flex basis-full items-center gap-1.5 pl-[52px] sm:basis-auto sm:shrink-0 sm:pl-0">
+          {resumed
+            ? <span className="text-xs text-muted-foreground">{c.resumed_by != null ? `Resumed as run #${c.resumed_by}` : 'Resumed'}</span>
+            : <ResumeButton target={{ qid: c.qid, tid: c.tid }} />}
+        </div>
+      </div>
+    </article>
+  )
+}
+
+/** The failed file steps of one run, as "No file was made" cards. */
+export function FailedFiles({ tasks, checkpoints, className }: { tasks: StepLike[]; checkpoints?: CheckpointInfo[] | null; className?: string }) {
+  const failed = failedFileSteps(tasks, checkpoints ?? [])
+  if (!failed.length) return null
+  return (
+    <ul className={cn('m-0 flex list-none flex-col gap-2 p-0', className)} aria-label="Files that were not made">
+      {failed.map(f => <li key={f.tid}><NoFileCard checkpoint={f.checkpoint} reason={f.reason} tokens={f.tokens} /></li>)}
+    </ul>
+  )
 }
 
 /** A run's files: the primary file first, then the files made along the way folded under "Working files". */
@@ -171,6 +309,7 @@ export function CreatedFileCard({ file: f, onConverted, onDelete, origin, now, c
             <Dot /><span>{SOURCE[f.source] ?? f.source}</span>
             {f.sandbox && <><Dot /><span className="inline-flex items-center gap-1"><Icon name="sandbox" size={11} />sandbox only</span></>}
           </p>
+          <CostLine cost={f.cost} tokens={f.tokens} repairs={f.repairs?.calls ?? 0} />
           {origin && (
             <p className="m-0 flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
               <span className="tabular-nums" title={new Date(f.created * 1000).toLocaleString()}>{timeAgo(f.created, now)}</span>
@@ -208,6 +347,7 @@ export function CreatedFileCard({ file: f, onConverted, onDelete, origin, now, c
         </div>
       </div>
 
+      {f.partial && <PartialRow partial={f.partial} format={f.format} />}
       <FileChips file={f} />
       {brief.length > 0 && <BriefRow rules={brief} />}
       {(warns.length > 0 || fixes.length > 0) && <RuleNotes warns={warns} fixes={fixes} />}
@@ -238,14 +378,138 @@ function FileChips({ file: f }: { file: CreatedFile }) {
   const fontTitle = f.font_used
     ? asked && asked.toLowerCase() !== f.font_used.toLowerCase() ? `You asked for ${asked}; the file uses ${f.font_used}` : `The file uses ${f.font_used}`
     : undefined
-  if (!theme && !f.font_used && f.diagrams == null && f.images == null) return null
+  if (!theme && !f.font_used && f.diagrams == null && f.images == null && !f.design) return null
   return (
     <ul className="m-0 flex list-none flex-wrap gap-1.5 border-t border-border px-3 py-2" aria-label="How the file looks">
-      {theme && <li className={CHIP} title="Colour theme"><Icon name="palette" size={12} className="shrink-0" />{THEME_LABEL[theme] ?? theme}</li>}
+      {f.design && <li className="min-w-0 max-w-full"><DesignChip design={f.design} /></li>}
+      {theme &&<li className={CHIP} title="Colour theme"><Icon name="palette" size={12} className="shrink-0" />{THEME_LABEL[theme] ?? theme}</li>}
       {f.font_used && <li className={CHIP} title={fontTitle}><Icon name="font" size={12} className="shrink-0" /><span className="truncate">{f.font_used}</span></li>}
       {f.diagrams != null && <li className={CHIP}><Icon name="graph" size={12} className="shrink-0" /><span className="tabular-nums">{plural(f.diagrams, 'diagram')}</span></li>}
       {f.images != null && <li className={CHIP}><Icon name="images" size={12} className="shrink-0" /><span className="tabular-nums">{plural(f.images, 'image')}</span></li>}
     </ul>
+  )
+}
+
+/** "Estimated 240,000 tokens, used 250,046", and the repair calls, when the server priced the run. */
+function CostLine({ cost, tokens, repairs }: { cost?: RunCost | null; tokens: number; repairs: number }) {
+  const est = cost?.estimate
+  if (!est && !repairs) return null
+  const used = cost?.actual ? cost.actual.tokens_in + cost.actual.tokens_out : tokens
+  return (
+    <p className="m-0 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
+      {est && (
+        <span className="tabular-nums" title="The estimate is made before the run without calling a model. Used is what the model calls really took.">
+          Estimated {aboutTokens(fileTokens(est))} tokens, used {used.toLocaleString()}
+        </span>
+      )}
+      {est && repairs > 0 && <Dot />}
+      {repairs > 0 && <span className="tabular-nums" title="Calls that re-wrote sections which came back unusable">{repairs} repair call{repairs === 1 ? '' : 's'}</span>}
+    </p>
+  )
+}
+
+/** "Partial: 11 of 12 slides" with the missing headings in its tooltip, and Resume. */
+function PartialRow({ partial: p, format }: { partial: PartialInfo; format: FileFormat }) {
+  const ctx = useContext(FileActionsContext)
+  const resumed = p.resumed_by != null || (p.resume ? wasResumed(ctx, p.resume.qid, p.resume.tid) : false)
+  const unit = unitOf(format, p.planned)
+  const missing = p.missing?.length ? p.missing : []
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-2 border-t border-border px-3 py-2">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span tabIndex={0} className={cn(badgeClass('warn'), 'cursor-default outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35')}>
+            <Icon name="warning" size={12} strokeWidth={2.1} />
+            <span className="tabular-nums">Partial: {p.written} of {p.planned} {unit}</span>
+          </span>
+        </TooltipTrigger>
+        {missing.length > 0 && (
+          <TooltipContent className="max-w-xs text-left">
+            <span className="block font-medium">Not written yet</span>
+            <ul className="m-0 mt-1 list-disc pl-4">{missing.slice(0, 12).map((m, i) => <li key={i}>{m}</li>)}</ul>
+            {missing.length > 12 && <span className="mt-1 block">and {missing.length - 12} more</span>}
+          </TooltipContent>
+        )}
+      </Tooltip>
+      <span className="sr-only">{missing.length ? `Not written yet: ${missing.join(', ')}` : ''}</span>
+      {resumed
+        ? <span className="ml-auto text-xs text-muted-foreground">{p.resumed_by != null ? `Resumed as run #${p.resumed_by}` : 'Resumed'}</span>
+        : p.resume && <span className="ml-auto"><ResumeButton target={p.resume} /></span>}
+    </div>
+  )
+}
+
+const ROLE_LABEL: Record<DesignRole, string> = {
+  bg: 'Background', surface: 'Surface', text: 'Text', heading: 'Headings', muted: 'Muted text', accent: 'Accent', border: 'Border',
+  header_bg: 'Table header', header_text: 'Table header text', stripe: 'Row stripe', code_bg: 'Code background',
+}
+const hex = (c: string) => '#' + c.replace(/^#/, '').toUpperCase()
+
+/** "Design: DESIGN-lovable.md", opening the colours (with their hex text), the fonts used and the notes. */
+function DesignChip({ design: d }: { design: DesignApplied }) {
+  const roles = (Object.entries(d.colors ?? {}) as Array<[DesignRole, string]>).filter(([, c]) => !!c)
+  const extra = (d.palette ?? []).filter(c => !roles.some(([, r]) => r.toUpperCase() === c.replace(/^#/, '').toUpperCase()))
+  const font = (label: string, used: string | null, asked: string | null) => (
+    <li className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="font-medium text-foreground">{used ?? 'the default font'}</span>
+      {asked && used && asked.toLowerCase() !== used.toLowerCase() && <span className="text-muted-foreground">(the design asks for {asked})</span>}
+      {asked && !used && <span className="text-muted-foreground">(the design asks for {asked})</span>}
+    </li>
+  )
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button type="button" data-slot="button" className={cn(CHIP, 'cursor-pointer text-foreground outline-none hover:bg-subtle focus-visible:ring-[3px] focus-visible:ring-ring/35')}
+          aria-label={`Design: ${d.name}. Show the colours and fonts it applied`}>
+          <Icon name="palette" size={12} className="shrink-0" />
+          <span className="truncate">Design: {d.name}</span>
+          <Icon name="chevron-down" size={11} className="shrink-0 text-muted-foreground" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[min(340px,calc(100vw-32px))] p-0">
+        <div className="flex flex-col gap-3 p-3 text-xs">
+          <div className="flex flex-col gap-0.5">
+            <h4 className="m-0 text-[13px] font-semibold text-foreground [overflow-wrap:anywhere]">{d.name}</h4>
+            <p className="m-0 text-muted-foreground">Applied by code from the design file. It costs no model tokens.</p>
+          </div>
+          {roles.length > 0 && (
+            <ul className="m-0 grid list-none grid-cols-1 gap-1.5 p-0 sm:grid-cols-2" aria-label="Colours">
+              {roles.map(([role, c]) => (
+                <li key={role} className="flex min-w-0 items-center gap-2">
+                  <span className="size-4 shrink-0 rounded-sm border border-border" style={{ background: hex(c) }} aria-hidden="true" />
+                  <span className="min-w-0 truncate text-muted-foreground">{ROLE_LABEL[role] ?? role}</span>
+                  <span className="ml-auto font-mono text-[11px] text-foreground">{hex(c)}</span>
+                  {d.nudged?.includes(role) && <span className="sr-only">(adjusted for contrast)</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {extra.length > 0 && (
+            <ul className="m-0 flex list-none flex-wrap gap-1.5 p-0" aria-label="Other palette colours">
+              {extra.slice(0, 12).map(c => (
+                <li key={c} className="inline-flex items-center gap-1 rounded-sm border border-border px-1 py-0.5">
+                  <span className="size-3 rounded-[2px] border border-border" style={{ background: hex(c) }} aria-hidden="true" />
+                  <span className="font-mono text-[11px] text-foreground">{hex(c)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {!!d.nudged?.length && (
+            <p className="m-0 text-muted-foreground">Adjusted so text stays readable: {d.nudged.map(r => ROLE_LABEL[r as DesignRole] ?? r).join(', ')}.</p>
+          )}
+          <ul className="m-0 flex list-none flex-col gap-1 p-0" aria-label="Fonts">
+            {font('Headings', d.fonts_used?.heading ?? null, d.heading_font)}
+            {font('Body', d.fonts_used?.body ?? null, d.body_font)}
+          </ul>
+          {!!d.notes?.length && (
+            <ul className="m-0 flex list-disc flex-col gap-1 border-t border-border pl-4 pt-2 text-muted-foreground">
+              {d.notes.map((n, i) => <li key={i} className="[overflow-wrap:anywhere]">{n}</li>)}
+            </ul>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
   )
 }
 

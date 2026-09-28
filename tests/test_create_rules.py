@@ -257,3 +257,37 @@ def test_v6_images_asked_for_but_none():
     assert not res['V6'].ok and res['V6'].note == 'no images embedded (asked for images)'
     res = by_id(verify(SPEC, 'md', render(SPEC, 'md'), brief=parse_brief('with pictures')))
     assert res['V6'].note == "no images embedded; a MD file can't hold them"
+
+
+# ---------- repair, not block (docs/PLAN-files-robust.md 2.1) ----------
+
+def test_new_rules_and_severities():
+    by = {r['id']: r for r in RULES}
+    assert {k: by[k]['severity'] for k in ('S1', 'S2', 'S7', 'S8', 'L1', 'L6', 'X6', 'V10', 'V11', 'V12')} == {
+        'S1': 'fix', 'S2': 'block', 'S7': 'fix', 'S8': 'fix', 'L1': 'fix', 'L6': 'block', 'X6': 'fix', 'V10': 'warn',
+        'V11': 'fix', 'V12': 'warn'}
+    ids = [r['id'] for r in RULES]
+    assert ids.index('S8') == ids.index('S7') + 1 and ids.index('L6') == ids.index('L5') + 1
+    assert ids[ids.index('V9') + 1:ids.index('V9') + 4] == ['V10', 'V11', 'V12']
+    assert 'Column names are at most 80 characters, cut at a word.' in by['S6']['text']
+    for rid in ('F2', 'F3'):
+        assert by[rid]['text'].endswith('The subject property holds at most 255 characters of the subtitle, cut at a word.')
+    # a file is refused only for S2, L6, X1, X4 and V1 among the content and safety rules
+    blocking = {r['id'] for r in RULES if r['severity'] == 'block'}
+    assert blocking == {'S2', 'L4', 'L6', 'X1', 'X4', 'V1'}
+    doc = (Path(__file__).resolve().parent.parent / 'docs' / 'RULES-files.md').read_text()
+    assert ('A file is refused only when nothing in it can be shown (S2), the reply is too large to read (L6), the format '
+            'is unknown (X1), the safety check says no (X4), or the file cannot be written even as plain text (V1).') in doc
+
+
+def test_v10_only_with_a_design_and_it_fails_when_the_colours_are_missing():
+    from jevrouter.create import design
+    text = (Path(__file__).resolve().parent.parent / 'evals' / 'fixtures' / 'design_system.md').read_text()
+    styled = {**SPEC, 'design': design.to_spec(design.parse_design(text, 'design_system.md'))}
+    for fmt in FORMATS:
+        assert 'V10' not in {r.id for r in verify(SPEC, fmt, render(SPEC, fmt))}
+        got = {r.id: r for r in verify(styled, fmt, render(styled, fmt))}['V10']
+        assert got.ok and got.severity == 'warn', (fmt, got.note)
+        if fmt != 'md':  # the plain file checked as if it had the design: the colours are not there
+            miss = {r.id: r for r in verify(styled, fmt, render(SPEC, fmt))}['V10']
+            assert not miss.ok and 'not found in the file' in miss.note, fmt

@@ -27,3 +27,10 @@ def empty_live_cache():
     cache.LIVE.clear()
     yield
     cache.LIVE.clear()
+
+
+@pytest.fixture(autouse=True)
+def no_cost_confirm(monkeypatch):
+    """The cost guard (docs/PLAN-files-robust.md 5.4) is off for existing tests, so a costly-looking run still starts;
+    tests of the guard turn it on with TG_COST_CONFIRM=1. Auto's lean long writer keeps its default."""
+    monkeypatch.setenv('TG_COST_CONFIRM', '0')

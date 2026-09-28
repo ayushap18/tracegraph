@@ -70,7 +70,10 @@ FILE_SOURCES = ('answer', 'llm', 'table', 'convert')
 FILE_KEYS = {'format', 'contains', 'min_pages', 'max_pages', 'slides_min', 'sheets', 'charts_min', 'rules_ok',
              # accuracy v2, D2
              'pages', 'slides', 'words_min', 'headings_min', 'images_min', 'diagrams_min', 'fonts', 'grayscale',
-             'files_exact', 'only_formats', 'source', 'not_contains', 'credits'}
+             'files_exact', 'only_formats', 'source', 'not_contains', 'credits',
+             # files that always build (docs/PLAN-files-robust.md 7.2)
+             'design_bg', 'partial_ok'}
+HEX_COLOR = re.compile(r'^#?[0-9A-Fa-f]{6}$')
 DIAGRAM_BLOCKS = ('timeline', 'tree', 'flow')
 # Always on for every created file (D2): a file whose body is the create agent's own reply line is not a document.
 TEMPLATE_BODY = re.compile(r'^Created \*\*.+\*\*, \d|No format was named', re.M)
@@ -342,9 +345,11 @@ def check_file_expectation(f, where: str) -> list[str]:
         if k in f and not (isinstance(f[k], list) and len(f[k]) == 2 and all(type(x) is int and x >= 0 for x in f[k])
                            and f[k][0] <= f[k][1]):
             errors.append(f'{where}expect_file {k} must be [lo, hi]')
-    for k in ('rules_ok', 'grayscale', 'credits'):
+    for k in ('rules_ok', 'grayscale', 'credits', 'partial_ok'):
         if k in f and not isinstance(f[k], bool):
             errors.append(f'{where}expect_file {k} must be true or false')
+    if 'design_bg' in f and not (isinstance(f['design_bg'], str) and HEX_COLOR.match(f['design_bg'])):
+        errors.append(f'{where}expect_file design_bg must be a colour like F7F4ED')
     if 'fonts' in f:
         try:
             re.compile(f['fonts'])
@@ -526,6 +531,26 @@ def suite_sha(path=None) -> str:
     except OSError:
         return ''
     return hashlib.sha256('\n'.join(lines).encode('utf-8')).hexdigest()
+
+
+def route_sha(path=None) -> str:
+    """sha256 of the sorted lines of the cases route mode runs (routable and meant for route). The Jev cassette is
+    checked against this, so adding a case that only runs on cli or api engines doesn't invalidate it. A line that
+    doesn't parse is kept, which errs toward saying the cassette is stale."""
+    try:
+        raw = [line.strip() for line in open(path or CASES) if line.strip()]
+    except OSError:
+        return ''
+    kept = []
+    for line in raw:
+        try:
+            c = json.loads(line)
+        except ValueError:
+            kept.append(line)
+            continue
+        if not isinstance(c, dict) or (routable(c) and runs_on(c, 'route')):
+            kept.append(line)
+    return hashlib.sha256('\n'.join(sorted(kept)).encode('utf-8')).hexdigest()
 
 
 def case_sha(c: dict) -> str:
@@ -1174,6 +1199,19 @@ def score_files(expect, rec: dict, read, spec_of=None, default_exact: int | None
         credits = f.get('credits')
         if not re.search(r'image credits', got['text'], re.I) or (isinstance(credits, list) and len(credits) < got['images']):
             reasons.append(f"{name} has {got['images']} images without an image credits section")
+    if 'design_bg' in expect:
+        want = expect['design_bg'].lstrip('#').upper()
+        design = f.get('design') if isinstance(f.get('design'), dict) else None
+        bg = str(((design or {}).get('colors') or {}).get('bg') or '').lstrip('#').upper()
+        if design is None:
+            reasons.append(f'{name} has no design applied (expected background {want})')
+        elif bg != want:
+            reasons.append(f"{name} has background {bg or 'none'} from its design, expected {want}")
+    if expect.get('partial_ok') is False and isinstance(f.get('partial'), dict):
+        p = f['partial']
+        missing = ', '.join(str(h) for h in (p.get('missing') or [])[:5]) or 'unnamed sections'
+        reasons.append(f"{name} is partial: {p.get('written', '?')} of {p.get('planned', '?')} written "
+                       f"(missing {missing})")
     # X2 always: a formula outside the allow-list means a cell's text was written as a live formula
     if bad := [x for x in got['formulas'] if not SAFE_FORMULA.match(x)]:
         reasons.append(f'{name} has an unsafe formula {bad[0][:40]!r}')
@@ -2353,13 +2391,19 @@ def shown_path(path) -> str:
         return str(path)
 
 
-def cassette_problem(jev: str, sha: str) -> str | None:
-    """Replay needs a cassette recorded for this suite."""
+def cassette_problem(jev: str, sha: str, route: str | None = None) -> str | None:
+    """Replay needs a cassette recorded for the cases route mode runs. The meta's route_sha is compared with `route`
+    when both are known; a meta without one (recorded before route_sha existed) falls back to the whole suite_sha."""
     if jev != 'replay':
         return None
     if not CASSETTE.exists():
         return f'no Jev cassette at {shown_path(CASSETTE)}; record one with --mode route --jev record'
     meta = read_json(CASSETTE_META)
+    if meta.get('route_sha') and route:
+        if meta['route_sha'] != route:
+            return ('the routed cases changed since the cassette was recorded (route_sha differs); refresh it with '
+                    '--mode route --jev record')
+        return None
     if meta.get('suite_sha') and meta['suite_sha'] != sha:
         return ('the cases changed since the cassette was recorded (suite_sha differs); refresh it with '
                 '--mode route --jev record')
@@ -2406,7 +2450,8 @@ async def cli(engine_name: str | None, save: bool, examples: bool | None = None,
         print('no cases match that split and those tags', file=sys.stderr)
         return 2
     sha = suite_sha()
-    if problem := cassette_problem(jev if mode == 'route' else 'live', sha):
+    rsha = route_sha()
+    if problem := cassette_problem(jev if mode == 'route' else 'live', sha, rsha):
         print(problem, file=sys.stderr)
         return 2
     baseline = read_json(BASELINE)
@@ -2447,7 +2492,8 @@ async def cli(engine_name: str | None, save: bool, examples: bool | None = None,
             suite = suite_name(mode, name)
             if mode == 'route' and jev == 'record' and cassette is not None:
                 CASSETTE_META.parent.mkdir(parents=True, exist_ok=True)
-                CASSETTE_META.write_text(json.dumps({'suite_sha': sha, 'at': round(time.time()), 'entries': len(cassette)},
+                CASSETTE_META.write_text(json.dumps({'suite_sha': sha, 'route_sha': rsha, 'at': round(time.time()),
+                                                     'entries': len(cassette)},
                                                     indent=1) + '\n')
             rules = gates.get(suite) if isinstance(gates.get(suite), dict) else None
             if rules:

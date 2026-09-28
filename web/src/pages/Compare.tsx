@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useState, type FormEvent } from 'react'
-import { cancelRun, compare, errorText as errText, getCompare } from '../api'
+import { cancelRun, compareOrConfirm, errorText as errText, getCompare } from '../api'
+import { useCostConfirm, type CostBody } from '../components/chat/CostDialog'
 import { Badge, Button, Card, EmptyState, IconButton, Skeleton, StatusBadge, copyText, navigate, timeAgo, useNow, useToast } from '../ui'
 import { useStore } from '../store'
 import { EngineIcon, Icon } from '../icons'
@@ -120,17 +121,28 @@ function NewComparison({ onStarted, compact }: { onStarted: (h: HistoryEntry) =>
 
   const q = query.trim()
   const valid = q.length > 0 && picked.length >= MIN_ENGINES && picked.length <= MAX_ENGINES && picked.every(name => available.some(e => e.name === name))
-  const submit = async (e: FormEvent) => {
-    e.preventDefault()
-    if (!valid || busy) return
+  // A costly comparison (a long file on several engines) is priced first: the dialog shows the combined estimate and
+  // nothing starts until Continue.
+  const cost = useCostConfirm()
+  const start = async (engines: string[], confirm: boolean) => {
     setBusy(true)
     try {
-      const res = await compare(q, picked)
-      onStarted({ id: res.compare_id, query: q, at: Date.now() / 1000, runs: res.runs })
-      navigate(`/compare/${res.compare_id}`)
+      const r = await compareOrConfirm({ query: q, engines, ...(confirm ? { confirm_cost: true } : {}) })
+      if (r.kind === 'confirm') {
+        cost.ask({ estimate: { ...r.estimate, cheaper: [] }, body: { engines } as CostBody,
+          go: (b: CostBody) => start(b.engines ?? engines, true) })
+        return
+      }
+      onStarted({ id: r.res.compare_id, query: q, at: Date.now() / 1000, runs: r.res.runs })
+      navigate(`/compare/${r.res.compare_id}`)
     } catch (err) {
       toast.error(`Could not start the comparison: ${errText(err)}`)
     } finally { setBusy(false) }
+  }
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!valid || busy) return
+    await start(picked, false)
   }
 
   return (
@@ -183,6 +195,7 @@ function NewComparison({ onStarted, compact }: { onStarted: (h: HistoryEntry) =>
           <span>At least {MIN_ENGINES} available engines are needed to compare. Set them up in <a href="#/settings" className="font-medium text-primary underline-offset-2 hover:underline">Settings</a>.</span>
         </p>
       )}
+      {cost.dialog}
     </form>
   )
 }

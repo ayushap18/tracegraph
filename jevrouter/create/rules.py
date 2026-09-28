@@ -39,8 +39,12 @@ def _rule(rid: str, severity: str | None, text: str) -> dict:
 
 
 RULES: list[dict] = [
-    _rule('S1', 'block', 'The spec validates against the DocSpec schema: known block types only, required fields present.'),
-    _rule('S2', 'block', 'At least one section with at least one non-empty block.'),
+    _rule('S1', 'fix', 'Each block is repaired to the DocSpec schema: known aliases are mapped (list, ul, ol to bullets; '
+                       'content or body to text; points or lines to items), a missing type is inferred from its keys, and '
+                       'a string where a list is expected is split into lines. A block that still cannot be read keeps its '
+                       'text as a paragraph; a block with no text is left out. Every change is noted.'),
+    _rule('S2', 'block', 'The file has something to show: at least one section with a heading or a non-empty block, not '
+                         'counting page breaks and figures that found no image. A spec with no text at all is refused.'),
     _rule('S3', 'fix', 'A title of 1 to 120 characters. Missing: taken from the first heading or the request.'),
     _rule('S4', 'fix', 'Text is plain: no HTML, no raw Markdown syntax inside paragraphs (converted to plain text, with '
                        'bold and italic kept as runs where the format supports them).'),
@@ -48,11 +52,16 @@ RULES: list[dict] = [
                        'become numbers that keep their money or percent format). Non-numeric chart '
                        'values drop that point.'),
     _rule('S6', 'fix', 'Every table row has as many cells as there are columns (short rows padded, long rows trimmed). '
-                       'Diagrams are well formed: one root, no loops or cycles, known node names.'),
-    _rule('S7', 'block', 'Facts in the file come from the conversation, attached files or the model\'s answer in this '
-                         'run; the spec never asks the renderer to fetch anything.'),
-    _rule('L1', 'block', 'Spec at most 200 KB of JSON (table rows are limited by L2 instead); at most 40 sections and 30 '
-                         'blocks per section.'),
+                       'Diagrams are well formed: one root, no loops or cycles, known node names. Column names are at '
+                       'most 80 characters, cut at a word.'),
+    _rule('S7', 'fix', 'Nothing is fetched: link, image and path keys (url, src, href, image, link, path and the like) are '
+                       'removed from the spec with a note, and the file holds only the content given.'),
+    _rule('S8', 'fix', 'Every section has a heading: a missing one is taken from its first line of text, or becomes '
+                       '"Section N" (slides: the previous slide\'s heading with "(cont.)"). A section given as plain text '
+                       'becomes a heading-only section, or a paragraph when it is longer than 80 characters.'),
+    _rule('L1', 'fix', 'At most 200 KB of spec JSON (table rows are limited by L2), 40 sections and 30 blocks per section. '
+                       'Blocks past 30 continue in a section headed "<heading> (cont.)"; sections past 40, or past 200 KB, '
+                       'are cut from the end and the note says how many.'),
     _rule('L2', 'fix', 'Tables: at most 2,000 rows and 30 columns in XLSX; 200 rows in PDF, DOCX and MD (the rest noted); '
                        '12 rows per slide (split across slides). Diagrams: at most 30 timeline events, 40 tree nodes in '
                        '4 levels, 12 flow steps.'),
@@ -61,12 +70,15 @@ RULES: list[dict] = [
     _rule('L4', 'block', 'Output file at most 15 MB.'),
     _rule('L5', None, 'The model is asked for the spec once per request; conversions to another format reuse the stored '
                       'spec (0 LLM tokens).'),
+    _rule('L6', 'block', 'A model reply larger than 2 MB is not read as a file spec.'),
     _rule('F1', 'fix', 'PDF: A4 (Letter when asked for), 2 cm margins, page numbers, the title in the document '
                        'properties, headings as PDF outline entries.'),
     _rule('F2', 'fix', 'DOCX: built-in Heading 1 to 3 styles (so a table of contents works), real Word tables with a '
-                       'header row, core properties set.'),
+                       'header row, core properties set. The subject property holds at most 255 characters of the '
+                       'subtitle, cut at a word.'),
     _rule('F3', 'fix', 'PPTX: 16:9; a title slide, then one slide per section; native charts (not pictures); speaker '
-                       'notes for overflow text.'),
+                       'notes for overflow text. The subject property holds at most 255 characters of the subtitle, cut '
+                       'at a word.'),
     _rule('F4', 'fix', 'XLSX: one sheet per table (sheet names at most 31 characters, unique, none of []:*?/\\), a bold '
                        'frozen header row, column widths fitted, numbers stored as numbers, native charts next to '
                        'their data.'),
@@ -85,8 +97,9 @@ RULES: list[dict] = [
                          'check as any question, and so does the spec text.'),
     _rule('X5', None, 'Created files are stored like uploads (by id, never by user path). Sandbox files stay in memory '
                       'and disappear with the sandbox.'),
-    _rule('X6', 'block', 'Every embedded image is a PNG or JPEG from the local asset cache, re-encoded, found under an '
-                         'allowed licence, with a credit line naming its title, author, licence and source.'),
+    _rule('X6', 'fix', 'Every embedded image is a PNG or JPEG from the local asset cache, re-encoded, found under an '
+                       'allowed licence (public domain, CC0, CC BY, CC BY-SA), with a credit line naming its title, '
+                       'author, licence and source. An image without a full credit is left out, never embedded.'),
     _rule('V1', 'block', 'The file reopens with its own library (pypdf, python-docx, python-pptx, openpyxl) or parses as '
                          'Markdown.'),
     _rule('V2', 'warn', 'The title and every section heading appear in the reopened file\'s text.'),
@@ -99,6 +112,11 @@ RULES: list[dict] = [
     _rule('V8', 'warn', 'The file uses the theme the request asked for; a black and white PDF draws only greys, and its '
                         'images are greyscale.'),
     _rule('V9', 'warn', 'At least as many diagrams are drawn as the request asked for (2 for "multiple diagrams").'),
+    _rule('V10', 'warn', 'When a design file was applied, the file uses its background and text colours (or the answer '
+                         'says what could not be used).'),
+    _rule('V11', 'fix', 'A section the renderer cannot lay out in this format is retried as plain text, then left out, '
+                        'and the answer names it.'),
+    _rule('V12', 'warn', 'The file holds every planned section, or the answer lists the missing ones and offers Resume.'),
     _rule('A1', 'fix', 'Headings are real headings (styles, outline entries, slide titles), never bold paragraphs.'),
     _rule('A2', 'fix', 'Tables have a header row marked as a header.'),
     _rule('A3', 'warn', 'Charts carry a text title, and a one-line summary of what they show appears next to them.'),
@@ -409,17 +427,22 @@ def _lost_chars(spec: dict, fonts) -> tuple[int, int, str]:
     return lost, total, ''.join(examples)
 
 
-def verify(spec: dict, fmt: str, data: bytes, brief=None) -> list[RuleResult]:
+def verify(spec: dict, fmt: str, data: bytes, brief=None, extra=()) -> list[RuleResult]:
     """Reopen the rendered file and check it. Raises SpecError for V1 (does not reopen), L4 (too big), X1 (active
     content) and X6 (an image not from the asset cache, or without a credit); everything else comes back as one
-    RuleResult per rule. With the request's brief (create/brief.py) the file is also checked against it (V5-V9)."""
+    RuleResult per rule. With the request's brief (create/brief.py) the file is also checked against it (V5-V9), and
+    with a design in the spec against the design (V10). `extra` takes the results render_safe (V11) and the create
+    agent (V12) made: when render_safe drew some sections as plain text or left them out, the file is checked against
+    what was drawn. They are not repeated in the list returned."""
     from . import themes
-    from .render import _Fonts, body_font, chart_summary, safe_formula, sheet_name, theme_name, xlsx_plan
+    from .render import (_Fonts, body_font, chart_summary, safe_formula, sheet_name, sheet_theme, theme_for,
+                         theme_name, xlsx_plan)
     from .spec import DIAGRAMS, FORMATS, normalize
 
     if fmt not in FORMATS:
         raise SpecError('X1', f'Files are made as {", ".join(FORMATS)} only, not {str(fmt)[:12]!r}.')
-    spec, _ = normalize(spec, fmt)
+    drawn = next((getattr(r, 'rendered', None) for r in extra or () if getattr(r, 'rendered', None) is not None), None)
+    spec, _ = normalize(drawn if drawn is not None else spec, fmt)
     size = len(data)
     if size > MAX_BYTES:
         raise SpecError('L4', f'The file is {size / 1e6:.1f} MB; the limit is {MAX_BYTES // (1024 * 1024)} MB.')
@@ -435,11 +458,17 @@ def verify(spec: dict, fmt: str, data: bytes, brief=None) -> list[RuleResult]:
     tables = [b for s in sections for b in s['blocks'] if b['type'] == 'table']
     corpus = _norm(info['text'])
     theme = theme_name(spec, None)
-    pdf_fonts = _Fonts(themes.get(theme), body_font(spec, 'pdf', theme)) if fmt == 'pdf' else None
+    look = theme_for(spec, theme)  # the theme dict the file was drawn with (a design file's, when there is one)
+    if fmt == 'xlsx' and spec.get('design'):
+        look = sheet_theme(look)  # sheets stay white: the colours the sheet really uses
+    pdf_fonts = _Fonts(look, body_font(spec, 'pdf', theme, look)) if fmt == 'pdf' else None
     fix = (lambda s: pdf_fonts.fit(s)[0]) if pdf_fonts else (lambda s: s)  # what the PDF could draw
 
-    # V2: title and headings in the text, as written (a PDF that drew them as "????" has lost them)
-    missing = [x for x in [spec['title']] + [s['heading'] for s in headed] if not _found(x, corpus)]
+    # V2: title and headings in the text, as written (a PDF that drew them as "????" has lost them; a PDF heading is
+    # drawn at most MAX_PDF_HEADING characters long)
+    from .render import MAX_PDF_HEADING, _short
+    shown = (lambda h: _short(h, MAX_PDF_HEADING)) if fmt == 'pdf' else (lambda h: h)
+    missing = [x for x in [spec['title']] + [s['heading'] for s in headed] if not _found(shown(x), corpus)]
     lost_note = ''
     if pdf_fonts is not None:
         lost, total, examples = _lost_chars(spec, pdf_fonts)
@@ -490,7 +519,7 @@ def verify(spec: dict, fmt: str, data: bytes, brief=None) -> list[RuleResult]:
     elif fmt == 'docx':
         heads = [(int(st.split()[-1]), t) for st, t in info['paras'] if re.match(r'Heading [1-9]$', st)]
         from .render import chart_rows, formats_of, table_groups
-        font = 'Times-Roman' if themes.get(theme_name(spec, None), paper=True)['font'] == 'Georgia' else 'Helvetica'
+        font = 'Times-Roman' if theme_for(spec, theme, paper=True)['font'] == 'Georgia' else 'Helvetica'
         want_tables = sum(len(table_groups(b['columns'], b['rows'], 'docx', spec.get('paper'), formats_of(b), font))
                           for b in tables)
         want_tables += sum(len(table_groups(*chart_rows(b), 'docx', spec.get('paper'), None, font)) for b in charts)
@@ -615,8 +644,10 @@ def verify(spec: dict, fmt: str, data: bytes, brief=None) -> list[RuleResult]:
         summaries = all(_found(fix(chart_summary(b)), corpus) for b in charts)
         out.append(RuleResult('A3', 'warn', titled and summaries, 'every chart has a title and a summary line'
                               if titled and summaries else 'a chart is missing its title or summary line'))
-    ratio, pair = themes.worst_contrast(theme_name(spec, None))
+    ratio, pair = themes.worst_contrast(look if spec.get('design') else theme)
     out.append(RuleResult('A4', 'fix', ratio >= 4.5, f'lowest text contrast {ratio:.1f}:1 ({pair})'))
+    if spec.get('design'):
+        out.append(_v10(spec, fmt, info, data, look))
 
     # V4 counts diagrams too; X6 whenever the file holds images; V5-V9 against the brief
     diagrams = [b for s in sections for b in s['blocks'] if b['type'] in DIAGRAMS]
@@ -632,6 +663,50 @@ def verify(spec: dict, fmt: str, data: bytes, brief=None) -> list[RuleResult]:
     if brief is not None:
         out += _brief_checks(spec, fmt, info, brief, theme, drawn, charts, embedded, data)
     return out
+
+
+def _v10(spec: dict, fmt: str, info: dict, data: bytes, t: dict) -> RuleResult:
+    """V10: the design's background and text colours are in the file (PDF fills, the Word page background and heading
+    style, the slide background, the sheet header fill). Markdown carries no colours and says so."""
+    name = (spec.get('design') or {}).get('name') or 'the design file'
+    if fmt == 'md':
+        return RuleResult('V10', 'warn', True, 'A Markdown file carries no colours or fonts; convert it to PDF, Word or '
+                                               'PowerPoint to see the design (0 tokens).')
+    bg, text, heading = t['bg'].upper(), t['text'].upper(), t['heading'].upper()
+    missing = []
+    if fmt == 'pdf':
+        seen = {''.join(f'{round(c * 255):02X}' for c in rgb) for rgb in pdf_scan(b'', info['reader'])['colors']}
+        missing += [f'{what} #{c}' for what, c in (('background', bg), ('text', text)) if c not in seen and
+                    not (what == 'background' and c == 'FFFFFF')]
+    else:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            names = set(z.namelist())
+            read = lambda n: z.read(n).decode('utf-8', 'replace') if n in names else ''  # noqa: E731
+            if fmt == 'docx':
+                doc, styles = read('word/document.xml'), read('word/styles.xml')
+                if bg != 'FFFFFF' and not re.search(rf'<w:background [^>]*w:color="{bg}"', doc, re.I):
+                    missing.append(f'page background #{bg}')
+                block = re.search(r'<w:style [^>]*w:styleId="Heading1".*?</w:style>', styles, re.S)
+                if not block or not re.search(rf'<w:color [^>]*w:val="{heading}"', block.group(0), re.I):
+                    missing.append(f'heading colour #{heading}')
+            elif fmt == 'pptx':
+                slide = read('ppt/slides/slide2.xml') or read('ppt/slides/slide1.xml')
+                fill = re.search(r'<p:bg>.*?</p:bg>', slide, re.S)
+                if not fill or not re.search(rf'val="{bg}"', fill.group(0), re.I):
+                    missing.append(f'slide background #{bg}')
+            else:  # xlsx: sheets stay white; the table header uses the design's header colours
+                sheet = next((sh for sh in info['sheets'] if sh['a1_bold'] and sh['freeze'] == 'A2'), None)
+                if sheet is not None:
+                    fill = sheet['ws']['A1'].fill
+                    got = str(getattr(fill.fgColor, 'rgb', '') or '')[-6:].upper()
+                    if got != t['header_bg'].upper():
+                        missing.append(f'table header #{t["header_bg"].upper()}')
+    if missing:
+        return RuleResult('V10', 'warn', False, f'{name}: not found in the file: ' + ', '.join(missing))
+    if fmt == 'xlsx':
+        return RuleResult('V10', 'warn', True, f'{name}: table headers #{t["header_bg"].upper()}, text #{text}; sheets '
+                                               'stay white')
+    return RuleResult('V10', 'warn', True, f'{name}: background #{bg} and text #{text} used')
 
 
 def _diagrams_drawn(fmt: str, info: dict, data: bytes, diagrams: list[dict], found) -> int:
@@ -673,10 +748,10 @@ def _x6(fmt: str, data: bytes, images: list[dict], embedded: int) -> RuleResult:
         if odd:
             raise SpecError('X6', 'The file embeds a picture that is not PNG or JPEG: ' + ', '.join(odd[:3]))
     if not images:
-        return RuleResult('X6', 'block', True, 'no images')
+        return RuleResult('X6', 'fix', True, 'no images')
     shown = embedded if fmt in ('pdf', 'docx', 'pptx') else 0
     where = f'{shown} embedded' if fmt in ('pdf', 'docx', 'pptx') else f'not embedded in {fmt.upper()}; credits kept'
-    return RuleResult('X6', 'block', True, f'{len(images)} image{"" if len(images) == 1 else "s"} from the asset cache, '
+    return RuleResult('X6', 'fix', True, f'{len(images)} image{"" if len(images) == 1 else "s"} from the asset cache, '
                                            f'each credited ({where})')
 
 

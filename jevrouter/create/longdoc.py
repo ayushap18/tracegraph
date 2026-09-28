@@ -8,7 +8,9 @@ loop renders at most three times before the final build renders the file once mo
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
+import json
 import math
 import re
 import time
@@ -56,6 +58,11 @@ PLANNED_IMAGES = 5                     # "4-6 figures"
 SLIDE_WORDS = 45
 MAX_FIT_RENDERS = 3                    # plus the final build: at most 4 renders
 MAX_PARTS = 38                         # sections, leaving room for "Image credits" under the 40-section limit
+# docs/PLAN-files-robust.md 3.1 to 3.3: the repair ladder and checkpoints
+MAX_REPAIR_CALLS = 2                   # calls that rewrite only the sections that came back unusable
+REPAIR_MIN_SECONDS = 60                # ... and only while this much of the run's time is left
+REPAIR_GROUP = 10                      # missing sections per repair call
+CHECKPOINT_MAX_BYTES = 400_000
 
 OUTLINE_SYSTEM = ('Do not use tools. You plan one long downloadable file as JSON matching the schema: a title, a '
                   'subtitle (may be empty) and its sections in reading order, each with a heading, a level (1 to 3), a '
@@ -90,6 +97,7 @@ class Tally:
     def __init__(self):
         self.phases: dict[str, dict] = {}
         self.engine = None
+        self.state: dict | None = None   # the latest checkpoint (docs/PLAN-files-robust.md 3.3)
 
     def add(self, phase: str, reply=None, ms: float = 0.0, calls: int = 1):
         p = self.phases.setdefault(phase, {'phase': phase, 'calls': 0, 'llm_in': 0, 'llm_out': 0, 'ms': 0})
@@ -236,158 +244,496 @@ def asks(p: Part, slides: bool) -> str:
     return ' '.join(what)
 
 
+# ---------- the call plan (shared with jevrouter/estimate.py, so the two cannot drift) ----------
+
+
+@dataclasses.dataclass
+class CallPlan:
+    sections: int          # budget()[1]
+    words: int             # budget()[0]
+    batches: int           # n_batches
+    max_calls: int         # outline + batches + top-up + MAX_REPAIR_CALLS
+    token_budget: int
+
+
+def plan_calls(fmt: str, brief: Brief) -> CallPlan:
+    """How many calls the writer makes for a file: the outline, the section batches, at most one top-up and at most
+    MAX_REPAIR_CALLS repair calls."""
+    words, sections = budget(fmt, brief)
+    slides = fmt == 'pptx'
+    n_batches = max(1, math.ceil((sections / 10) if slides else words / BATCH_WORDS))
+    token_budget = min(32000, sections * 350) if slides else min(32000, int(1.6 * words * 1.4))
+    return CallPlan(sections, words, n_batches, 1 + n_batches + 1 + MAX_REPAIR_CALLS, token_budget)
+
+
+# ---------- checkpoints (docs/PLAN-files-robust.md 3.3) ----------
+
+
+def _json_size(obj) -> int:
+    try:
+        return len(json.dumps(obj, ensure_ascii=False, default=str).encode('utf-8', 'replace'))
+    except (TypeError, ValueError, RecursionError):
+        return CHECKPOINT_MAX_BYTES + 1
+
+
+def cap_state(state: dict) -> dict:
+    """The state within CHECKPOINT_MAX_BYTES: `ctx` is cut first, then the oldest written sections are dropped (their
+    parts become missing again, so a resume writes them)."""
+    if _json_size(state) <= CHECKPOINT_MAX_BYTES:
+        return state
+    state = {**state, 'written': dict(state.get('written') or {})}
+    for size in (4000, 1000, 0):
+        state['ctx'] = str(state.get('ctx') or '')[:size]
+        if _json_size(state) <= CHECKPOINT_MAX_BYTES:
+            return state
+    for k in sorted(state['written'], key=lambda x: int(x) if str(x).isdigit() else 0):
+        del state['written'][k]
+        if _json_size(state) <= CHECKPOINT_MAX_BYTES:
+            break
+    if _json_size(state) > CHECKPOINT_MAX_BYTES:
+        state['reply'] = str(state.get('reply') or '')[:CHECKPOINT_MAX_BYTES // 2]
+    return state
+
+
+def info(state: dict, qid: int, tid: str) -> dict:
+    """The CheckpointInfo summary of a stored state (web/src/protocol.ts); the full state never leaves the server."""
+    state = state if isinstance(state, dict) else {}
+    kind = 'single' if state.get('kind') == 'single' else 'longdoc'
+    file_id = state.get('file_id')
+    phase = state.get('phase') if state.get('phase') in ('outline', 'sections', 'topup', 'render', 'done') else 'sections'
+    if kind == 'single':
+        planned, written, missing = 1, 1 if file_id else 0, []
+        resumable = not file_id and bool(str(state.get('reply') or '').strip())
+    else:
+        parts = [p for p in state.get('parts') or [] if isinstance(p, dict)]
+        done = {str(k) for k in (state.get('written') or {})}
+        missing = [str(p.get('heading') or f'Section {i + 1}') for i, p in enumerate(parts) if str(i) not in done]
+        planned, written = len(parts), len(parts) - len(missing)
+        # every part written but no file built (a timeout or cancel during pictures, the fit loop or the render, or a
+        # render that failed) is resumable too: the resume goes straight to the build at 0 section calls
+        resumable = bool(missing) or not file_id
+    by = state.get('resumed_by') if isinstance(state.get('resumed_by'), dict) else None
+    if by and by.get('file_id'):  # an earlier Resume already made the file
+        resumable = False
+    out = {'qid': qid, 'tid': str(tid), 'kind': kind, 'format': state.get('format') or 'pdf', 'phase': phase,
+           'planned': planned, 'written': written, 'missing': missing,
+           'tokens_in': int(state.get('tokens_in') or 0), 'tokens_out': int(state.get('tokens_out') or 0),
+           'at': float(state.get('at') or 0.0), 'resumable': resumable, 'file_id': file_id}
+    if by and type(by.get('qid')) is int:
+        out['resumed_by'] = by['qid']
+    return out
+
+
+def sink(job, state: dict) -> None:
+    """Hands a checkpoint to the pipeline's sink (never fails the file) and keeps it on the job's tally."""
+    state = cap_state(state)
+    tally = getattr(job, 'tally', None)
+    if tally is not None:
+        tally.state = state
+    fn = getattr(job, 'checkpoint', None)
+    if fn is None:
+        return
+    try:
+        fn(copy.deepcopy(state))
+    except Exception:
+        pass
+
+
+def time_left(job) -> float:
+    deadline = getattr(job, 'deadline', None)
+    return float('inf') if deadline is None else deadline - time.monotonic()
+
+
+def partial_caveat(missing: list[str], planned: int, slides: bool) -> str:
+    heads = ', '.join(missing[:5]) + (f' and {len(missing) - 5} more' if len(missing) > 5 else '')
+    return (f'{len(missing)} of {planned} planned {"slides" if slides else "sections"} could not be written ({heads}). '
+            f'Use Resume on the file card to write them; it reuses everything already written.')
+
+
 # ---------- the writer ----------
 
 
-async def write_long(job: Job, engine, jev, fmt: str, brief: Brief, mode: str, *, seed: dict | None = None,
-                     notes: list[str] | tuple = ()) -> Made:
-    from .. import create as cf
-    from ..agents import create as ca
-    from ..engines import EngineError, EngineRefusal, parse_json
+class Writer:
+    """One long file: outline, section batches, the repair ladder (docs/PLAN-files-robust.md 3.1), images, the fit
+    loop and the final build. Its state is the checkpoint, sent to the job's sink after every paid call."""
 
-    req = job.request.strip()
-    slides = fmt == 'pptx'
-    label = ca.LABELS.get(fmt, fmt)
-    theme = ca.theme_of(req) or brief.theme
-    target_words, n_sections = budget(fmt, brief)
-    n_batches = max(1, math.ceil((n_sections / 10) if slides else target_words / BATCH_WORDS))
-    max_calls = 2 + n_batches + 1
-    token_budget = min(32000, int(1.6 * target_words * 1.4)) if not slides else min(32000, n_sections * 350)
-    tally = Tally()
-    brief_lines = describe(brief, fmt)
-    ctx = context(job, seed, ca)
-    system = ca.SYSTEM.format(shape=LONG_SHAPES['pptx' if slides else 'default'])
+    def __init__(self, job: Job, engine, jev, fmt: str, brief: Brief, mode: str, *, seed: dict | None = None,
+                 notes=(), state: dict | None = None):
+        from ..agents import create as ca
+        from . import brief as brief_mod
+        self.ca, self.job, self.engine, self.jev, self.fmt, self.brief, self.mode = ca, job, engine, jev, fmt, brief, mode
+        self.seed, self.notes = seed, list(notes)
+        self.req = job.request.strip()
+        self.slides = fmt == 'pptx'
+        self.label = ca.LABELS.get(fmt, fmt)
+        self.theme = ca.theme_of(self.req) or brief.theme
+        plan = plan_calls(fmt, brief)
+        self.target_words, self.n_sections, self.n_batches = plan.words, plan.sections, plan.batches
+        self.max_calls, self.token_budget = plan.max_calls, plan.token_budget
+        if getattr(job, 'tally', None) is None:
+            job.tally = Tally()
+        self.tally = Tally()   # this writer's calls; job.tally sees the same adds
+        self.brief_lines = describe(brief, fmt)
+        self.system = ca.SYSTEM.format(shape=LONG_SHAPES['pptx' if self.slides else 'default'])
+        self.results: list = []     # RuleResults for the file (S1 notes by section, V12)
+        self.caveats: list[str] = []
+        self.repairs = {'calls': 0, 'llm_in': 0, 'llm_out': 0, 'sections': []}
+        self.bad: set[int] = set()   # parts whose reply came back with nothing usable
+        design = getattr(job, 'design', None)
+        self.state = state if state is not None else {
+            'v': 1, 'kind': 'longdoc', 'format': fmt, 'request': self.req, 'brief': brief_mod.to_dict(brief),
+            'theme': self.theme, 'font': brief.font, 'design': design, 'ctx': None, 'title': '', 'subtitle': '',
+            'parts': [], 'written': {}, 'failed': [], 'phase': 'outline', 'engine': getattr(engine, 'name', None),
+            'tokens_in': 0, 'tokens_out': 0, 'calls': 0, 'at': time.time(), 'file_id': None, 'role': job.role,
+            'mode': mode, 'repairs': 0}
+        if self.state.get('ctx') is None:
+            self.state['ctx'] = context(job, seed, ca)
+        self.ctx = str(self.state.get('ctx') or '')
 
-    def failed(msg: str) -> Made:
-        tin, tout = tally.tokens
-        return ca.Made(msg, False, tally.engine or engine.name, tin, tout, phases=list(tally.phases.values()))
+    # ----- calls -----
 
-    async def call(phase: str, **kw):
+    async def call(self, phase: str, **kw):
+        from ..engines import EngineError, EngineRefusal
         t0 = time.perf_counter()
         try:
-            reply = await engine.stream(**kw)
+            reply = await self.engine.stream(**kw)
         except (EngineError, EngineRefusal):
-            tally.add(phase, None, (time.perf_counter() - t0) * 1000)
+            ms = (time.perf_counter() - t0) * 1000
+            self.tally.add(phase, None, ms)
+            self.job.tally.add(phase, None, ms)
+            self.state['calls'] = self.state.get('calls', 0) + 1
             raise
-        tally.add(phase, reply, (time.perf_counter() - t0) * 1000)
+        ms = (time.perf_counter() - t0) * 1000
+        self.tally.add(phase, reply, ms)
+        self.job.tally.add(phase, reply, ms)
+        self.state['calls'] = self.state.get('calls', 0) + 1
+        self.state['tokens_in'] = self.state.get('tokens_in', 0) + reply.input_tokens
+        self.state['tokens_out'] = self.state.get('tokens_out', 0) + reply.output_tokens
+        self.state['engine'] = reply.engine or self.state.get('engine')
         return reply
 
-    # call 1: the outline
-    seed_heads = [s.get('heading') for s in (seed or {}).get('sections') or [] if isinstance(s, dict) and s.get('heading')]
-    lines = [f'Request: {req}', f'Format: {label}', *brief_lines,
-             (f'Plan {n_sections} sections, one per slide.' if slides else
-              f'Plan about {target_words:,} words in all, in {max(3, round(target_words / 500))} to '
-              f'{max(4, round(target_words / 300))} sections of at most {MAX_SECTION_WORDS} words each.')]
-    if seed_heads:
-        lines.append('Build on this earlier outline, keeping what fits: ' + '; '.join(seed_heads[:30]))
-    prompt = '\n'.join(lines) + (f'\n\nNotes and context:\n{ctx}' if ctx else '')
-    try:
-        reply = await call('outline', system=OUTLINE_SYSTEM, prompt=prompt, effort='medium', max_tokens=2000,
-                           schema=OUTLINE_SCHEMA)
-        outline = parse_json(reply.text)
-        if not isinstance(outline, dict):
-            raise ValueError('not an object')
-    except EngineRefusal:
-        return failed(f'{engine.label} declined to write this file.')
-    except EngineError as e:
-        return failed(f'The create agent needs {engine.label} to write new content, which failed ({e.why}).')
-    except ValueError:
-        outline = {'title': (seed or {}).get('title') or ca.topic_title(req) or 'Document', 'subtitle': '',
-                   'sections': [{'heading': h, 'level': 1, 'words': 1, 'blocks_hint': []} for h in seed_heads]}
-    parts = parts_from(outline, target_words, n_sections, slides)
-    if not parts:
-        return failed('No file was made. Rule S1 blocked it: the model\'s outline had no sections.')
-    assign(parts, brief)
-    title = str(outline.get('title') or (seed or {}).get('title') or ca.topic_title(req) or 'Document')[:120]
-    plan_text = '\n'.join(f'{i}. {p.heading}' + ('' if slides else f' (about {p.words} words)')
-                          for i, p in enumerate(parts, 1))
+    def save(self, phase: str | None = None):
+        if phase:
+            self.state['phase'] = phase
+        self.state['at'] = time.time()
+        sink(self.job, self.state)
 
-    # calls 2..n: the sections, in batches
-    groups = batches(parts, n_batches)
-    gate = asyncio.Semaphore(2 if getattr(engine, 'billing', 'api') == 'api' else 1)
+    def failed(self, msg: str) -> Made:
+        tin, tout = self.tally.tokens
+        self.save()
+        return self.ca.Made(msg, False, self.tally.engine or self.engine.name, tin, tout,
+                            phases=list(self.tally.phases.values()), checkpoint=self.state)
 
-    async def write(group: list[Part]) -> list[dict] | None:
+    # ----- the plan -----
+
+    @property
+    def parts(self) -> list[Part]:
+        return [Part(**{k: p[k] for k in ('heading', 'level', 'words', 'hints', 'diagrams', 'figures') if k in p})
+                for p in self.state.get('parts') or [] if isinstance(p, dict)]
+
+    def plan_text(self, parts: list[Part]) -> str:
+        return '\n'.join(f'{i}. {p.heading}' + ('' if self.slides else f' (about {p.words} words)')
+                         for i, p in enumerate(parts, 1))
+
+    async def outline(self) -> Made | None:
+        from ..engines import EngineError, EngineRefusal
+        ca, seed = self.ca, self.seed
+        seed_heads = [s.get('heading') for s in (seed or {}).get('sections') or []
+                      if isinstance(s, dict) and s.get('heading')]
+        lines = [f'Request: {self.req}', f'Format: {self.label}', *self.brief_lines,
+                 (f'Plan {self.n_sections} sections, one per slide.' if self.slides else
+                  f'Plan about {self.target_words:,} words in all, in {max(3, round(self.target_words / 500))} to '
+                  f'{max(4, round(self.target_words / 300))} sections of at most {MAX_SECTION_WORDS} words each.')]
+        if seed_heads:
+            lines.append('Build on this earlier outline, keeping what fits: ' + '; '.join(seed_heads[:30]))
+        prompt = '\n'.join(lines) + (f'\n\nNotes and context:\n{self.ctx}' if self.ctx else '')
+        try:
+            reply = await self.call('outline', system=OUTLINE_SYSTEM, prompt=prompt, effort='medium', max_tokens=2000,
+                                    schema=OUTLINE_SCHEMA)
+            outline, _ = ca.read_reply(reply.text, prose=False)
+            if not isinstance(outline, dict) or not outline.get('sections'):
+                raise ValueError('not an outline')
+        except EngineRefusal:
+            return self.failed(f'{self.engine.label} declined to write this file.')
+        except EngineError as e:
+            return self.failed(f'The create agent needs {self.engine.label} to write new content, which failed '
+                               f'({e.why}).')
+        except ValueError:
+            outline = {'title': (seed or {}).get('title') or ca.topic_title(self.req) or 'Document', 'subtitle': '',
+                       'sections': [{'heading': h, 'level': 1, 'words': 1, 'blocks_hint': []} for h in seed_heads]}
+        parts = parts_from(outline, self.target_words, self.n_sections, self.slides)
+        if not parts:
+            return self.failed('No file was made: the model\'s outline had no sections. Resume can try again.')
+        assign(parts, self.brief)
+        self.state['parts'] = [dataclasses.asdict(p) for p in parts]
+        self.state['title'] = str(outline.get('title') or (seed or {}).get('title') or ca.topic_title(self.req)
+                                  or 'Document')[:120]
+        self.state['subtitle'] = str(outline.get('subtitle') or '')[:300]
+        self.save('sections')
+        return None
+
+    # ----- sections -----
+
+    def missing(self) -> list[int]:
+        done = {str(k) for k in self.state['written']}
+        return [i for i in range(len(self.state['parts'])) if str(i) not in done]
+
+    def take(self, idx: list[int], secs: list[dict], notes: list[str]):
+        """Places the sections of one reply on their parts (rung 1: every section repaired in code); a part whose
+        section kept no block stays missing."""
+        parts = self.parts
+        placed = self.ca.place(secs, [parts[i] for i in idx])
+        for i, raw in zip(idx, placed):
+            if raw is None:
+                self.bad.add(i)
+                if i not in self.state['failed']:
+                    self.state['failed'].append(i)
+                continue
+            sec, results = self.ca.repair_section(raw, i + 1)
+            sec['heading'], sec['level'] = parts[i].heading, parts[i].level
+            self.results += results
+            if self.ca.usable(sec):
+                self.state['written'][str(i)] = sec
+                if i in self.state['failed']:
+                    self.state['failed'].remove(i)
+            else:
+                self.bad.add(i)
+                if i not in self.state['failed']:
+                    self.state['failed'].append(i)
+        for n in notes:
+            if n not in self.notes:
+                self.notes.append(n)
+
+    async def write(self, idx: list[int], gate: asyncio.Semaphore, *, repair: bool = False) -> bool:
+        """One section call for the parts `idx`; True when the call returned (usable or not)."""
+        from .. import create as cf
+        from ..engines import EngineError, EngineRefusal
+        parts = self.parts
+        group = [parts[i] for i in idx]
         words = sum(p.words for p in group)
-        cap = max(1500, int(token_budget * words / max(target_words, 1)))
-        prompt = '\n'.join([f'Request: {req}', f'Format: {label}', f'Title: {title}', 'Outline:', plan_text,
-                            'Write only these sections, in this order, as the sections array (the title and subtitle '
-                            'may be empty):', *(asks(p, slides) for p in group),
-                            *[ln for ln in brief_lines if ln.startswith('Black and white')]])
-        prompt += f'\n\nNotes and context:\n{ctx}' if ctx else ''
+        cap = max(1500, int(self.token_budget * words / max(self.target_words, 1)))
+        lines = [f'Request: {self.req}', f'Format: {self.label}', f'Title: {self.state["title"]}', 'Outline:',
+                 self.plan_text(parts)]
+        if repair:
+            lines += ['The last reply for these sections had no usable content. Write them again, in this order, as '
+                      'the sections array, each with at least one block (the title and subtitle may be empty):']
+        else:
+            lines += ['Write only these sections, in this order, as the sections array (the title and subtitle may be '
+                      'empty):']
+        lines += [*(asks(p, self.slides) for p in group), *[ln for ln in self.brief_lines if ln.startswith('Black and white')]]
+        prompt = '\n'.join(lines) + (f'\n\nNotes and context:\n{self.ctx}' if self.ctx else '')
         async with gate:
             try:
-                r = await call('sections', system=system, prompt=prompt, effort='low', max_tokens=cap,
-                               schema=cf.DOCSPEC_SCHEMA)
-                got = cf.strip_internal(parse_json(r.text))
-            except (EngineError, EngineRefusal, ValueError):
-                return None
-        secs = [s for s in (got.get('sections') if isinstance(got, dict) else None) or [] if isinstance(s, dict)]
-        if len(secs) == len(group):  # the outline's headings and levels keep the file consistent
-            for s, p in zip(secs, group):
-                s['heading'], s['level'] = p.heading, p.level
-        return secs
-    written = await asyncio.gather(*(write(g) for g in groups))
-    sections = [s for secs in written if secs for s in secs][:MAX_PARTS]
-    caveats = []
-    if not sections:
-        return failed(f'The create agent needs {engine.label} to write new content, which failed (no section came '
-                      f'back).')
-    if any(secs is None for secs in written):
-        missing = sum(len(g) for g, secs in zip(groups, written) if secs is None)
-        caveats.append(f'{missing} planned section{"" if missing == 1 else "s"} could not be written')
-    spec = {'title': title, 'subtitle': str(outline.get('subtitle') or '')[:300], 'sections': sections}
+                r = await self.call('sections', system=self.system, prompt=prompt, effort='low', max_tokens=cap,
+                                    schema=cf.DOCSPEC_SCHEMA)
+            except (EngineError, EngineRefusal):
+                for i in idx:
+                    if i not in self.state['failed']:
+                        self.state['failed'].append(i)
+                self.save()
+                return False
+            if repair:
+                self.repairs['calls'] += 1
+                self.repairs['llm_in'] += r.input_tokens
+                self.repairs['llm_out'] += r.output_tokens
+                self.state['repairs'] = self.state.get('repairs', 0) + 1
+            got, notes = self.ca.read_reply(r.text)
+            secs = [s for s in ((got or {}).get('sections') or []) if isinstance(s, dict)]
+            self.take(idx, secs, notes)
+            self.save()
+            return True
 
-    # images before the fit loop, so it measures the file as it will be
-    spec, credits, image_caveats, phase = await ca.with_images(spec, job, brief, theme)
-    caveats += image_caveats
-    if phase:
-        tally.phases['assets'] = phase
-    if theme:
-        spec['theme'] = theme
-    if brief.font:
-        spec['font'] = brief.font
+    async def sections(self):
+        todo = self.missing()
+        if not todo:
+            return
+        parts = self.parts
+        n = max(1, math.ceil(len(todo) / 10) if self.slides else
+                math.ceil(sum(parts[i].words for i in todo) / BATCH_WORDS))
+        if not self.state.get('written') and len(todo) == len(parts):
+            n = self.n_batches
+        sub = [parts[i] for i in todo]
+        pos = {id(p): i for p, i in zip(sub, todo)}
+        idx_groups = [[pos[id(p)] for p in g] for g in batches(sub, n)]
+        gate = asyncio.Semaphore(2 if getattr(self.engine, 'billing', 'api') == 'api' else 1)
+        await asyncio.gather(*(self.write(g, gate) for g in idx_groups))
 
-    # the fit loop
-    target = brief.slides if slides else brief.pages
-    render_ms = 0.0
-    if target:
+    async def repair(self):
+        """Rung 2: at most MAX_REPAIR_CALLS calls that rewrite only the missing sections, while time allows."""
+        gate = asyncio.Semaphore(1)
+        while self.missing() and self.repairs['calls'] < MAX_REPAIR_CALLS and time_left(self.job) >= REPAIR_MIN_SECONDS:
+            todo = self.missing()[:REPAIR_GROUP]
+            heads = [self.parts[i].heading for i in todo]
+            before = self.repairs['calls']
+            ok = await self.write(todo, gate, repair=True)
+            if not ok or self.repairs['calls'] == before:
+                break  # the engine is failing: no more calls
+            fixed = [h for i, h in zip(todo, heads) if str(i) in self.state['written']]
+            self.repairs['sections'] += [h for h in fixed if h not in self.repairs['sections']]
+
+    # ----- the file -----
+
+    async def run(self) -> Made:
+        from .. import create as cf
+        ca, brief, fmt = self.ca, self.brief, self.fmt
+        if not self.state.get('parts'):
+            if (out := await self.outline()) is not None:
+                return out
+        await self.sections()
+        if self.missing():
+            await self.repair()
+        parts = self.parts
+        written = self.state['written']
+        missing = self.missing()
+        sections = [copy.deepcopy(written[str(i)]) for i in range(len(parts)) if str(i) in written]
+        # S1 notes for sections that came back unusable, by their place in the file
+        for i in sorted(self.bad):
+            if i < len(parts):
+                again = ' and was written again' if str(i) in written else ''
+                self.results.append(cf.RuleResult('S1', 'fix', False, f'the reply for section {i + 1} '
+                                                  f'("{parts[i].heading}") had no usable content{again}'))
+        if not sections:
+            self.save()
+            return self.failed(f'The create agent needs {self.engine.label} to write new content, which failed (no '
+                               f'section came back).')
+        partial = None
+        if missing:
+            heads = [parts[i].heading for i in missing]
+            partial = {'planned': len(parts), 'written': len(parts) - len(missing), 'missing': heads, 'resume': None}
+            unit = 'slides' if self.slides else 'sections'
+            self.results.append(cf.RuleResult('V12', 'warn', False, f'{partial["written"]} of {len(parts)} planned '
+                                              f'{unit} written; missing: {", ".join(heads[:5])}'
+                                              + (f' and {len(heads) - 5} more' if len(heads) > 5 else '')))
+            self.caveats.append(partial_caveat(heads, len(parts), self.slides))
+        spec = {'title': self.state['title'] or 'Document', 'subtitle': self.state.get('subtitle') or '',
+                'sections': sections}
+        # images before the fit loop, so it measures the file as it will be
+        spec, credits, image_caveats, phase = await ca.with_images(spec, self.job, brief, self.theme)
+        self.caveats += image_caveats
+        if phase:
+            self.tally.phases['assets'] = phase
+        if self.theme:
+            spec['theme'] = self.theme
+        if brief.font:
+            spec['font'] = brief.font
+        render_ms = await self.fit(spec, parts, bool(missing))
+        tin, tout = self.tally.tokens
+        self.save('render')
+        out = await ca.finish(spec, fmt, self.jev, source='llm', tokens=tin + tout, notes=list(self.notes),
+                              brief=brief, theme=self.theme, role=self.job.role, credits=credits,
+                              caveats=self.caveats, extra=self.results, design=getattr(self.job, 'design', None),
+                              design_notes=getattr(self.job, 'design_notes', None))
+        out.engine = self.tally.engine or self.engine.name
+        out.llm_in, out.llm_out, out.effort = tin, tout, 'low'
+        final = next((p for p in out.phases if p['phase'] == 'render'), None)
+        self.tally.add('render', None, render_ms + (final['ms'] if final else 0), calls=0)
+        out.phases = [self.tally.phases[k] for k in ('outline', 'sections', 'topup', 'assets', 'render')
+                      if k in self.tally.phases]
+        out.repairs = dict(self.repairs) if self.repairs['calls'] else None
+        out.partial = partial if out.file is not None else None
+        if out.file is not None:
+            out.file['phases'] = out.phases
+            out.file['tokens'] = tin + tout
+            if out.repairs:
+                out.file['repairs'] = out.repairs
+            if partial:
+                out.file['partial'] = partial
+            self.state['file_id'] = out.file.get('id')
+            self.save('done' if not missing else 'render')
+        else:
+            self.save()
+        out.checkpoint = self.state
+        return out
+
+    async def fit(self, spec: dict, parts: list[Part], has_missing: bool) -> float:
+        """The fit loop: render and trim or top up until the page or slide count is in range. A rule that fails while
+        measuring is noted and the loop stops; the final build still renders what there is."""
+        from .. import create as cf
+        brief, fmt, slides = self.brief, self.fmt, self.slides
+        target = brief.slides if slides else brief.pages
+        render_ms = 0.0
+        if not target:
+            return render_ms
         topped = False
         for _ in range(MAX_FIT_RENDERS):
             t0 = time.perf_counter()
             try:
                 count, per_page = await asyncio.to_thread(measure, spec, fmt)
-            except cf.SpecError:
+            except cf.SpecError as e:
+                self.caveats.append(f'The length could not be checked before the final build ({e.rule_id}: '
+                                    f'{e.message}), so the file is as written.')
+                break
+            except Exception as e:  # a renderer failure while measuring: the final build has its own ladder
+                self.caveats.append(f'The length could not be checked before the final build '
+                                    f'({type(e).__name__}), so the file is as written.')
                 break
             render_ms += (time.perf_counter() - t0) * 1000
             lo, hi = target
             if lo <= count <= hi:
                 break
             if count < lo:
-                if topped or tally.calls >= max_calls:
+                # a partial file is finished by Resume, not by new sections that would take the missing ones' place
+                if topped or has_missing or self.tally.calls >= self.max_calls:
                     break
                 topped = True
-                spec = await top_up(spec, parts, fmt, lo, hi, count, per_page, call, system, req, label, title,
-                                    plan_text, ctx, token_budget, target_words)
+                self.save('topup')
+                await top_up(spec, parts, fmt, lo, hi, count, per_page, self.call, self.system, self.req, self.label,
+                             self.state['title'], self.plan_text(parts), self.ctx, self.token_budget, self.target_words)
+                self.save()
                 continue
             trim(spec, fmt, count, lo, hi, per_page)
-    tin, tout = tally.tokens
-    out = await ca.finish(spec, fmt, jev, source='llm', tokens=tin + tout, notes=list(notes), brief=brief, theme=theme,
-                          role=job.role, credits=credits, caveats=caveats)
-    out.engine = tally.engine or engine.name
-    out.llm_in, out.llm_out, out.effort = tin, tout, 'low'
-    final = next((p for p in out.phases if p['phase'] == 'render'), None)
-    tally.add('render', None, render_ms + (final['ms'] if final else 0), calls=0)
-    out.phases = [tally.phases[k] for k in ('outline', 'sections', 'topup', 'assets', 'render') if k in tally.phases]
+        return render_ms
+
+
+async def write_long(job: Job, engine, jev, fmt: str, brief: Brief, mode: str, *, seed: dict | None = None,
+                     notes: list[str] | tuple = ()) -> Made:
+    """C3 with the repair ladder: outline, section batches, repair calls for what came back unusable, then a partial
+    file with a Resume caveat rather than no file."""
+    return await Writer(job, engine, jev, fmt, brief, mode, seed=seed, notes=notes).run()
+
+
+async def resume_long(job: Job, engine, jev, state: dict) -> Made:
+    """Continues a checkpoint: a `longdoc` state writes only the parts not yet written (then images, the fit loop and
+    the final build, as write_long); a `single` state rebuilds its stored reply with no call. The new file's meta
+    carries `resumed_from` and only the new calls' tokens."""
+    from ..agents import create as ca
+    from . import brief as brief_mod
+    ref = state if isinstance(state, dict) else {}
+    if isinstance(ref.get('state'), dict):  # {'qid', 'tid', 'state'} as the resume request carries it
+        state = ref['state']
+    state = copy.deepcopy(state or {})
+    fmt = state.get('format') if state.get('format') in ca.LABELS else 'pdf'
+    brief = brief_mod.from_dict(state.get('brief')) or brief_mod.parse_brief(state.get('request') or job.request)
+    if state.get('design') and getattr(job, 'design', None) is None:
+        job.design = state['design']
+    resumed_from = {'qid': ref.get('qid', state.get('qid')), 'tid': ref.get('tid', state.get('tid')),
+                    'file_id': state.get('file_id')}
+    for k in ('tokens_in', 'tokens_out', 'calls'):
+        state[k] = 0
+    state['file_id'] = None
+    state.pop('resumed_by', None)  # the source's own record of who resumed it, not this run's
+    if state.get('kind') == 'single':
+        out = await ca.rebuild_single(job, jev, state, fmt, brief)
+    else:
+        if not job.request.strip():
+            job.request = state.get('request') or ''
+        if getattr(job, 'role', None) is None:
+            job.role = state.get('role') or 'primary'
+        if engine is None:
+            return ca.Made('No file was made: writing the missing sections needs an LLM engine. Choose an engine in '
+                           'Settings and use Resume again.', False, checkpoint=state)
+        out = await Writer(job, engine, jev, fmt, brief, state.get('mode') or 'balanced', state=state).run()
     if out.file is not None:
-        out.file['phases'] = out.phases
-        out.file['tokens'] = tin + tout
+        out.file['resumed_from'] = resumed_from
     return out
 
 
 def context(job: Job, seed: dict | None, ca) -> str:
-    """The notes the writer sees: the seed file's text first (when there is one), then the earlier steps' answers
-    without their reply lines, attached files and earlier turns, at most LONG_CONTEXT_CHARS."""
-    parts = []
+    """The notes the writer sees, at most LONG_CONTEXT_CHARS: the seed file's text first (when there is one), then the
+    earlier steps' answers without their reply lines (at most 60%), attached tables, attached content documents (at
+    least 25% when there are any) and earlier turns. Design files are never here (they are applied by code)."""
+    budget_chars = LONG_CONTEXT_CHARS
+    head = []
     if seed:
         try:
             from . import normalize
@@ -395,13 +741,34 @@ def context(job: Job, seed: dict | None, ca) -> str:
         except Exception:
             text = ''
         if text.strip():
-            parts.append(f'Earlier file "{seed.get("title") or "draft"}":\n{text}'[:8000])
+            head.append(f'Earlier file "{seed.get("title") or "draft"}":\n{text}'[:8000])
+    left = budget_chars - sum(len(p) + 2 for p in head)
     deps = [(t, ca.clean_answer(a)) for t, a in job.deps]
-    deps = [(t, a) for t, a in deps if a.strip()]
-    rest = ca.context_text(dataclasses.replace(job, deps=deps), LONG_CONTEXT_CHARS - sum(len(p) for p in parts))
-    if rest:
-        parts.append(rest)
-    return '\n\n'.join(parts)[:LONG_CONTEXT_CHARS]
+    dep_parts = [f'Earlier step "{t[:200]}":\n{a}' for t, a in deps if a.strip()]
+    doc_parts = [f'Attached file {m.get("name", "file")}:\n{text}' for m, text in job.docs if str(text or '').strip()]
+    docs_len = sum(len(p) + 2 for p in doc_parts)
+    docs_floor = min(docs_len, int(0.25 * budget_chars)) if doc_parts else 0
+    deps_room = max(0, min(int(0.6 * budget_chars), left - docs_floor))
+    dep_text = _fill(dep_parts, deps_room)
+    left -= len(dep_text) + (2 if dep_text else 0)
+    rest_job = dataclasses.replace(job, deps=[], docs=[])
+    tables_text = ca.context_text(dataclasses.replace(rest_job, context=[]), max(0, left - docs_floor)) \
+        if job.tables else ''
+    left -= len(tables_text) + (2 if tables_text else 0)
+    doc_text = _fill(doc_parts, max(0, left))
+    left -= len(doc_text) + (2 if doc_text else 0)
+    turns_text = ca.context_text(dataclasses.replace(rest_job, tables=[]), left) if left >= 200 and job.context else ''
+    return '\n\n'.join(p for p in [*head, dep_text, tables_text, doc_text, turns_text] if p)[:budget_chars]
+
+
+def _fill(parts: list[str], room: int) -> str:
+    out, left = [], room
+    for p in parts:
+        if left < 200:
+            break
+        out.append(p if len(p) <= left else p[:left - 3].rstrip() + '...')
+        left -= len(out[-1]) + 2
+    return '\n\n'.join(out)
 
 
 def measure(spec: dict, fmt: str) -> tuple[int, float]:
@@ -435,7 +802,8 @@ async def top_up(spec, parts, fmt, lo, hi, count, per_page, call, system, req, l
                  token_budget, target_words) -> dict:
     """One extra call for the words (or slides) the file is short of, split across its thinnest sections."""
     from .. import create as cf
-    from ..engines import EngineError, EngineRefusal, parse_json
+    from ..agents import create as ca
+    from ..engines import EngineError, EngineRefusal
     body = [s for s in spec['sections'] if s.get('heading') != 'Image credits']
     if fmt == 'pptx':
         need = max(1, round(aim(lo, hi)) - count)
@@ -457,10 +825,15 @@ async def top_up(spec, parts, fmt, lo, hi, count, per_page, call, system, req, l
     cap = max(1200, int(token_budget * words / max(target_words, 1)))
     try:
         r = await call('topup', system=system, prompt=prompt, effort='low', max_tokens=cap, schema=cf.DOCSPEC_SCHEMA)
-        got = cf.strip_internal(parse_json(r.text))
-    except (EngineError, EngineRefusal, ValueError):
+    except (EngineError, EngineRefusal):
         return spec
-    more = [s for s in (got.get('sections') if isinstance(got, dict) else None) or [] if isinstance(s, dict)]
+    got, _ = ca.read_reply(r.text)
+    more = []
+    for n, raw in enumerate((got or {}).get('sections') or [], 1):
+        if isinstance(raw, dict):
+            sec, _ = ca.repair_section(raw, n)
+            if ca.usable(sec):
+                more.append(sec)
     if fmt == 'pptx':
         credits = [s for s in spec['sections'] if s.get('heading') == 'Image credits']
         spec['sections'] = (body + more)[:MAX_PARTS] + credits

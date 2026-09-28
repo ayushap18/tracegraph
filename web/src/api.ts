@@ -166,3 +166,51 @@ export const listRules = () => get<{ rules: RuleInfo[] }>('/api/rules')
 
 /** Human-readable message for any thrown value. */
 export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e))
+
+// ---------- cost preflight and resume (docs/PLAN-files-robust.md) ----------
+import type {
+  CheckpointInfo, Estimate, EstimateBody, NeedsConfirmation, ResumeBody, ResumeResponse,
+} from './protocol'
+
+/** What the model calls of a draft would cost. Calls no model and starts nothing. */
+export const estimateRun = (body: EstimateBody) => post<Estimate>('/api/estimate', body)
+
+export type Confirmable<T> =
+  | { kind: 'started'; res: T }
+  | { kind: 'confirm'; estimate: Estimate; message: string }
+
+/** POST that turns a 409 {needs_confirmation, estimate} into a value instead of an error; other failures throw. */
+async function postConfirmable<T>(url: string, body: unknown): Promise<Confirmable<T>> {
+  let res: Response
+  try {
+    res = await fetch(url, {
+      method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })
+  } catch {
+    throw new ApiError(0, 'Network error: the server is unreachable')
+  }
+  const text = await res.text()
+  let data: unknown = null
+  if (text) { try { data = JSON.parse(text) } catch { data = null } }
+  if (res.status === 409 && data && typeof data === 'object' && (data as NeedsConfirmation).needs_confirmation === true) {
+    const d = data as NeedsConfirmation
+    return { kind: 'confirm', estimate: d.estimate, message: d.error }
+  }
+  if (!res.ok) {
+    const msg = data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string'
+      ? (data as { error: string }).error
+      : `${res.status} ${res.statusText || 'request failed'}`
+    throw new ApiError(res.status, msg)
+  }
+  return { kind: 'started', res: data as T }
+}
+
+/** /ask that may come back asking to confirm the cost. Send again with confirm_cost: true to go ahead. */
+export const askOrConfirm = (body: AskBody) => postConfirmable<AskResponse>('/ask', body)
+/** Compare engines side by side; a costly comparison comes back asking to confirm it (409) and starts nothing. */
+export const compareOrConfirm = (body: { query: string; engines: string[]; confirm_cost?: boolean }) =>
+  postConfirmable<CompareResponse>('/api/compare', body)
+/** Write the missing sections of a partial or timed-out file; reuses everything already written. */
+export const resumeFile = (body: ResumeBody) => postConfirmable<ResumeResponse>('/api/created/resume', body)
+/** Checkpoint summaries of one run's file steps. */
+export const runCheckpoints = (qid: number) => get<{ checkpoints: CheckpointInfo[] }>(`/api/runs/${qid}/checkpoints`)

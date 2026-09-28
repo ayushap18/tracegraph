@@ -282,10 +282,11 @@ async def test_x6_image_blocks(cache):
     missing = {**ok, 'asset': 'f' * 64}
     spec['sections'][0]['blocks'][1] = missing
     assert [b['type'] for b in blocks(normalize(spec, 'pdf')[0])] == ['paragraph']  # not in the cache: left out
+    # X6 is a fix rule (docs/PLAN-files-robust.md 2.1): an image without a full credit is left out, never embedded
     spec['sections'][0]['blocks'][1] = {**ok, 'credit': ''}
-    with pytest.raises(SpecError) as e:
-        normalize(spec, 'pdf')
-    assert e.value.rule_id == 'X6'
+    norm, results = normalize(spec, 'pdf')
+    assert [b['type'] for b in blocks(norm)] == ['paragraph']
+    assert all(r.severity == 'fix' for r in results if r.id == 'X6')
     # the model can never write an image block (its asset id would name a local file)
     written = {'title': 'T', 'font': 'x', 'sections': [{'heading': 'A', 'blocks': [ok, {'type': 'paragraph', 'text': 'x'}]}]}
     assert strip_internal(written) == {'title': 'T', 'sections': [{'heading': 'A', 'blocks': [{'type': 'paragraph',

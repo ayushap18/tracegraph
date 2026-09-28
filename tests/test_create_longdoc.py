@@ -317,3 +317,229 @@ async def test_the_pipeline_names_one_pdf_with_its_pages():
     answer = rec['merged']['answer']
     assert len(re.findall(r'Created \*\*[^*]+\.pdf\*\*, 12 pages', answer)) == 1, answer
     assert 'No format was named' not in answer and '**create**:' not in answer
+
+
+# ---------- docs/PLAN-files-robust.md 3: the repair ladder, checkpoints and resume ----------
+
+Q2750 = ('create the ppt on the how mobile phone is being evolved history past present everything a ppt of 12 slides '
+         'using the multiple pictured diagrams and also use the design.md for the design')
+HEADS_2750 = ['Before mobile phones', 'The first mobile call', 'Car phones and bricks', 'The 2G era', 'Texting takes off',
+              'Feature phones', 'Smartphones arrive', 'App stores', 'Cameras and social media', 'Phones today',
+              'What comes next']
+
+
+class Deck2750(LongStub):
+    """The run 2750 shape: an outline of 11 parts; section 7 ("Smartphones arrive") comes back as a bullets block with
+    no items. `repair` is what a repair call returns for it: 'good', 'empty' or 'prose'."""
+
+    def __init__(self, repair='good', batch_prose=False, **kw):
+        super().__init__(headings=HEADS_2750, **kw)
+        self.repair, self.batch_prose = repair, batch_prose
+        self.billing = 'subscription'
+
+    async def stream(self, *, system, prompt, schema=None, **kw):
+        if schema is OUTLINE_SCHEMA:
+            self.calls.append({'system': system, 'prompt': prompt, 'schema': schema})
+            out = {'title': 'The Evolution of Mobile Phones', 'subtitle': '',
+                   'sections': [{'heading': h, 'level': 1, 'words': 45, 'blocks_hint': ['bullets']} for h in HEADS_2750]}
+            return Reply(json.dumps(out), 40_000, 900)
+        self.calls.append({'system': system, 'prompt': prompt, 'schema': schema})
+        asked = re.findall(r'^- "([^"]+)" \(level \d\)', prompt, re.M)
+        is_repair = 'had no usable content' in prompt
+        if self.batch_prose and not is_repair:
+            text = '\n\n'.join(f'## {h}\n\n- a point about {h.lower()}\n- another point' for h in asked)
+            return Reply(text, 50_000, 800)
+        secs = []
+        for h in asked:
+            if h == 'Smartphones arrive' and (not is_repair or self.repair == 'empty'):
+                blocks = [{'type': 'bullets', 'items': None}]
+            else:
+                blocks = [{'type': 'bullets', 'items': [f'{h}: one point', 'another point'], 'ordered': False}]
+            secs.append({'heading': h, 'level': 1, 'blocks': blocks, 'notes': ''})
+        return Reply(json.dumps({'title': '', 'subtitle': '', 'sections': secs}), 50_000, 2_000)
+
+
+def job_2750(**kw) -> ca.Job:
+    return ca.Job(Q2750, deps=[('Research how mobile phones evolved', SHORT)], brief=parse_brief(Q2750), **kw)
+
+
+def section_calls(eng) -> list[dict]:
+    return [c for c in eng.calls if c['schema'] is cf.DOCSPEC_SCHEMA]
+
+
+async def test_the_2750_shape_builds_a_12_slide_deck_with_one_repair_call():
+    eng = Deck2750()
+    states = []
+    made = await ca.make(job_2750(checkpoint=states.append), eng, None)
+    assert made.ok, made.answer
+    assert made.file['format'] == 'pptx' and made.file['slides'] == 12
+    s1 = rules(made)['S1']
+    assert not s1['ok'] and 'section 7' in s1['note'] and 'Smartphones arrive' in s1['note']
+    repairs = [c for c in section_calls(eng) if 'had no usable content' in c['prompt']]
+    assert len(repairs) == 1 and '"Smartphones arrive"' in repairs[0]['prompt']
+    assert '"Before mobile phones"' not in repairs[0]['prompt']  # only the missing section is written again
+    assert made.repairs['calls'] == 1 and made.repairs['sections'] == ['Smartphones arrive']
+    assert made.file['repairs'] == made.repairs and made.partial is None and 'partial' not in made.file
+    sections = next(p for p in made.phases if p['phase'] == 'sections')
+    assert sections['calls'] == 3 and made.llm_in == sum(p['llm_in'] for p in made.phases)
+    # a checkpoint after the outline, after each batch and repair call, and after the final build
+    assert [s['phase'] for s in states][:1] == ['sections'] and states[-1]['phase'] == 'done'
+    assert states[-1]['file_id'] == made.file['id'] and len(states[-1]['written']) == 11
+    assert longdoc.info(states[-1], 7, '2')['resumable'] is False
+
+
+async def test_a_repair_call_that_also_fails_gives_a_partial_file():
+    eng = Deck2750(repair='empty')
+    made = await ca.make(job_2750(), eng, None)
+    assert made.ok, made.answer
+    assert made.file['slides'] == 11  # the title slide and 10 of 11
+    assert made.partial == {'planned': 11, 'written': 10, 'missing': ['Smartphones arrive'], 'resume': None}
+    assert made.file['partial'] == made.partial
+    v12 = rules(made)['V12']
+    assert v12['severity'] == 'warn' and not v12['ok'] and 'Smartphones arrive' in v12['note']
+    caveat = ('1 of 11 planned slides could not be written (Smartphones arrive). Use Resume on the file card to write '
+              'them; it reuses everything already written.')
+    assert caveat in made.caveats
+    assert len([c for c in section_calls(eng) if 'had no usable content' in c['prompt']]) == longdoc.MAX_REPAIR_CALLS
+    assert longdoc.info(made.checkpoint, 1, '2') == {
+        'qid': 1, 'tid': '2', 'kind': 'longdoc', 'format': 'pptx', 'phase': 'render', 'planned': 11, 'written': 10,
+        'missing': ['Smartphones arrive'], 'tokens_in': made.llm_in, 'tokens_out': made.llm_out,
+        'at': made.checkpoint['at'], 'resumable': True, 'file_id': made.file['id']}
+
+
+async def test_no_repair_call_when_the_run_is_out_of_time():
+    import time as time_mod
+    eng = Deck2750()
+    made = await ca.make(job_2750(deadline=time_mod.monotonic() + longdoc.REPAIR_MIN_SECONDS - 1), eng, None)
+    assert made.ok and made.file['slides'] == 11 and made.repairs is None
+    assert not [c for c in section_calls(eng) if 'had no usable content' in c['prompt']]
+
+
+async def test_a_batch_in_plain_text_is_laid_out():
+    made = await ca.make(job_2750(), Deck2750(batch_prose=True), None)
+    assert made.ok and made.file['slides'] == 12
+    assert ca.PROSE_NOTE in made.answer
+
+
+async def test_a_partial_state_resumes_without_repeating_paid_calls():
+    """Cancelled during batch 2: the sink holds batch 1; a resume writes only the parts batch 2 had."""
+    import asyncio
+    states = []
+    release = asyncio.Event()
+
+    class Stalls(Deck2750):
+        async def stream(self, **kw):
+            if kw.get('schema') is cf.DOCSPEC_SCHEMA and len(section_calls(self)) >= 1:
+                self.calls.append({'system': kw['system'], 'prompt': kw['prompt'], 'schema': kw['schema']})
+                await release.wait()
+            return await super().stream(**kw)
+    task = asyncio.create_task(ca.make(job_2750(checkpoint=states.append), Stalls(), None))
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if any(len(s['written']) == 6 for s in states):
+            break
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    state = states[-1]
+    assert state['phase'] == 'sections' and sorted(state['written'], key=int) == [str(i) for i in range(6)]
+    info = longdoc.info(state, 5, '2')
+    assert info['resumable'] and info['missing'] == HEADS_2750[6:] and info['tokens_in'] > 0
+    eng = Deck2750()
+    job = ca.Job(state['request'], resume={'qid': 5, 'tid': '2', 'state': state})
+    made = await ca.make(job, eng, None)
+    assert made.ok, made.answer
+    assert made.file['slides'] == 12 and made.file['resumed_from'] == {'qid': 5, 'tid': '2', 'file_id': None}
+    assert not [c for c in eng.calls if c['schema'] is OUTLINE_SCHEMA]
+    asked = [h for c in section_calls(eng) for h in re.findall(r'^- "([^"]+)"', c['prompt'], re.M)]
+    assert set(asked) <= set(HEADS_2750[6:]) and not set(asked) & set(HEADS_2750[:6])
+    assert made.llm_in == sum(c for c in [50_000] * len(section_calls(eng)))  # only the new calls' tokens
+
+
+async def test_a_single_checkpoint_rebuilds_at_no_cost():
+    reply = json.dumps({'title': 'Tea', 'sections': [{'heading': 'Green tea', 'blocks': [
+        {'type': 'paragraph', 'text': 'Green tea is steamed or pan fired.'}]}]})
+    state = {'v': 1, 'kind': 'single', 'format': 'pdf', 'request': 'a pdf about tea', 'brief': None, 'theme': None,
+             'font': None, 'design': None, 'reply': reply, 'engine': 'agy', 'tokens_in': 40_000, 'tokens_out': 500,
+             'calls': 1, 'at': 1.0, 'phase': 'sections', 'file_id': None}
+    assert longdoc.info(state, 3, '1')['resumable']
+    made = await ca.make(ca.Job('a pdf about tea', resume=state), None, None)
+    assert made.ok and made.llm_in == 0 and made.file['tokens'] == 0 and made.file['format'] == 'pdf'
+
+
+async def test_the_fit_loop_notes_a_rule_it_hits_and_still_builds(monkeypatch):
+    def broken(spec, fmt):
+        raise cf.SpecError('S2', 'The spec has no content.')
+    monkeypatch.setattr(longdoc, 'measure', broken)
+    made = await ca.make(ca.Job('a 12 page PDF on AI', brief=parse_brief('a 12 page PDF on AI')), LongStub(seed=2),
+                         None)
+    assert made.ok and made.file['format'] == 'pdf'
+    assert any('could not be checked' in c and 'S2' in c for c in made.caveats)
+
+
+async def test_an_error_inside_make_still_reports_the_tokens(monkeypatch):
+    async def boom(*a, **k):
+        raise RuntimeError('renderer fell over')
+    monkeypatch.setattr(ca, 'finish', boom)
+    made = await ca.make(job_2750(), Deck2750(), None)
+    assert not made.ok and made.answer.startswith('No file was made: something went wrong while building it')
+    assert made.llm_in > 0 and made.engine == 'stub' and {p['phase'] for p in made.phases} >= {'outline', 'sections'}
+    assert made.checkpoint is not None and len(made.checkpoint['written']) == 11
+
+
+class SingleEngine:
+    name, label, billing, supports_web = 'one', 'One', 'api', False
+
+    def __init__(self, *replies):
+        self.replies, self.calls = list(replies), []
+
+    def available(self):
+        return True, ''
+
+    async def stream(self, *, system, prompt, schema=None, **kw):
+        self.calls.append(prompt)
+        return Reply(self.replies.pop(0) if len(self.replies) > 1 else self.replies[0], 1000, 200)
+
+
+async def test_the_single_path_lays_out_prose_and_keeps_the_reply():
+    prose = '# Tea\n\nTea is a drink made from the leaves of Camellia sinensis.\n\n- green\n- black'
+    states = []
+    made = await ca.make(ca.Job('write a pdf about tea', checkpoint=states.append), SingleEngine(prose), None)
+    assert made.ok and made.file['format'] == 'pdf' and ca.PROSE_NOTE in made.answer
+    assert made.reply == prose and states[-1]['kind'] == 'single' and states[-1]['file_id'] == made.file['id']
+
+
+async def test_the_single_path_retries_once_when_nothing_is_usable():
+    eng = SingleEngine('{"title": "x", "sections": []}',
+                       json.dumps({'title': 'Tea', 'sections': [{'heading': 'Tea', 'blocks': [
+                           {'type': 'paragraph', 'text': 'A drink.'}]}]}))
+    made = await ca.make(ca.Job('write a pdf about tea'), eng, None)
+    assert made.ok and len(eng.calls) == 2 and made.repairs['calls'] == 1 and made.llm_in == 2000
+    assert 'had no usable content' in eng.calls[1]
+
+
+def test_plan_calls_matches_the_writer():
+    plan = longdoc.plan_calls('pptx', parse_brief(Q2750))
+    assert (plan.sections, plan.batches) == (11, 2) and plan.max_calls == 1 + 2 + 1 + longdoc.MAX_REPAIR_CALLS
+    plan = longdoc.plan_calls('pdf', parse_brief('a 12-13 page PDF on AI'))
+    assert plan.batches == -(-plan.words // longdoc.BATCH_WORDS)
+
+
+def test_a_checkpoint_is_capped():
+    big = {'v': 1, 'kind': 'longdoc', 'format': 'pdf', 'ctx': 'x' * 300_000,
+           'parts': [{'heading': f'P{i}'} for i in range(3)],
+           'written': {str(i): {'heading': f'P{i}', 'blocks': [{'type': 'paragraph', 'text': 'y' * 150_000}]}
+                       for i in range(3)}}
+    capped = longdoc.cap_state(big)
+    assert len(json.dumps(capped)) <= longdoc.CHECKPOINT_MAX_BYTES and capped['ctx'] == ''
+    assert '2' in capped['written'] and '0' not in capped['written']
+    assert longdoc.info(capped, 1, '1')['missing'][0] == 'P0'
+
+
+async def test_attachments_keep_a_share_of_the_writer_context():
+    job = ca.Job('a 12 page pdf', deps=[('Research', 'r' * 20_000)],
+                 docs=[({'name': 'notes.txt'}, 'n' * 20_000)])
+    ctx = longdoc.context(job, None, ca)
+    assert len(ctx) <= longdoc.LONG_CONTEXT_CHARS
+    assert ctx.count('n') >= 0.25 * longdoc.LONG_CONTEXT_CHARS - 100
+    assert ctx.count('r') <= 0.6 * longdoc.LONG_CONTEXT_CHARS + 10

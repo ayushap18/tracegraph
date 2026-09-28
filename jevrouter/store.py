@@ -253,6 +253,14 @@ class Store:
                meta['format'], meta['size'], meta['created'], json.dumps(spec), meta.get('tokens', 0),
                json.dumps(meta.get('rules') or []), json.dumps(rest))
 
+    def update_created(self, fid: str, **fields):
+        """Merges fields into a stored created file's meta (not its bytes, spec or columns)."""
+        rows = self.q('SELECT meta FROM created WHERE id = ?', fid)
+        if not rows:
+            return
+        meta = {**json.loads(rows[0]['meta'] or '{}'), **fields}
+        self.x('UPDATE created SET meta = ? WHERE id = ?', json.dumps(meta), fid)
+
     def get_created(self, fid: str) -> dict | None:
         rows = self.q('SELECT * FROM created WHERE id = ?', fid)
         return created_meta(rows[0]) if rows else None
@@ -366,7 +374,10 @@ def file_meta(r) -> dict:
 
 
 # docs/PLAN-accuracy-v2.md C8: what the create agent adds to a file's meta, returned when the file has it
-CREATED_V2 = ('brief', 'role', 'theme', 'font_used', 'diagrams', 'images', 'credits', 'phases')
+CREATED_V2 = ('brief', 'role', 'theme', 'font_used', 'diagrams', 'images', 'credits', 'phases',
+              # docs/PLAN-files-robust.md: a partial file's Resume reference, repair calls, estimated vs used,
+              # the design applied and the run a resumed file continues
+              'partial', 'repairs', 'cost', 'design', 'resumed_from')
 
 
 def created_meta(r) -> dict:

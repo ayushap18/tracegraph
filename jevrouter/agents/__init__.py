@@ -34,12 +34,19 @@ FEEDS_FILE: ContextVar[bool] = ContextVar('feeds_file', default=False)
 class Tuned:
     """A run's engine as its agents see it (docs/PLAN-speed-evals-chat.md, chat modes and styles): every call at the
     mode's effort when it sets one (quick: low, deep: high), with the answer style added to the instructions, and the
-    effort used recorded in EFFORTS. Everything else is the engine itself."""
+    effort used recorded in EFFORTS. `prefer` (docs/PLAN-files-robust.md H8) names the backend an Auto engine tries
+    first for every call, the cheapest for a long file; it is ignored for any other engine. Everything else is the
+    engine itself."""
 
-    def __init__(self, engine, effort: str | None = None, style: str = ''):
+    def __init__(self, engine, effort: str | None = None, style: str = '', prefer: str | None = None):
         self._engine, self._effort, self._style = engine, effort, style
+        self.prefer = prefer if prefer and _is_auto(engine) else None
 
     def __getattr__(self, name):
+        if name == 'billing' and self.__dict__.get('prefer'):  # the backend that will take the calls
+            picked = getattr(self._engine, 'engines', {}).get(self.prefer)
+            if picked is not None:
+                return picked.billing
         return getattr(self._engine, name)
 
     async def stream(self, *, system, prompt, effort='medium', schema=None, **kw):
@@ -49,7 +56,14 @@ class Tuned:
         used = EFFORTS.get()
         if used is not None:
             used.append(effort)
+        if self.prefer and 'first' not in kw:
+            kw['first'] = self.prefer
         return await self._engine.stream(system=system, prompt=prompt, effort=effort, schema=schema, **kw)
+
+
+def _is_auto(engine) -> bool:
+    from ..engines.auto import AutoEngine
+    return isinstance(engine, AutoEngine)
 
 
 NUMBER = re.compile(r'-?\d[\d,]*(?:\.\d+)?')

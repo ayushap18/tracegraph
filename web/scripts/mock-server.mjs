@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs'
 import { extname, join, normalize, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
+import { estimateFor, robustFixtures } from './fixtures/files-robust.mjs'
 
 const PORT = +(process.argv.find(a => /^\d+$/.test(a)) || process.env.PORT || 8777)
 const QUIET = process.argv.includes('--quiet')
@@ -281,7 +282,21 @@ function seedV2() {
   for (const [fid, pv] of Object.entries(V2.previews ?? {})) previews.set(fid, pv)
   for (const e of V2.evals ?? []) evals.set(e.eval_id, e)
   nextQid = Math.max(nextQid, ...records.keys()) + 1
+  seedRobust()
 }
+
+// docs/PLAN-files-robust.md: a partial deck with a design file and Resume, a failed file step, estimated vs used.
+function seedRobust() {
+  const fx = robustFixtures(nextQid, now() - 3600)
+  sessions.set(fx.session.id, fx.session)
+  for (const r of fx.runs) records.set(r.qid, r)
+  for (const [fid, pv] of Object.entries(fx.previews)) previews.set(fid, pv)
+  nextQid = Math.max(nextQid, ...records.keys()) + 1
+}
+// Cost preflight: chat, sandbox, "you" and compare runs over the threshold get 409 until the body says confirm_cost: true.
+const COST_SOURCES = ['chat', 'sandbox', 'you', 'compare']
+const needsConfirm = (b, q) => COST_SOURCES.includes(b.source ?? 'you') && b.confirm_cost !== true && b.engine !== 'none'
+  && estimateFor(q, { mode: b.mode }).needs_confirmation
 
 function evalCases() {
   const base = [
@@ -396,6 +411,11 @@ const server = http.createServer(async (req, res) => {
       if (!e && b.engine !== 'none') return json(res, 400, { error: `unknown engine '${b.engine}'` })
       if (e && !e.available) return json(res, 409, { error: `${e.label} is not available: ${e.why}` })
     }
+    if ('confirm_cost' in b && typeof b.confirm_cost !== 'boolean') return json(res, 400, { error: 'confirm_cost must be true or false' })
+    if (needsConfirm(b, q)) {
+      const estimate = estimateFor(q, { mode: b.mode })
+      return json(res, 409, { error: `This run needs about ${estimate.calls} model calls. Confirm to go ahead.`, needs_confirmation: true, estimate })
+    }
     let session_id = typeof b.session_id === 'string' ? b.session_id : null
     const source = ['you', 'chat', 'compare', 'eval'].includes(b.source) ? b.source : 'you'
     if (session_id && !sessions.has(session_id)) return json(res, 404, { error: 'unknown session' })
@@ -427,6 +447,27 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ...state, engine: activeEngine })
   }
   if (M === 'GET' && p === '/api/config') return json(res, 200, config())
+  if (M === 'POST' && p === '/api/estimate') {
+    const b = await body(req)
+    const q = typeof b?.query === 'string' ? b.query.trim() : ''
+    if (!q) return json(res, 400, { error: 'empty query' })
+    return json(res, 200, estimateFor(q, { mode: b.mode }))
+  }
+  if (M === 'POST' && p === '/api/created/resume') {
+    const b = (await body(req)) || {}
+    const r = records.get(+b.qid)
+    const cp = r?.checkpoints?.find(c => c.tid === b.tid)
+    if (!r || !cp) return json(res, 404, { error: 'no checkpoint for that file step' })
+    if (!cp.resumable) return json(res, 409, { error: 'That file is already complete.' })
+    const estimate = estimateFor(r.text, { resume: true })
+    if (b.confirm_cost !== true) return json(res, 409, { error: `This run needs about ${estimate.calls} model calls. Confirm to go ahead.`, needs_confirmation: true, estimate })
+    const qid = submit(r.text, { source: r.source, session_id: r.session_id, engine: b.engine ?? null, files: [] })
+    return json(res, 202, { ok: true, qid, session_id: r.session_id, estimate })
+  }
+  if ((m = /^\/api\/runs\/(\d+)\/checkpoints$/.exec(p)) && M === 'GET') {
+    const r = records.get(+m[1])
+    return r ? json(res, 200, { checkpoints: r.checkpoints ?? [] }) : json(res, 404, { error: 'unknown run' })
+  }
 
   // ---------- runs ----------
   if (M === 'GET' && p === '/api/runs') {
@@ -530,6 +571,11 @@ const server = http.createServer(async (req, res) => {
     if (!query) return json(res, 400, { error: 'empty query' })
     if (names.length < 2 || names.length > 4) return json(res, 400, { error: 'pick 2-4 engines' })
     for (const n of names) { const e = engineInfo(n); if (!e) return json(res, 400, { error: `unknown engine '${n}'` }); if (!e.available) return json(res, 409, { error: `${e.label} is not available` }) }
+    if (needsConfirm({ ...b, source: 'compare' }, query)) {
+      const one = estimateFor(query)
+      const estimate = { ...one, calls: one.calls * names.length, tokens_in: one.tokens_in * names.length, tokens_out: one.tokens_out * names.length, engine: null, engine_label: null, cheaper: [] }
+      return json(res, 409, { error: `This run needs about ${estimate.calls} model calls. Confirm to go ahead.`, needs_confirmation: true, estimate })
+    }
     const compare_id = 'c_' + id(4)
     const runs = names.map(engine => ({ engine, qid: submit(query, { source: 'compare', compare_id, engine }) }))
     compares.set(compare_id, { compare_id, query, runs })

@@ -119,6 +119,27 @@ CREATE_SANDBOX_BYTES = 40 * 1024 * 1024
 # Dollars per million tokens.
 PRICES = {'jev_in': 0.042, 'claude_in': 5.0, 'claude_out': 25.0}
 
+# Cost preflight (docs/PLAN-files-robust.md 5.3). A run whose estimate crosses any of these asks the user to confirm
+# first (/ask returns 409 without starting). TG_COST_CONFIRM=0 turns the guard off; it is read on every request.
+COST_CONFIRM = True
+COST_CONFIRM_TOKENS = {'agy': 120_000, 'codex': 120_000, 'claude-code': 150_000, 'anthropic': 60_000,
+                       'default': 100_000}   # high end of tokens_in + tokens_out
+COST_CONFIRM_CALLS = 5                   # mid model calls, planner and merge included
+COST_CONFIRM_SECONDS = 180               # mid seconds
+COST_DEADLINE_SHARE = 0.8                # high seconds above this share of the deadline
+COST_SOURCES = ('chat', 'sandbox', 'you', 'compare')
+# On Auto, a long file goes to the healthy engine with the lowest estimate (5.5). TG_LEAN_LONG_FILES=0 turns it off.
+LEAN_LONG_FILES = True
+
+
+def cost_confirm_on() -> bool:
+    """The cost guard's switch, read on every request: TG_COST_CONFIRM overrides COST_CONFIRM."""
+    return env_flag('TG_COST_CONFIRM', COST_CONFIRM)
+
+
+def lean_long_files_on() -> bool:
+    return env_flag('TG_LEAN_LONG_FILES', LEAN_LONG_FILES)
+
 SAMPLES = [
     "What's 18% of 2450?", '(45 * 12) / 7 + 3^2', 'square root of 1764',
     'Will it rain in Mumbai tomorrow?', "What's the weather in Tokyo right now?", 'Is it cold in Oslo today?',

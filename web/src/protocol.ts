@@ -414,3 +414,132 @@ export interface EvalSummaryExtra {
   tokens?: RunTokens
 }
 export interface RunEvalBody { mode?: EvalMode; jev?: JevSource }
+
+// ---------- files that always build, design files, cost preflight (docs/PLAN-files-robust.md) ----------
+// Additive only: every field below is optional on older records, and no line above this block changes.
+
+/** A2: the stage one estimated model call belongs to. */
+export type EstimatePhase = 'planner' | 'research' | 'answer' | 'outline' | 'sections' | 'topup' | 'repair' | 'merge'
+/** One line of the estimate's breakdown: `calls` calls of one phase on one engine (mid values). */
+export interface EstimateCall {
+  phase: EstimatePhase
+  engine: string          // engine name, e.g. 'agy', 'claude-code'
+  calls: number
+  tokens_in: number
+  tokens_out: number
+  seconds: number
+  optional: boolean       // counted only in the high end of the range (top-up, repair)
+}
+/** [low, high] of each total. The mid values are the Estimate's own fields. */
+export interface EstimateRange {
+  calls: [number, number]
+  tokens_in: [number, number]
+  tokens_out: [number, number]
+  seconds: [number, number]
+}
+export type EstimateReasonCode =
+  | 'long_file' | 'research' | 'planner' | 'merge' | 'engine_overhead' | 'attachments' | 'images' | 'design'
+  | 'deadline' | 'several_engines' | 'resume' | 'keyless' | 'repair'
+/** Why the run costs what it does, one plain sentence each (shown in the dialog). */
+export interface EstimateReason { code: EstimateReasonCode; text: string }
+/** A healthy engine that would do the same run for fewer tokens. */
+export interface CheaperEngine {
+  engine: string; label: string
+  calls: number; tokens_in: number; tokens_out: number; seconds: number
+  saves: number           // share of tokens saved, 0..1
+}
+/** POST /api/estimate, and the `estimate` of a 409 from /ask or /api/created/resume. No model is called to make it. */
+export interface Estimate {
+  version: 1
+  calls: number
+  tokens_in: number
+  tokens_out: number
+  seconds: number
+  range: EstimateRange
+  engine: string | null        // the engine most calls go to; null when keyless or several engines
+  engine_label: string | null
+  billing: 'api' | 'subscription' | null
+  dollars: [number, number] | null  // api billing only, from `prices`
+  keyless: boolean             // no model call at all (keyless runs are never asked to confirm)
+  long_file: boolean           // the long-document writer will run
+  needs_confirmation: boolean
+  reasons: EstimateReason[]
+  breakdown: EstimateCall[]
+  deadline_s: number           // the run's deadline (TG_RUN_TIMEOUT or TG_LONG_RUN_TIMEOUT)
+  cheaper: CheaperEngine[]     // best first; empty when none is healthy and cheaper
+  summary: string              // one plain sentence for the dialog
+}
+/** The same fields /ask takes; nothing is started. */
+export type EstimateBody = Omit<AskBody, 'confirm_cost' | 'retry_of' | 'replaces' | 'remember' | 'draft_agent'>
+export interface AskBody {
+  confirm_cost?: boolean // the user saw the estimate and chose Continue; without it a costly run returns 409
+}
+/** The body of a 409 from /ask or /api/created/resume when the run needs confirming. */
+export interface NeedsConfirmation { error: string; needs_confirmation: true; estimate: Estimate }
+/** What a run really used, for "estimated vs used". */
+export interface CostActual { calls: number; tokens_in: number; tokens_out: number; seconds: number }
+export interface RunCost { estimate: Estimate | null; actual: CostActual | null }
+
+/** A3: how far a long file got. Full state stays on the server; this is the summary. */
+export type CheckpointPhase = 'outline' | 'sections' | 'topup' | 'render' | 'done'
+export interface CheckpointInfo {
+  qid: number
+  tid: string
+  kind: 'longdoc' | 'single'
+  format: FileFormat
+  phase: CheckpointPhase
+  planned: number              // sections (slides) planned
+  written: number              // sections written and usable
+  missing: string[]            // headings still to write
+  tokens_in: number            // spent so far
+  tokens_out: number
+  at: number
+  resumable: boolean
+  file_id: string | null       // the partial file, when one was delivered
+  resumed_by?: number          // the run that resumed this checkpoint (resumable is false once it made the file)
+}
+export interface ResumeRef { qid: number; tid: string; sandbox?: string | null }
+/** A3: a file delivered with some planned sections missing. */
+export interface PartialInfo { planned: number; written: number; missing: string[]; resume: ResumeRef | null; resumed_by?: number | null }
+/** Model calls spent re-writing sections that came back unusable. */
+export interface RepairInfo { calls: number; llm_in: number; llm_out: number; sections: string[] }
+export interface ResumeBody { qid: number; tid: string; engine?: string; confirm_cost?: boolean; sandbox_id?: string }
+export interface ResumeResponse { ok: true; qid: number; session_id: string | null; estimate: Estimate }
+
+/** A4: roles a design file can set. Colours are RRGGBB without '#'. */
+export type DesignRole =
+  | 'bg' | 'surface' | 'text' | 'heading' | 'muted' | 'accent' | 'border' | 'header_bg' | 'header_text' | 'stripe'
+  | 'code_bg'
+export interface DesignApplied {
+  name: string                         // the design file's name, e.g. 'DESIGN-lovable.md'
+  colors: Partial<Record<DesignRole, string>>
+  palette: string[]
+  heading_font: string | null          // what the design asked for
+  body_font: string | null
+  fonts_used: { heading: string | null; body: string | null }  // what the file really uses
+  nudged: string[]                     // roles whose colour was adjusted for contrast
+  notes: string[]                      // plain sentences, also in the caveats
+  confidence: number                   // 0..1, how sure the parser was
+}
+export interface FileBrief {
+  design?: string | null // name of the design file the request asked to use
+}
+export interface CreatedFile {
+  partial?: PartialInfo | null
+  repairs?: RepairInfo | null
+  cost?: RunCost | null
+  design?: DesignApplied | null
+  resumed_from?: { qid: number; tid: string; file_id: string | null } | null
+}
+export interface AnsweredFields {
+  phases?: FilePhase[]         // create steps keep these even when no file was made
+  llm_in?: number
+  llm_out?: number
+  checkpoint?: CheckpointInfo | null
+}
+export interface RunRecord {
+  cost?: RunCost | null
+  file_failed?: boolean        // the run's primary file step made no file
+  checkpoints?: CheckpointInfo[]
+}
+export interface DoneEvent { cost?: RunCost | null; file_failed?: boolean; checkpoints?: CheckpointInfo[] }

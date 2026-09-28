@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { ask, cancelRun, clearSandbox, errorText } from '../api'
-import type { AskBody, FileInfo } from '../protocol'
+import { askOrConfirm, cancelRun, clearSandbox, errorText, estimateRun } from '../api'
+import type { AskBody, AskResponse, Estimate, FileInfo, ResumeResponse } from '../protocol'
 import { colorOf } from '../protocol'
 import { useEventStream, type Run } from '../useEventStream'
 import { COUNT_FROM } from '../components/chat/ChatOptions'
@@ -20,6 +20,8 @@ import { TurnGroupView } from './sandbox/TurnGroupView'
 import { Playground, PlaygroundChip } from './sandbox/Playground'
 import { AttachButton, Attachments, clearPendingUploads, useSandboxDrop } from './sandbox/Attachments'
 import { KeepDialog } from './sandbox/KeepDialog'
+import { combineEstimates, costRemembered, rememberCost, useCostConfirm, type CostBody } from '../components/chat/CostDialog'
+import { FileActionsContext, filesOfTasks, resumedKeys, type FileActions } from '../components/chat/CreatedFiles'
 
 // Sandbox: a separate, throwaway environment and a test bench (docs/PLAN-sandbox.md). Runs go through the real
 // pipeline, but the server stores nothing (no run, session, stats or history) and their events travel on a private
@@ -113,6 +115,113 @@ export default function Sandbox() {
     ...(withFiles && files.length ? { files: files.map(f => f.id) } : {}),
   })
 
+  // Cost preflight (docs/PLAN-files-robust.md 6.2): a costly run comes back with an estimate and starts nothing until
+  // the dialog says Continue. "Don't ask again" holds for this sandbox id.
+  const cost = useCostConfirm()
+  const confirmed = () => (costRemembered(sid) ? { confirm_cost: true } : {})
+  const remember = () => rememberCost(sid)
+
+  /** One run. On a 409 the question goes back in the composer and the dialog opens; its choice sends it again. */
+  const sendOne = async (body: AskBody, q: string, done: (res: AskResponse) => void, restore: () => void): Promise<void> => {
+    setSending(true)
+    try {
+      const r = await askOrConfirm(body)
+      if (r.kind === 'confirm') {
+        restore()
+        cost.ask({ estimate: r.estimate, body, go: (b: AskBody) => sendOne(b, q, done, restore), onRemember: remember })
+        return
+      }
+      done(r.res)
+    } catch (e) {
+      toast.error(`Could not send: ${errorText(e)}`)
+      restore()
+    } finally {
+      setSending(false)
+      input.current?.focus()
+    }
+  }
+
+  /** Side by side: one run per engine, kept out of the follow-up memory so they don't pile up as turns. The cost is
+   *  asked once, for all engines together (one estimate per engine, added up), and Continue starts every engine.
+   *  When some engines start and others still need confirming, the dialog asks for those only, and Continue adds
+   *  them to the same side-by-side turn: an engine that already started is never sent twice. */
+  const estimateAll = async (q: string, engines: string[]): Promise<Estimate | null> => {
+    const { draft_agent: _d, ...rest } = base('', true)
+    try { return await estimateRun({ ...rest, query: q, engines }) } catch { /* an older server: price each engine */ }
+    try {
+      const each = await Promise.all(engines.map(e => estimateRun({ ...rest, query: q, engine: e })))
+      return combineEstimates(each)
+    } catch { return null }
+  }
+
+  const launch = async (q: string, engines: string[], extra: { confirm_cost?: boolean }) => {
+    const results = await Promise.allSettled(engines.map(e => askOrConfirm({ ...base(e, true), query: q, remember: false, ...extra })))
+    const started: Array<{ qid: number; engine: string }> = []
+    const ask: Array<{ engine: string; estimate: Estimate }> = []
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') toast.error(`${engineLabelOf(store.engines, engines[i])}: ${errorText(r.reason)}`)
+      else if (r.value.kind === 'confirm') ask.push({ engine: engines[i], estimate: r.value.estimate })
+      else started.push({ qid: r.value.res.qid, engine: engines[i] })
+    })
+    return { started, ask }
+  }
+
+  /** Starts the engines of a side-by-side ask that still needed confirming, in the turn the others already started. */
+  const sendRest = async (q: string, engines: string[], gid: string): Promise<void> => {
+    setSending(true)
+    try {
+      const { started } = await launch(q, engines, { confirm_cost: true })
+      if (started.length) setGroups(gs => gs.map(g => (g.id === gid
+        ? { ...g, qids: [...g.qids, ...started.map(x => x.qid)], engines: [...(g.engines ?? []), ...started.map(x => x.engine)] }
+        : g)))
+    } catch (e) {
+      toast.error(`Could not send: ${errorText(e)}`)
+    } finally {
+      setSending(false)
+      input.current?.focus()
+    }
+  }
+
+  const sendCompare = async (q: string, engines: string[], ok: boolean): Promise<void> => {
+    setSending(true)
+    setText('')
+    const restore = () => setText(current => current || q)
+    try {
+      if (!ok && !costRemembered(sid)) {
+        const est = await estimateAll(q, engines)
+        if (est?.needs_confirmation) {
+          restore()
+          cost.ask({ estimate: { ...est, cheaper: [] }, body: { engines } as CostBody, go: (b: CostBody) => sendCompare(q, b.engines ?? engines, true), onRemember: remember })
+          return
+        }
+      }
+      const { started, ask } = await launch(q, engines, ok ? { confirm_cost: true } : confirmed())
+      const gid = newGroupId()
+      if (started.length) setGroups(g => [...g, { id: gid, kind: 'compare', qids: started.map(x => x.qid), engines: started.map(x => x.engine), active: 0 }])
+      if (ask.length) {
+        const rest = ask.map(a => a.engine)
+        const estimate = combineEstimates(ask.map(a => a.estimate))
+        if (!started.length) {
+          restore()
+          cost.ask({ estimate, body: { engines: rest } as CostBody, go: (b: CostBody) => sendCompare(q, b.engines ?? rest, true), onRemember: remember })
+          return
+        }
+        // the others already started: ask about these only, and add them to the same turn
+        cost.ask({ estimate, body: { engines: rest } as CostBody, go: (b: CostBody) => sendRest(q, b.engines ?? rest, gid), onRemember: remember })
+      }
+      if (!started.length) { restore(); return }
+      for (const f of files) fileNames.current.set(f.id, f.name)
+      setFiles([])
+      setSelQid(null)
+    } catch (e) {
+      toast.error(`Could not send: ${errorText(e)}`)
+      restore()
+    } finally {
+      setSending(false)
+      input.current?.focus()
+    }
+  }
+
   const send = useCallback(async (raw: string) => {
     const q = raw.trim().slice(0, MAX_CHARS)
     if (!q || busy) return
@@ -120,47 +229,28 @@ export default function Sandbox() {
       toast.error('The draft agent needs an LLM engine. Pick one in the engine menu, or stop using the draft.')
       return
     }
-    setSending(true)
+    if (comparing) { await sendCompare(q, compareWith, false); return }
     setText('')
-    try {
-      if (comparing) {
-        // Side by side: one run per engine, kept out of the follow-up memory so they don't pile up as turns.
-        const results = await Promise.allSettled(compareWith.map(e => ask({ ...base(e, true), query: q, remember: false })))
-        const ok = results.flatMap((r, i) => (r.status === 'fulfilled' ? [{ qid: r.value.qid, engine: compareWith[i] }] : []))
-        results.forEach((r, i) => {
-          if (r.status === 'rejected') toast.error(`${engineLabelOf(store.engines, compareWith[i])}: ${errorText(r.reason)}`)
-        })
-        if (ok.length) setGroups(g => [...g, { id: newGroupId(), kind: 'compare', qids: ok.map(x => x.qid), engines: ok.map(x => x.engine), active: 0 }])
-        else setText(current => current || q)
-      } else {
-        const res = await ask({ ...base(engine, true), query: q })
-        setGroups(g => [...g, { id: newGroupId(), kind: 'single', qids: [res.qid], active: 0 }])
-      }
+    await sendOne({ ...base(engine, true), query: q, ...confirmed() }, q, res => {
+      // started (also after Continue in the cost dialog): the question leaves the composer, so Enter cannot send it twice
+      setText(current => (current.trim() === q ? '' : current))
+      setGroups(g => [...g, { id: newGroupId(), kind: 'single', qids: [res.qid], active: 0 }])
       for (const f of files) fileNames.current.set(f.id, f.name)
       setFiles([])
       setSelQid(null)
-    } catch (e) {
-      toast.error(`Could not send: ${errorText(e)}`)
-      setText(current => current || q)
-    } finally {
-      setSending(false)
-      input.current?.focus()
-    }
+    }, () => setText(current => current || q))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, draft, comparing, engineOk, compareWith, engine, files, sid, store.engines, store.engine, toast, MAX_CHARS])
 
   /** Edit and re-run: a new version of a turn. It replaces the turn the server remembers (the latest version),
    *  so its context is the turns before it and later follow-ups see the new answer. */
   const onEdit = async (group: TurnGroup, q: string) => {
     if (busy) return
-    setSending(true)
-    try {
-      const replaces = rememberedQid(group)
-      const res = await ask({ ...base(engine, false), query: q.slice(0, MAX_CHARS), ...(replaces != null ? { replaces } : {}) })
+    const replaces = rememberedQid(group)
+    await sendOne({ ...base(engine, false), query: q.slice(0, MAX_CHARS), ...(replaces != null ? { replaces } : {}), ...confirmed() }, q, res => {
       setGroups(gs => gs.map(g => (g.id === group.id ? { ...g, qids: [...g.qids, res.qid], active: g.qids.length } : g)))
       setSelQid(null)
-    } catch (e) {
-      toast.error(`Could not re-run: ${errorText(e)}`)
-    } finally { setSending(false) }
+    }, () => {})
   }
 
   const onSelectVersion = (group: TurnGroup, index: number) => {
@@ -196,7 +286,15 @@ export default function Sandbox() {
   const canSend = !!text.trim() && !busy
   const exportInput = { groups, byQid, engines: store.engines, draft }
 
+  // Resume on a sandbox file card: the new run joins the thread as its own turn.
+  const resumed = useMemo(() => resumedKeys(runs.flatMap(r => filesOfTasks(r.order.map(t => r.tasks[t]).filter(Boolean)))), [runs])
+  const fileActions = useMemo<FileActions>(() => ({
+    sandbox: sid, rememberKey: sid, resumed,
+    onResumed: (res: ResumeResponse) => { setGroups(g => [...g, { id: newGroupId(), kind: 'single', qids: [res.qid], active: 0 }]); setSelQid(null) },
+  }), [sid, resumed])
+
   return (
+    <FileActionsContext.Provider value={fileActions}>
     <div className="relative grid h-full min-h-0 xl:grid-cols-[minmax(0,1fr)_auto]">
       <TopActions>
         <Badge tone="warn" icon="lock" className="hidden lg:inline-flex" title="Nothing in the sandbox is saved">Not saved</Badge>
@@ -332,7 +430,9 @@ export default function Sandbox() {
 
       <Playground value={draft} onChange={setDraft} engineOk={engineOk} runs={runs} builtIn={builtIn} open={playgroundOpen} onOpenChange={setPlaygroundOpen} />
       <KeepDialog sandboxId={sid} qids={keepQids} open={keepOpen} onOpenChange={setKeepOpen} />
+      {cost.dialog}
     </div>
+    </FileActionsContext.Provider>
   )
 }
 

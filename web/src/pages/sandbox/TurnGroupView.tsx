@@ -8,6 +8,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils'
 import { DEFAULT_LIMITS } from '../../useEventStream'
 import { COUNT_FROM } from '../../components/chat/ChatOptions'
+import { FailedFiles, RunFiles, filesOfTasks } from '../../components/chat/CreatedFiles'
+import type { Run } from '../../useEventStream'
 
 // One question in the sandbox, with every edited version of it. The active version is shown with its answer and
 // the routing explanation; earlier versions stay available through the switcher, nothing is thrown away.
@@ -102,6 +104,7 @@ export function TurnGroupView({ group, byQid, agents, draftName, selectedQid, bu
       {run ? (
         <div className={cn('min-w-0 transition-opacity', editing && 'opacity-60')}>
           <Turn run={run} fileName={fileName} selected={selectedQid === run.qid} onShowTrace={() => onShowTrace(run.qid)} />
+          <TurnFiles run={run} />
         </div>
       ) : (
         <p className="m-0 flex items-center gap-2 text-[13px] text-muted-foreground" role="status">
@@ -136,3 +139,16 @@ function EditedNote({ original, edited }: { original?: string; edited: boolean }
 }
 
 export default TurnGroupView
+
+/** Files this version made (kept in the sandbox's memory only), and file steps that made none but can be resumed. */
+function TurnFiles({ run }: { run: Run }) {
+  const tasks = run.order.map(t => run.tasks[t]).filter(Boolean)
+  const made = filesOfTasks(tasks)
+  if (!made.length && !run.done) return null
+  return (
+    <div className="mt-3 flex min-w-0 flex-col gap-2 pl-[18px] empty:hidden">
+      {made.length > 0 && <RunFiles files={made} primary={run.merged?.primary_file} />}
+      {run.done && <FailedFiles tasks={tasks} checkpoints={run.checkpoints} />}
+    </div>
+  )
+}

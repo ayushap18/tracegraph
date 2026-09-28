@@ -724,3 +724,136 @@ async def test_excel_from_an_attached_table_keeps_the_data_after_an_analysis_ste
     cells = {str(c.value) for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.value is not None}
     assert {'North', 'West', 'Widget'} <= cells and any('North leads' in c for c in cells)
     assert any(ws._charts for ws in wb.worksheets)
+
+
+# ---------- resume and checkpoints (docs/PLAN-files-robust.md 3.4, 3.5; builder E) ----------
+
+def resume_state(written: int = 1, file_id=None) -> dict:
+    parts = [{'heading': f'Part {i}', 'level': 1, 'words': 45, 'hints': [], 'diagrams': [], 'figures': 0} for i in range(3)]
+    return {'v': 1, 'kind': 'longdoc', 'format': 'pptx', 'request': 'make a 4 slide deck about tea', 'brief': None,
+            'theme': None, 'font': None, 'design': None, 'ctx': 'Tea is a drink.', 'title': 'Tea', 'subtitle': '',
+            'parts': parts,
+            'written': {str(i): {'heading': f'Part {i}', 'level': 1, 'blocks': [{'type': 'paragraph', 'text': 'Tea.'}],
+                                 'notes': ''} for i in range(written)},
+            'failed': [], 'phase': 'sections', 'engine': 'claude-code', 'tokens_in': 500, 'tokens_out': 200, 'calls': 2,
+            'at': 1.0, 'file_id': file_id}
+
+
+def saved_run(store: Store, qid: int, state: dict, status='timeout') -> dict:
+    rec = {'qid': qid, 'text': 'make a 4 slide deck about tea', 'source': 'chat', 'at': 1.0, 'plan': None, 'tasks': [],
+           'merged': None, 'total_ms': 10, 'error': None, 'status': status, 'engine': None, 'session_id': 'sess-resume',
+           'compare_id': None, 'files': [], 'tokens': {'jev_in': 0, 'llm_in': 0, 'llm_out': 0}, 'mode': 'research',
+           'style': 'default', 'agent': 'create', 'group_id': None, 'chosen': True,
+           'checkpoints_state': {f'{qid}.2': state}}
+    store.touch_session('sess-resume', rec['text'])
+    store.save_run(rec)
+    return rec
+
+
+async def test_resume_endpoint(client, monkeypatch):
+    seen = []
+
+    async def make(job, engine, jev, mode='balanced'):
+        seen.append(job)
+        return create_agent.Made('No file was made: keyless test.', False)
+    monkeypatch.setattr(create_agent, 'make', make)
+    store = client.router.store
+    saved_run(store, 41, resume_state())
+    saved_run(store, 42, resume_state(written=3, file_id='0123456789ab'))
+    url = '/api/created/resume'
+    assert (await client.post(url, json={'qid': 41, 'tid': '41.9'})).status == 404
+    assert (await json_of(await client.post(url, json={'qid': 99, 'tid': '99.1'}), 404))['error'] == \
+        'no checkpoint for that file step'
+    assert (await client.post(url, json={'qid': '41', 'tid': '41.2'})).status == 400
+    assert (await client.post(url, json={'qid': 41, 'tid': ''})).status == 400
+    assert (await client.post(url, json={'qid': 41, 'tid': '41.2', 'confirm_cost': 1})).status == 400
+    assert (await json_of(await client.post(url, json={'qid': 42, 'tid': '42.2'}), 409))['error'] == \
+        'That file is already complete.'
+    got = await json_of(await client.post(url, json={'qid': 41, 'tid': '41.2'}), 202)
+    assert got['ok'] and got['qid'] not in (41, 42) and got['session_id'] == 'sess-resume'
+    assert got['estimate']['keyless'] and got['estimate']['calls'] == 0  # this client is keyless
+    await finish(client, got['qid'])
+    # the job gets {qid, tid, state} so the new file's resumed_from names the source run and step
+    assert seen and seen[-1].resume == {'qid': 41, 'tid': '41.2', 'state': resume_state()}
+    new = await json_of(await client.get(f'/api/runs/{got["qid"]}'))
+    assert new['agent'] == 'create' and new['text'] == 'make a 4 slide deck about tea' and new['mode'] == 'balanced'
+    assert new['tasks'][0]['reason'] == 'resume a partial file'
+
+
+async def test_checkpoint_state_never_leaves_the_server(client):
+    store = client.router.store
+    saved_run(store, 51, resume_state())
+    client.router.history.append(store.get_run(51))
+    run = await json_of(await client.get('/api/runs/51'))
+    assert 'checkpoints_state' not in run and run['checkpoints'][0]['tid'] == '51.2'
+    assert run['checkpoints'][0]['missing'] == ['Part 1', 'Part 2'] and run['checkpoints'][0]['resumable']
+    runs = (await json_of(await client.get('/api/runs')))['runs']
+    assert runs and all('checkpoints_state' not in r for r in runs)
+    session = await json_of(await client.get('/api/sessions/sess-resume'))
+    assert all('checkpoints_state' not in r for r in session['runs'])
+    cps = await json_of(await client.get('/api/runs/51/checkpoints'))
+    assert cps == {'checkpoints': run['checkpoints']}
+    assert (await client.get('/api/runs/999/checkpoints')).status == 404
+    hello = client.router.hello()
+    assert all('checkpoints_state' not in r for r in hello['history'])
+    assert store.get_run(51)['checkpoints_state']  # kept on the server for Resume
+
+
+async def test_resume_is_priced_and_guarded(monkeypatch):
+    monkeypatch.setenv('TG_COST_CONFIRM', '1')
+    seen = []
+
+    async def make(job, engine, jev, mode='balanced'):
+        seen.append(job)
+        return create_agent.Made('No file was made: test.', False)
+    monkeypatch.setattr(create_agent, 'make', make)
+    box = {}
+
+    def factory(http):
+        e = SpecEngine(name='agy', label='Antigravity')
+        box['r'] = Router(FakeJev(route_for=route), None, e, store=Store(), registry=registry(), engines={'agy': e})
+        return box['r']
+    async with TestClient(TestServer(appmod.create_app(factory))) as c:
+        store = box['r'].store
+        state = resume_state(written=0)
+        state['parts'] = state['parts'] * 7  # 21 missing slides on Antigravity
+        saved_run(store, 61, state)
+        before = store.max_qid()
+        got = await json_of(await c.post('/api/created/resume', json={'qid': 61, 'tid': '61.2'}), 409)
+        assert got['needs_confirmation'] and got['estimate']['needs_confirmation'] and store.max_qid() == before
+        assert not seen and got['estimate']['summary'].startswith('Resuming this file needs about')
+        got = await json_of(await c.post('/api/created/resume', json={'qid': 61, 'tid': '61.2', 'confirm_cost': True}),
+                            202)
+        task = box['r'].running.get(got['qid'])
+        if task:
+            await asyncio.wait_for(task, 10)
+        assert seen and seen[-1].resume['state']['parts'] == state['parts'] and seen[-1].resume['qid'] == 61
+
+
+async def test_a_design_file_from_an_earlier_turn_is_found_when_the_request_names_one(monkeypatch):
+    """H5: "use the design.md" with nothing attached to this message finds the design attached earlier in the chat."""
+    from pathlib import Path
+    seen = []
+
+    async def make(job, engine, jev, mode='balanced'):
+        seen.append(job)
+        return create_agent.Made('No file was made: test.', False)
+    monkeypatch.setattr(create_agent, 'make', make)
+    store = Store()
+    text = (Path(__file__).resolve().parent.parent / 'evals' / 'fixtures' / 'design_system.md').read_text()
+    design, _ = extract('DESIGN-lovable.md', text.encode())
+    store.add_file(design, text.encode(), text)
+    notes, _ = extract('notes.txt', b'meeting notes: we agreed to ship on Friday')
+    store.add_file(notes, b'meeting notes: we agreed to ship on Friday', 'meeting notes: we agreed to ship on Friday')
+    earlier = {'qid': 5, 'text': 'here are my files', 'source': 'chat', 'at': 1.0, 'plan': None,
+               'tasks': [{'tid': '5.1', 'agent': 'chat', 'ok': True, 'answer': 'Got them.'}], 'merged': {'answer': 'Got them.'},
+               'total_ms': 1, 'error': None, 'status': 'done', 'engine': None, 'session_id': 's-design', 'compare_id': None,
+               'files': [notes['id'], design['id']], 'tokens': {'jev_in': 0, 'llm_in': 0, 'llm_out': 0}}
+    store.touch_session('s-design', earlier['text'])
+    store.save_run(earlier)
+    r = router(store=store)
+    await ask(r, 'make slides about tea using the design.md', session='s-design')
+    assert [m['name'] for m, _ in seen[-1].design_docs] == ['DESIGN-lovable.md']
+    assert 'Color Palette' in seen[-1].design_docs[0][1]
+    await ask(r, 'make slides about tea', session='s-design')  # no design named: nothing is looked up
+    assert seen[-1].design_docs == []

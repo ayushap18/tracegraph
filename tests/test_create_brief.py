@@ -121,3 +121,28 @@ def test_images_or_diagrams_asked_for_as_content_still_count(text):
                                   'a docx comparing popular web fonts', 'make slides explaining how font rendering works'])
 def test_a_request_about_fonts_names_no_font(text):
     assert font_of(text) is None
+
+
+# ---------- docs/PLAN-files-robust.md 4.2: pictures asked for in other words ----------
+
+@pytest.mark.parametrize('text', [
+    'create the ppt on the how mobile phone is being evolved history past present everything a ppt of 12 slides using '
+    'the multiple pictured diagrams and also use the design.md for the design',
+    'an illustrated ppt on bridges',
+    'a pictorial pdf about birds',
+    'slides with visuals on the moon',
+])
+def test_pictures_in_other_words(text):
+    assert parse_brief(text).images
+
+
+@pytest.mark.parametrize('text', ['a report on image processing', 'a pdf about visual design', 'the illustrated history'])
+def test_pictures_named_as_the_topic(text):
+    assert not parse_brief(text).images
+
+
+def test_the_design_name_rides_along_but_is_never_described():
+    b = Brief(format='pptx', slides=(12, 12), design='DESIGN-lovable.md')
+    assert to_dict(b)['design'] == 'DESIGN-lovable.md' and from_dict(to_dict(b)) == b
+    assert not any('design' in line.lower() for line in describe(b, 'pptx'))
+    assert merge(Brief(), Brief(design='d.md')).design == 'd.md'

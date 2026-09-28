@@ -2,6 +2,7 @@ import { Icon } from '../../icons'
 import { money } from '../../lib'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
+import { aboutTokens, estTokens } from '../../components/chat/CostDialog'
 import { engineLabelOf } from './EngineSelect'
 import type { EngineInfo, Prices, Run, UsageMeterProps } from './types'
 
@@ -40,6 +41,10 @@ const price = (v: number) => '$' + v.toLocaleString(undefined, { maximumFraction
 
 export function UsageMeter({ runs, prices, engines }: UsageMeterProps) {
   const u = usageTotals(runs, prices, engines)
+  // The newest run the server priced before it started (docs/PLAN-files-robust.md 6.2): estimated beside used.
+  const latest = [...runs].reverse().find(r => r.cost?.estimate)
+  const est = latest?.cost?.estimate ?? null
+  const used = latest ? (latest.cost?.actual ? latest.cost.actual.tokens_in + latest.cost.actual.tokens_out : (latest.tokens?.llm_in ?? 0) + (latest.tokens?.llm_out ?? 0)) : 0
 
   return (
     <Popover>
@@ -58,6 +63,11 @@ export function UsageMeter({ runs, prices, engines }: UsageMeterProps) {
             <p className="m-0 text-xs tabular-nums text-muted-foreground">
               {u.rows.length} {u.rows.length === 1 ? 'run' : 'runs'}{u.running > 0 ? `, ${u.running} running` : ''}, estimated {money(u.cost)}
             </p>
+            {latest && est && (
+              <p className="m-0 text-xs tabular-nums text-muted-foreground" title="The estimate is made before the run without calling a model.">
+                Run #{latest.qid}: estimated {aboutTokens(estTokens(est))} LLM tokens, {latest.done ? `used ${used.toLocaleString()}` : 'still running'}
+              </p>
+            )}
           </div>
           {u.rows.length === 0 ? (
             <p className="m-0 px-4 py-6 text-center text-[13px] text-muted-foreground">No runs yet. Token counts appear when a run finishes.</p>

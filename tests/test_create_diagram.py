@@ -133,10 +133,40 @@ def test_normalize_repairs_trees():
     assert len(d['nodes']) == 4 and 'trees cut to 4 levels' in {r.id: r.note for r in res}['L2']
 
 
-def test_a_diagram_with_too_little_is_left_out():
+def test_a_diagram_with_too_little_is_shown_as_a_list():
     out, res = normalize(spec({'type': 'timeline', 'title': 'x', 'events': [{'date': '1', 'label': 'only'}]}), 'md')
-    assert [b['type'] for b in out['sections'][0]['blocks']] == ['paragraph']
-    assert 'fewer than 2 events' in {r.id: r.note for r in res}['S6']
+    assert out['sections'][0]['blocks'][1] == {'type': 'bullets', 'items': ['x', '1: only'], 'ordered': False}
+    assert 'fewer than 2 events was shown as a list' in {r.id: r.note for r in res}['S6']
+    out, _ = normalize(spec({'type': 'tree', 'title': '', 'nodes': []}), 'md')
+    assert [b['type'] for b in out['sections'][0]['blocks']] == ['paragraph']  # nothing to show: left out
+
+
+def test_string_events_and_nodes_and_flows_without_arrows():
+    events = ['1973: first handheld call', '1983 - DynaTAC goes on sale', '2007 iPhone', 'no date here']
+    out, res = normalize(spec({'type': 'timeline', 'title': 'Phones', 'events': events},
+                              {'type': 'tree', 'title': 'Kinds', 'nodes': ['Phones', {'id': 'm', 'parent': 'Phones',
+                                                                                      'label': 'Mobile'}]},
+                              {'type': 'flow', 'title': 'Steps', 'nodes': ['Dial', 'Ring', 'Talk']},
+                              {'type': 'flow', 'title': 'Edges', 'edges': ['a -> b', 'b \u2192 c', {'c': 'd'}]}), 'pdf')
+    t, tree, chain, edges = out['sections'][0]['blocks'][1:]
+    assert [(e['date'], e['label']) for e in t['events']] == [
+        ('1973', 'first handheld call'), ('1983', 'DynaTAC goes on sale'), ('2007', 'iPhone'), ('', 'no date here')]
+    assert [n['label'] for n in tree['nodes']] == ['Phones', 'Mobile']
+    assert [(e['from'], e['to']) for e in chain['edges']] == [('dial', 'ring'), ('ring', 'talk')]
+    assert 'drawn in the order' in {r.id: r.note for r in res}['S6']
+    assert [n['label'] for n in edges['nodes']] == ['a', 'b', 'c', 'd'] and len(edges['edges']) == 3
+
+
+def test_radius_from_the_theme():
+    from jevrouter.create import themes
+    block = normalize(spec(FLOW), 'pdf')[0]['sections'][0]['blocks'][1]
+    box = {'w': 100, 'h': 20}
+    assert diagram.corner({}, box) == 3 and diagram.corner({'radius': 0}, box) == 0
+    assert diagram.corner({'radius': 40}, box) == 10  # never more than half the box
+    for r in (0, 12):
+        t = {**themes.get('clean'), 'radius': r}
+        assert diagram.png(block, t, 400)[:4] == b'\x89PNG'
+        assert diagram.pdf_drawing(block, t, 400) is not None
 
 
 def test_v9_counts_diagrams_against_the_brief():

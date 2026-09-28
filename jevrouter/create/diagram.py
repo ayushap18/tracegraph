@@ -37,14 +37,54 @@ def _short(s: str, n: int) -> str:
     return s if len(s) <= n else s[:n - 3].rstrip() + '...'
 
 
+_EVENT = [re.compile(r'^\s*(?P<date>[^:]{1,40}?)\s*:\s+(?P<label>\S.*)$', re.S),
+          re.compile(r'^\s*(?P<date>.{1,40}?)\s+[-\u2013\u2014]\s+(?P<label>\S.*)$', re.S),
+          re.compile(r'^\s*(?P<date>(?:c\.\s*)?\d{2,4}s?(?:[-/.]\d{1,2}){0,2}(?:\s*(?:BC|BCE|AD|CE))?)\s+(?P<label>\S.*)$',
+                     re.S | re.I)]
+
+
+def parse_event(s: str) -> dict:
+    """A timeline event written as text: "1973: first call", "1973 - first call" or "1973 first call"."""
+    s = str(s).strip()
+    for rx in _EVENT:
+        m = rx.match(s)
+        if m:
+            return {'date': m.group('date').strip(), 'label': m.group('label').strip()}
+    return {'date': '', 'label': s}
+
+
+def _node(n) -> dict | None:
+    """A node as a dict; a node written as text is its own id and label."""
+    if isinstance(n, dict):
+        return n
+    if isinstance(n, str) and n.strip():
+        return {'id': n.strip()[:40], 'label': n.strip()}
+    return None
+
+
+def raw_labels(b: dict) -> list[str]:
+    """The words of a diagram block before cleaning (its title first), for one with too little to draw."""
+    out = [str(b.get('title') or '')]
+    if b.get('type') == 'timeline':
+        for e in b.get('events') or []:
+            e = parse_event(e) if isinstance(e, str) else e if isinstance(e, dict) else {}
+            date, label = str(e.get('date') or '').strip(), str(e.get('label') or '').strip()
+            out.append(f'{date}: {label}' if date and label else date or label)
+    else:
+        out += [str(n.get('label') or n.get('id') or '') for n in map(_node, b.get('nodes') or []) if n]
+    return [x for x in out if x.strip()]
+
+
 def clean_block(b: dict, clean, note) -> dict | None:
     """One diagram block fixed for rendering, or None when too little is left. `clean(text) -> str` makes text plain;
-    `note(rule, text)` records a fix."""
+    `note(rule, text)` records a fix. Events and nodes may be written as text."""
     kind = b['type']
     title = _short(clean(b.get('title') or ''), 120)
     if kind == 'timeline':
         events = []
         for e in b.get('events') or []:
+            if isinstance(e, str):
+                e = parse_event(e)
             if not isinstance(e, dict):
                 continue
             date, label = _short(clean(e.get('date') or ''), DATE_LABEL), clean(e.get('label') or '')
@@ -57,10 +97,10 @@ def clean_block(b: dict, clean, note) -> dict | None:
             note('L2', f'timelines cut to {MAX_EVENTS} events')
             events = events[:MAX_EVENTS]
         if len(events) < 2:
-            note('S6', 'a timeline with fewer than 2 events was left out')
+            note('S6', 'a timeline with fewer than 2 events was shown as a list')
             return None
         return {'type': kind, 'title': title or 'Timeline', 'events': events}
-    raw = [n for n in b.get('nodes') or [] if isinstance(n, dict)]
+    raw = [n for n in map(_node, b.get('nodes') or []) if n is not None]
     nodes, seen = [], set()
     for n in raw:
         nid = clean(n.get('id') if n.get('id') is not None else '')[:40] or clean(n.get('label') or '')[:40]
@@ -114,7 +154,7 @@ def _clean_tree(title: str, nodes: list[dict], note) -> dict | None:
     order = {n['id']: i for i, n in enumerate(nodes)}
     kept.sort(key=lambda n: order[n['id']])
     if len(kept) < 2:
-        note('S6', 'a tree with fewer than 2 nodes was left out')
+        note('S6', 'a tree with fewer than 2 nodes was shown as a list')
         return None
     return {'type': 'tree', 'title': title or 'Structure',
             'nodes': [{'id': n['id'], 'parent': n['parent'], 'label': n['label']} for n in kept]}
@@ -158,7 +198,7 @@ def _clean_flow(title: str, nodes: list[dict], edges: list, clean, note) -> dict
         note('S6', 'a flow with a cycle had its back edges removed')
         out = [e for e in out if id(e) not in back]
     if len(nodes) < 2:
-        note('S6', 'a flow with fewer than 2 steps was left out')
+        note('S6', 'a flow with fewer than 2 steps was shown as a list')
         return None
     return {'type': 'flow', 'title': title or 'Process', 'nodes': [{'id': n['id'], 'label': n['label']} for n in nodes],
             'edges': out}
@@ -456,6 +496,16 @@ def overlaps(lay: Layout) -> list[tuple[int, int]]:
 # ---------- backends ----------
 
 
+def corner(theme: dict, box: dict) -> float:
+    """The corner radius of a diagram box in layout points: the theme's (a design file's) radius, 3 by default, 0 for
+    square corners, never more than half the box."""
+    try:
+        r = float(theme.get('radius', 3) if theme.get('radius') is not None else 3)
+    except (TypeError, ValueError):
+        r = 3.0
+    return max(0.0, min(r, box['h'] / 2, box['w'] / 2)) if r == r else 3.0
+
+
 def pdf_drawing(block: dict, theme: dict, width: float, *, max_height: float | None = None, fit=None,
                 font: str = FONT, bold: str = BOLD):
     """A reportlab Drawing of the diagram, `width` points wide (scaled down to max_height when taller). `fit(text) ->
@@ -480,7 +530,8 @@ def pdf_drawing(block: dict, theme: dict, width: float, *, max_height: float | N
             pts = arrow_head(ln['x1'], H - ln['y1'], ln['x2'], H - ln['y2'])
             g.add(Polygon([v for p in pts for v in p], fillColor=text_c, strokeColor=text_c, strokeWidth=0.5))
     for b in lay.boxes:
-        g.add(Rect(b['x'], H - b['y'] - b['h'], b['w'], b['h'], rx=3, ry=3, fillColor=fill_c, strokeColor=text_c,
+        r = corner(theme, b)
+        g.add(Rect(b['x'], H - b['y'] - b['h'], b['w'], b['h'], rx=r, ry=r, fillColor=fill_c, strokeColor=text_c,
                    strokeWidth=0.8))
         for i, line in enumerate(b['lines']):
             t, f = face(line, b['bold'])
@@ -534,8 +585,12 @@ def png(block: dict, theme: dict, width_px: int) -> bytes:
         if ln['arrow']:
             d.polygon([(x * s, y * s) for x, y in arrow_head(ln['x1'], ln['y1'], ln['x2'], ln['y2'])], fill=text_c)
     for b in lay.boxes:
-        d.rounded_rectangle([b['x'] * s, b['y'] * s, (b['x'] + b['w']) * s, (b['y'] + b['h']) * s], radius=3 * s,
-                            fill=fill_c, outline=text_c, width=max(1, round(0.8 * s)))
+        rect = [b['x'] * s, b['y'] * s, (b['x'] + b['w']) * s, (b['y'] + b['h']) * s]
+        r = corner(theme, b)
+        if r > 0:
+            d.rounded_rectangle(rect, radius=r * s, fill=fill_c, outline=text_c, width=max(1, round(0.8 * s)))
+        else:
+            d.rectangle(rect, fill=fill_c, outline=text_c, width=max(1, round(0.8 * s)))
         f = fonts[b['bold']]
         for i, line in enumerate(b['lines']):
             cx, base = (b['x'] + b['w'] / 2) * s, (b['y'] + PAD + SIZE + i * LEAD - 1) * s
@@ -608,8 +663,11 @@ def pptx_draw(slide, block: dict, theme: dict, box, *, font: str | None = None) 
             tail.set('type', 'triangle')
     size = max(8.0, SIZE * s)
     for b in lay.boxes:
-        shp = group.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, emu(ox + b['x'] * s), emu(oy + b['y'] * s),
-                                     emu(b['w'] * s), emu(b['h'] * s))
+        r = corner(theme, b)
+        shp = group.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE if r > 0 else MSO_SHAPE.RECTANGLE,
+                                     emu(ox + b['x'] * s), emu(oy + b['y'] * s), emu(b['w'] * s), emu(b['h'] * s))
+        if r > 0:  # the adjustment is the radius as a share of the shorter side
+            shp.adjustments[0] = min(0.5, r / max(min(b['w'], b['h']), 1))
         shp.fill.solid()
         shp.fill.fore_color.rgb = fill_c
         shp.line.color.rgb, shp.line.width = text_c, Pt(1)

@@ -115,19 +115,52 @@ def matches(requested: str, family: str) -> bool:
     return bool(a) and (a == b or b.startswith(a) or a.startswith(b) and len(b) >= 4)
 
 
-def builtin(fmt: str, theme: str | None = None) -> str | None:
+# Fonts every copy of Office has: a Word, PowerPoint or Excel file names one of these (or the env font), never a brand
+# font a reader is unlikely to have (docs/PLAN-files-robust.md 4.5).
+OFFICE = ('Calibri', 'Arial', 'Segoe UI', 'Georgia', 'Cambria', 'Times New Roman', 'Consolas', 'Courier New')
+CATEGORY_OFFICE = {'sans': 'Calibri', 'serif': 'Georgia', 'mono': 'Consolas'}
+CATEGORY_PDF = {'sans': 'Helvetica', 'serif': 'Times-Roman', 'mono': 'Courier'}
+GENERIC = {'serif', 'sans-serif', 'sans', 'monospace', 'mono', 'ui-sans-serif', 'ui-serif', 'ui-monospace', 'system-ui',
+           'ui-rounded', 'cursive', 'fantasy', '-apple-system', 'blinkmacsystemfont', 'emoji', 'math'}
+
+
+def office_name(stack, category: str | None = None) -> str | None:
+    """The first family of a font stack that Office ships with (or the env font), else the category's default."""
+    env = env_family()
+    for name in stack or []:
+        if not name:
+            continue
+        if env and matches(str(name), env):
+            return env
+        hit = next((o for o in OFFICE if key(o) == key(str(name))), None)
+        if hit:
+            return hit
+    return CATEGORY_OFFICE.get(category or '', None) if category else None
+
+
+def builtin(fmt: str, theme=None, category: str | None = None) -> str | None:
+    if isinstance(theme, dict):
+        category = category or theme.get('font_category') or ('serif' if theme.get('font') == 'Georgia' else None)
+        theme = None
     if fmt == 'pdf':
-        return 'Times-Roman' if theme == 'warm' else 'Helvetica'
+        return CATEGORY_PDF.get(category or '', 'Times-Roman' if theme == 'warm' else 'Helvetica')
     if fmt == 'md':
         return None
-    return 'Georgia' if theme == 'warm' else 'Calibri'
+    return CATEGORY_OFFICE.get(category or '', 'Georgia' if theme == 'warm' else 'Calibri')
 
 
-def resolve(requested: str | None, fmt: str, theme: str | None = None) -> FontChoice:
-    """The font a file in `fmt` uses for body text, and a plain note when it is not the one requested."""
+def resolve(requested: str | None, fmt: str, theme=None, stack=None, category: str | None = None) -> FontChoice:
+    """The font a file in `fmt` uses for body text, and a plain note when it is not the one requested. Precedence:
+    the font the request names, then the design's stack (`stack`, or the theme dict's `font_stack`), then
+    TRACEGRAPH_BODY_FONT, then the built-in. `theme` is a theme name or a theme dict."""
+    if isinstance(theme, dict):
+        stack = stack if stack is not None else theme.get('font_stack')
+        category = category or theme.get('font_category')
     req = ' '.join(str(requested or '').lower().split()) or None
+    if req is None and stack:
+        return _from_stack([str(x) for x in stack if x], fmt, theme, category)
     shown = display(req) if req else None
-    fallback = builtin(fmt, theme)
+    fallback = builtin(fmt, theme, category)
     if fmt == 'md':
         note = (f'You asked for {shown}; a Markdown file carries no font, so it shows in the reader\'s font.'
                 if req else None)
@@ -160,3 +193,40 @@ def resolve(requested: str | None, fmt: str, theme: str | None = None) -> FontCh
     if env:
         return FontChoice(None, env[3], None, None, None, False, None)
     return FontChoice(None, fallback, None, None, None, False, None)
+
+
+def _from_stack(stack: list[str], fmt: str, theme, category: str | None) -> FontChoice:
+    """A design's font stack: PDF embeds the first installed static TrueType font, else the category's built-in;
+    Word, PowerPoint and Excel name the first family Office ships with, else the category's default."""
+    family = stack[0] if stack else ''
+    category = category or 'sans'
+    if fmt == 'md':
+        return FontChoice(None, '', None, None, None, False,
+                          'A Markdown file carries no colours or fonts; convert it to PDF, Word or PowerPoint to see '
+                          'the design (0 tokens).')
+    env = _env_font()
+    if fmt == 'pdf':
+        used = None
+        for name in stack:
+            if key(name) in {key(g) for g in GENERIC}:
+                continue
+            if env and matches(name, env[3]):
+                used = FontChoice(None, env[3], env[0], env[1], env[2], True, None)
+                break
+            found = system_index().get(key(name))
+            if found and found.get('regular'):
+                used = FontChoice(None, display(name) if name.islower() else name, found['regular'],
+                                  found.get('bold'), found.get('italic'), True, None)
+                break
+        if used is None and env:
+            used = FontChoice(None, env[3], env[0], env[1], env[2], True, None)
+        if used is None:
+            used = FontChoice(None, builtin('pdf', None, category), None, None, None, False, None)
+    else:
+        name = office_name(stack, None)
+        if name is None and env:
+            name = env[3]
+        used = FontChoice(None, name or builtin(fmt, None, category), None, None, None, False, None)
+    if family and key(used.used) != key(family):
+        used.note = f"The design's font {family} isn't available here, so the file uses {used.used}."
+    return used

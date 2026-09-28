@@ -56,25 +56,58 @@ def test_schema_is_strict_small_and_ref_free():
 # ---------- block rules ----------
 
 @pytest.mark.parametrize('spec,rid', [
-    ('not a spec', 'S1'),
-    ({'title': 'x'}, 'S1'),
-    ({'title': 'x', 'sections': 'nope'}, 'S1'),
-    ({'title': 'x', 'sections': ['nope']}, 'S1'),
-    (spec_with({'type': 'image', 'text': 'x'}), 'S1'),
-    (spec_with({'type': 'table', 'columns': ['a']}), 'S1'),
-    (spec_with({'type': 'chart', 'kind': 'radar', 'labels': ['a'], 'series': [{'name': 'n', 'values': [1]}]}), 'S1'),
-    (spec_with({'type': 'bullets', 'items': 'one'}), 'S1'),
+    ({'title': 'x'}, 'S2'),
     ({'title': 'x', 'sections': []}, 'S2'),
-    (spec_with(para(''), {'type': 'bullets', 'items': ['', ' ']}), 'S2'),
-    ({'title': 'x', 'sections': [{'heading': 'Only a heading', 'blocks': []}]}, 'S2'),
-    (spec_with({'type': 'paragraph', 'text': 'x', 'url': 'https://evil.example/a.png'}), 'S7'),
-    ({'title': 'x', 'sections': [{'heading': 'h', 'blocks': [para('x')], 'include': '/etc/passwd'}]}, 'S7'),
-    ({'title': 'x', 'sections': [{'heading': f'h{i}', 'blocks': [para('x')]} for i in range(41)]}, 'L1'),
-    (spec_with(*[para('x')] * 31), 'L1'),
-    (spec_with(para('word ' * 41000)), 'L1'),
+    (None, 'S2'),
+    (42, 'S2'),
+    ({'title': 'x', 'sections': [{'heading': '', 'blocks': [{'type': 'page_break'}]}]}, 'S2'),
+    ({'title': 'x', 'sections': [{'heading': '', 'blocks': [{'type': 'figure', 'query': 'q', 'caption': 'c'}]}]}, 'S2'),
+    ({'title': 'x', 'sections': [{'blocks': [{'type': 'bullets', 'items': None}]}]}, 'S2'),
 ])
-def test_block_rules_raise_with_their_id(spec, rid):
+def test_only_a_spec_with_nothing_to_show_is_refused(spec, rid):
     assert blocked(spec) == rid
+
+
+# S1, S7 and L1 are fixes now (docs/PLAN-files-robust.md 2.1): each shape comes back as a file with a fix note
+@pytest.mark.parametrize('spec,rid,fragment', [
+    ('not a spec', None, None),
+    ({'title': 'x', 'sections': 'nope'}, 'S8', 'became a heading'),
+    ({'title': 'x', 'sections': ['nope']}, 'S8', 'became a heading'),
+    (spec_with({'type': 'image', 'text': 'x'}), 'S1', 'written another way'),
+    (spec_with({'type': 'table', 'columns': ['a']}), None, None),
+    (spec_with({'type': 'chart', 'kind': 'radar', 'labels': ['a'], 'series': [{'name': 'n', 'values': [1]}]}), 'S1',
+     'drawn as a bar chart'),
+    (spec_with({'type': 'bullets', 'items': 'one'}), None, None),
+    (spec_with({'type': 'bullets', 'items': 'one\ntwo'}), 'S1', 'split into items in section 1'),
+    (spec_with({'type': 'bullets', 'items': None}, para('kept')), 'S1', 'an empty block in section 1 was left out'),
+    (spec_with({'type': 'paragraph', 'text': 'x', 'url': 'https://evil.example/a.png'}), 'S7',
+     'link or image addresses in section 1 were removed; nothing is fetched'),
+    ({'title': 'x', 'sections': [{'heading': 'h', 'blocks': [para('x')], 'include': '/etc/passwd'}]}, 'S7',
+     'section 1'),
+    ({'title': 'x', 'sections': [{'heading': f'h{i}', 'blocks': [para('x')]} for i in range(41)]}, 'L1',
+     'folded into the last one'),
+    (spec_with(*[para('x')] * 31), 'L1', '(cont.)'),
+    (spec_with(para('word ' * 41000)), 'L1', 'shortened'),
+])
+def test_repairs_make_a_file_with_a_note(spec, rid, fragment):
+    out, res = normalize(spec, 'pdf')
+    assert out['sections']
+    if rid:
+        r = result(res, rid)
+        assert not r.ok and r.severity == 'fix' and (fragment is None or fragment in r.note), r.note
+    for fmt in FORMATS:
+        normalize(spec, fmt)
+
+
+def test_l1_folds_and_continues_sections():
+    spec = {'title': 'x', 'sections': [{'heading': f'h{i}', 'blocks': [para(f'x{i}')]} for i in range(45)]}
+    out, _ = normalize(spec, 'md')
+    assert len(out['sections']) == 40
+    assert [b['text'] for b in out['sections'][-1]['blocks']][:3] == ['x39', '**h40**', 'x40']
+    long = spec_with(*[para(f'p{i}') for i in range(65)], heading='Long')
+    out, _ = normalize(long, 'md')
+    assert [s['heading'] for s in out['sections']] == ['Long', 'Long (cont.)', 'Long (cont.)']
+    assert [len(s['blocks']) for s in out['sections']] == [30, 30, 5]
 
 
 def test_unknown_format_is_x1():
@@ -154,14 +187,18 @@ def test_s5_numbers():
     assert chart['series'][0]['values'] == [5, None, 7] and not result(res, 'S5').ok
 
 
-def test_s5_pie_drops_non_positive_slices_and_chart_without_numbers_goes():
+def test_s5_pie_drops_non_positive_slices_and_chart_without_numbers_becomes_a_list():
     spec = spec_with({'type': 'chart', 'kind': 'donut', 'title': 'p', 'labels': ['a', 'b', 'c'],
                       'series': [{'name': 's', 'values': [3, 0, -1]}]},
                      {'type': 'chart', 'kind': 'bar', 'title': 'none', 'labels': ['a'],
                       'series': [{'name': 's', 'values': ['x']}]}, para('keep'))
-    out, _ = normalize(spec, 'pdf')
+    out, res = normalize(spec, 'pdf')
     blocks = out['sections'][0]['blocks']
-    assert blocks[0]['kind'] == 'pie' and blocks[0]['labels'] == ['a'] and len(blocks) == 2
+    assert blocks[0]['kind'] == 'pie' and blocks[0]['labels'] == ['a'] and len(blocks) == 3
+    # a chart with no number keeps its words as a list, title first (docs/PLAN-files-robust.md 2.3)
+    # its values stay too, as they were written ("a: x"), so no number or word is lost
+    assert blocks[1] == {'type': 'bullets', 'items': ['none', 'a: x'], 'ordered': False}
+    assert 'kept as a list of its labels' in result(res, 'S5').note
 
 
 def test_s6_rows_padded_and_trimmed_and_missing_columns_named():
@@ -499,3 +536,201 @@ def test_schema_is_portable_across_engines():
                 yield from enums(v)
     found = list(enums(DOCSPEC_SCHEMA))
     assert found and all(e.get('type') == 'string' and all(isinstance(x, str) and x for x in e['enum']) for e in found)
+
+
+# ---------- repair, not block (docs/PLAN-files-robust.md 2) ----------
+
+from jevrouter.create import has_text, parse_spec, repair  # noqa: E402
+
+
+def deck(bad=None, at: int = 6) -> dict:
+    """A valid 11-section deck; `bad` replaces the first block of section `at` (0-based)."""
+    secs = [{'heading': f'Part {i + 1}', 'level': 1, 'blocks': [{'type': 'bullets', 'items': [f'point {i}a', f'point {i}b']},
+                                                               para(f'Text {i}.')], 'notes': ''} for i in range(11)]
+    if bad is not None:
+        secs[at]['blocks'][0] = bad
+    return {'title': 'The Evolution of Mobile Phones', 'subtitle': '', 'sections': secs}
+
+
+# the 24 probe shapes of the run 2750 forensics and the string series: (block, rule that notes it or None)
+PROBES = [
+    ({'type': 'bullets'}, 'S1'),
+    ({'type': 'bullets', 'items': None}, 'S1'),
+    ({'type': 'bullets', 'text': 'one\ntwo'}, 'S1'),
+    ({'type': 'bullets', 'points': ['one', 'two']}, 'S1'),
+    ({'type': 'bullets', 'items': 'one, two'}, None),
+    ({'type': 'bullets', 'items': []}, 'S1'),
+    ({'type': 'paragraph', 'content': 'words'}, 'S1'),
+    ({'type': 'table', 'columns': ['a', 'b']}, None),
+    ({'type': 'chart', 'kind': 'radar', 'title': 't', 'labels': ['a', 'b'], 'series': [{'name': 's', 'values': [3, 4]}]},
+     'S1'),
+    ({'type': 'chart', 'kind': 'bar', 'title': 't', 'labels': ['a', 'b'], 'series': [{'values': [1, 2]}]}, None),
+    ({'type': 'chart', 'kind': 'bar', 'title': 't', 'labels': ['a', 'b'], 'series': [{'name': 's', 'values': ['1', '2']}]},
+     'S5'),
+    ({'type': 'timeline', 'title': 'Only a title'}, 'S6'),
+    ({'type': 'timeline', 'title': 't', 'items': [{'date': '1973', 'label': 'a'}, {'date': '1983', 'label': 'b'}]}, None),
+    ({'type': 'tree', 'title': 't', 'nodes': {'a': 'A'}}, None),
+    ({'type': 'flow', 'title': 't', 'nodes': [{'id': 'a', 'label': 'A'}], 'edges': {'a': 'b'}}, None),
+    ({'type': 'heading', 'text': 'A new part'}, 'S8'),
+    ({'type': 'diagram', 'nodes': []}, 'S1'),
+    ({'type': 'picture', 'query': 'Nokia 3310'}, 'S1'),
+    ('a block written as a string', None),
+    ({'type': 'figure', 'query': 'phone', 'caption': 'c', 'url': 'https://example.com/x.png'}, 'S7'),
+    ({'type': 'figure', 'query': 'phone', 'caption': 'c', 'image': 'dynatac'}, 'S7'),
+    ({'type': 'bullets', 'items': ['x'], 'link': 'https://example.com'}, 'S7'),
+    ({'type': 'list', 'items': ['x', 'y']}, 'S1'),
+    ({'items': ['no type']}, 'S1'),
+    ({'type': 'chart', 'title': 't', 'labels': ['a', 'b'], 'series': ['12', 'not a series']}, 'S5'),  # string series
+]
+
+
+@pytest.mark.parametrize('fmt', FORMATS)
+@pytest.mark.parametrize('bad,rid', PROBES, ids=[str(i) for i in range(len(PROBES))])
+def test_one_bad_block_never_costs_the_deck(bad, rid, fmt):
+    out, res = normalize(deck(bad), fmt)
+    heads = {s['heading'].removesuffix(' (cont.)') for s in out['sections']}
+    assert len(out['sections']) >= 11 and {f'Part {i + 1}' for i in range(11)} <= heads
+    if rid:
+        assert not result(res, rid).ok and result(res, rid).severity == 'fix', rid
+
+
+def test_the_2750_shape_keeps_section_7_with_a_note():
+    out, res = normalize(deck({'type': 'bullets', 'items': None}), 'pptx')
+    assert len(out['sections']) == 11 and out['sections'][6]['heading'] == 'Part 7'
+    assert result(res, 'S1').note == 'an empty block in section 7 was left out'
+    two = deck({'type': 'bullets', 'items': None})
+    two['sections'][8]['blocks'][0] = {'type': 'bullets', 'items': None}
+    assert 'empty blocks in sections 7 and 9 were left out' in result(normalize(two, 'md')[1], 'S1').note
+
+
+def test_a_section_written_as_a_block_or_with_other_keys():
+    spec = {'slides': [{'title': 'One', 'content': ['a', 'b']}, {'type': 'paragraph', 'text': 'Loose text.'},
+                       {'name': 'Three', 'bullets': 'x; y; z', 'speaker_notes': 'say it'}]}
+    out, res = normalize(spec, 'pptx')
+    assert [s['heading'] for s in out['sections']] == ['One', 'One (cont.)', 'Three']
+    assert out['sections'][0]['blocks'] == [{'type': 'bullets', 'items': ['a', 'b'], 'ordered': False}]
+    assert out['sections'][2]['blocks'][0]['items'] == ['x', 'y', 'z'] and out['sections'][2]['notes'] == 'say it'
+    assert not result(res, 'S1').ok and not result(res, 'S8').ok
+
+
+def test_tables_and_charts_written_other_ways():
+    spec = spec_with({'type': 'grid', 'headers': 'Name | Year', 'data': 'DynaTAC | 1983\niPhone | 2007'},
+                     {'type': 'table', 'rows': [{'name': 'a', 'year': 1973}, {'name': 'b', 'year': 2007}]},
+                     {'type': 'pie', 'title': 'Share', 'data': [{'label': 'x', 'value': 3}, {'label': 'y', 'value': 1}]},
+                     {'type': 'chart', 'labels': ['a', 'b'], 'series': {'Sales': [1, 2], 'Cost': [3, 4]}},
+                     {'type': 'graph', 'title': 'Bare', 'labels': ['a', 'b'], 'values': [5, 6]})
+    blocks = normalize(spec, 'xlsx')[0]['sections'][0]['blocks']
+    assert blocks[0]['columns'] == ['Name', 'Year'] and blocks[0]['rows'] == [['DynaTAC', 1983], ['iPhone', 2007]]
+    assert blocks[1]['columns'] == ['name', 'year'] and blocks[1]['rows'][1] == ['b', 2007]
+    assert blocks[2]['kind'] == 'pie' and blocks[2]['labels'] == ['x', 'y'] and blocks[2]['series'][0]['values'] == [3, 1]
+    assert [s['name'] for s in blocks[3]['series']] == ['Sales', 'Cost']
+    assert blocks[4]['series'][0]['values'] == [5, 6]
+
+
+def test_salvage_keeps_text_and_never_a_figure_query():
+    spec = spec_with({'type': 'callout', 'heading_text': 'Keep me', 'body_text': 'and me', 'lang': 'en'},
+                     {'type': 'widget'}, {'type': 'picture', 'url': 'https://x.example/p.png'})
+    out, res = normalize(spec, 'md')
+    assert out['sections'][0]['blocks'] == [para('Keep me and me')]
+    note = result(res, 'S1').note
+    assert 'a block in section 1 could not be read and was kept as text' in note and 'empty block' in note
+
+
+def test_number_edge_cases():
+    assert [number(x, loose=True) for x in ('', ' ', '%', '()', '(%)', '$', '+', '-')] == [None] * 8
+    spec = spec_with({'type': 'chart', 'kind': 'bar', 'title': 't', 'labels': ['a', 'b', 'c'],
+                      'series': [{'name': 's', 'values': ['', '(%)', 4]}]})
+    assert normalize(spec, 'pdf')[0]['sections'][0]['blocks'][0]['series'][0]['values'] == [None, None, 4]
+
+
+def test_lone_surrogates_and_control_characters_are_dropped_not_refused():
+    spec = spec_with(para('bad \ud800 surrogate'), heading='Head \udfff ing')
+    out, _ = normalize(spec, 'docx')
+    assert out['sections'][0] == {'heading': 'Head ing', 'level': 1, 'blocks': [para('bad surrogate')], 'notes': ''}
+    got = parse_spec('{"title": "T", "sections": [{"heading": "H\\ud800", "blocks": ["x"]}]}')
+    assert normalize(got, 'pdf')[0]['sections'][0]['heading'] == 'H'
+
+
+def test_odd_values_do_not_crash():
+    spec = spec_with({'type': 'table', 'columns': ['a'], 'rows': [[1]], 'formats': [['0%']]},
+                     {'type': 'paragraph', 'text': float('nan')}, para('ok'))
+    spec['sections'][0]['level'] = float('inf')
+    for fmt in FORMATS:
+        out, _ = normalize(spec, fmt)
+        assert out['sections'][0]['level'] == 1
+
+
+def test_parse_spec_reads_what_models_write():
+    assert parse_spec('```json\n{"title": "A", "sections": []}\n```') == {'title': 'A', 'sections': []}
+    assert parse_spec('Here it is: {"title": "A",} thanks') == {'title': 'A'}
+    assert parse_spec('Sure {here}: {"title": "A"} ok') == {'title': 'A'}
+    assert parse_spec('[{"heading": "H"}]') == {'sections': [{'heading': 'H'}]}
+    cut = '{"title": "A", "sections": [{"heading": "H", "blocks": [{"type": "paragraph", "text": "cut off her'
+    got = parse_spec(cut)
+    assert got['sections'][0]['blocks'][0]['text'] == 'cut off her'
+    assert parse_spec('{"title": "A", "sections": [{"heading": "H", "le') == {'title': 'A', 'sections': [{'heading': 'H',
+                                                                                                        'le': None}]}
+    assert parse_spec('{"a": tru') == {'a': None} and parse_spec('{"a": [1, 2,') == {'a': [1, 2]}
+    assert parse_spec('no json here') is None and parse_spec('') is None and parse_spec('"just a string"') is None
+    with pytest.raises(SpecError) as e:
+        parse_spec('{"t": "' + 'x' * 2_000_001 + '"}')
+    assert e.value.rule_id == 'L6'
+
+
+GARBAGE = [None, 0, 1.5, True, '', 'text', [], [None], [[[]]], {}, {1: 2}, {'sections': None}, {'sections': 5},
+           {'sections': {'a': 1}}, {'sections': [5, None, True, [1, 2]]}, {'title': ['a', {'b': 'c'}]},
+           {'sections': [{'blocks': [{'type': None}, {'type': 5}, {'type': []}, {'type': {}}]}]},
+           {'sections': [{'heading': {'x': 'y'}, 'level': 'high', 'blocks': 'text'}]},
+           {'sections': [{'blocks': [{'type': 'table', 'rows': 'a,b\nc'}, {'type': 'chart', 'series': {'x': 'y'}}]}]}]
+
+
+@pytest.mark.parametrize('bad', GARBAGE, ids=[str(i) for i in range(len(GARBAGE))])
+def test_repair_never_raises(bad):
+    doc, res = repair(bad)
+    assert set(doc) >= {'title', 'subtitle', 'sections'} and [r.id for r in res][:4] == ['S1', 'S7', 'S8', 'L1']
+    assert has_text(bad) == bool(doc['sections'])
+
+
+def test_repair_survives_deep_and_self_referencing_values():
+    deep = x = {}
+    for _ in range(60):
+        x['blocks'] = [{'type': 'paragraph', 'text': 'deep'}]
+        x['child'] = {}
+        x = x['child']
+    loop = {'title': 'L', 'sections': []}
+    loop['sections'].append({'heading': 'H', 'blocks': [loop]})
+    for bad in ({'sections': [deep]}, loop):
+        doc, _ = repair(bad)
+        assert isinstance(doc['sections'], list)
+
+
+def test_has_text():
+    assert has_text({'sections': [{'heading': 'Only a heading'}]})
+    assert has_text('plain words')
+    assert not has_text({'title': 'Title only', 'sections': [{'blocks': [{'type': 'page_break'}]}]})
+    assert not has_text({'sections': [{'blocks': [{'type': 'figure', 'query': 'q'}]}]})
+
+
+@pytest.mark.parametrize('fmt', FORMATS)
+def test_normalize_is_idempotent_on_its_own_output(fmt):
+    secs = [{'heading': f'H{i}', 'notes': 'n', 'blocks': [{'type': 'table', 'columns': ['a', 'b'],
+                                                           'rows': [[j, 'x'] for j in range(30)]}, para('p' * 50)]}
+            for i in range(30)]
+    once, _ = normalize({'title': 'Many', 'sections': secs}, fmt)
+    twice, _ = normalize(once, fmt)
+    assert len(twice['sections']) == len(once['sections']) and twice == once
+    if fmt == 'pptx':
+        assert len(once['sections']) > 40  # a normalized deck past 40 slides is not cut again (L1)
+
+
+def test_s8_headings_for_later_sections():
+    spec = {'title': 'T', 'sections': [{'blocks': [para('Intro under the title.')]},
+                                       {'heading': 'Named', 'blocks': [para('x')]},
+                                       {'blocks': [para('Short line'), para('Body text.')]},
+                                       {'blocks': [para('A single paragraph only.')]}]}
+    out, res = normalize(spec, 'docx')
+    assert [s['heading'] for s in out['sections']] == ['', 'Named', 'Short line', 'Section 4']
+    assert out['sections'][2]['blocks'] == [para('Body text.')]
+    assert result(res, 'S8').note == '2 sections without a heading were given one'
+    slides, res = normalize(spec, 'pptx')
+    assert [s['heading'] for s in slides['sections']] == ['Overview', 'Named', 'Named (cont.)', 'Named (cont.)']

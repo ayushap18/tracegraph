@@ -1,0 +1,415 @@
+{
+ "qid": 2750,
+ "query": "create the ppt on the how mobile phone is being evolved history past present everything a ppt of 12 slides using the multiple pictured diagrams and also use the design.md for the design",
+ "mode": "research",
+ "agent": "create",
+ "format": "pptx",
+ "slides": [
+  12,
+  12
+ ],
+ "design_file": "design_system.md",
+ "note": "The shape of run 2750: an outline of 11 parts, then two section batches (parts 1 to 6 and 7 to 11). The second batch has section 7 as a bullets block with no items, which discarded the whole deck. \"repair\" is a reply that rewrites only section 7, for the repair ladder.",
+ "outline": {
+  "title": "The Evolution of Mobile Phones",
+  "subtitle": "From car radiotelephones to 5G smartphones",
+  "sections": [
+   {
+    "heading": "Before mobile phones",
+    "level": 1,
+    "words": 45,
+    "blocks_hint": [
+     "bullets",
+     "timeline"
+    ]
+   },
+   {
+    "heading": "The first mobile call",
+    "level": 1,
+    "words": 45,
+    "blocks_hint": [
+     "bullets"
+    ]
+   },
+   {
+    "heading": "First generation: analog cellular",
+    "level": 1,
+    "words": 45,
+    "blocks_hint": [
+     "bullets"
+    ]
+   },
+   {
+    "heading": "Second generation: digital and SMS",
+    "level": 1,
+    "words": 45,
+    "blocks_hint": [
+     "bullets"
+    ]
+   },
+   {
+    "heading": "Feature phones and the Nokia years",
+    "level": 1,
+    "words": 45,
+    "blocks_hint": [
+     "bullets"
+    ]
+   },
+   {
+    "heading": "Mobile internet and 3G",
+    "level": 1,
+    "words": 45,
+    "blocks_hint": [
+     "bullets",
+     "flow"
+    ]
+   },
+   {
+    "heading": "Smartphones arrive",
+    "level": 1,
+    "words": 45,
+    "blocks_hint": [
+     "bullets"
+    ]
+   },
+   {
+    "heading": "Touchscreens and app stores",
+    "level": 1,
+    "words": 45,
+    "blocks_hint": [
+     "bullets"
+    ]
+   },
+   {
+    "heading": "4G and the mobile video era",
+    "level": 1,
+    "words": 45,
+    "blocks_hint": [
+     "bullets"
+    ]
+   },
+   {
+    "heading": "Mobile phones today",
+    "level": 1,
+    "words": 45,
+    "blocks_hint": [
+     "bullets",
+     "tree"
+    ]
+   },
+   {
+    "heading": "What comes next",
+    "level": 1,
+    "words": 45,
+    "blocks_hint": [
+     "bullets"
+    ]
+   }
+  ]
+ },
+ "batches": [
+  {
+   "title": "",
+   "subtitle": "",
+   "sections": [
+    {
+     "heading": "Before mobile phones",
+     "level": 1,
+     "blocks": [
+      {
+       "type": "bullets",
+       "items": [
+        "1946: Bell System launches Mobile Telephone Service",
+        "Car sets weighed about 36 kg",
+        "Only a few channels served a whole city"
+       ],
+       "ordered": false
+      },
+      {
+       "type": "timeline",
+       "title": "Early milestones",
+       "events": [
+        {
+         "date": "1946",
+         "label": "Mobile Telephone Service in St. Louis"
+        },
+        {
+         "date": "1973",
+         "label": "First handheld cellular call"
+        },
+        {
+         "date": "1979",
+         "label": "NTT opens the first 1G network in Tokyo"
+        },
+        {
+         "date": "1983",
+         "label": "Motorola DynaTAC 8000X goes on sale"
+        }
+       ]
+      }
+     ],
+     "notes": ""
+    },
+    {
+     "heading": "The first mobile call",
+     "level": 1,
+     "blocks": [
+      {
+       "type": "bullets",
+       "items": [
+        "3 April 1973: Martin Cooper calls from a Manhattan street",
+        "The DynaTAC prototype weighed about 1.1 kg",
+        "Ten years passed before it reached shops"
+       ],
+       "ordered": false
+      }
+     ],
+     "notes": ""
+    },
+    {
+     "heading": "First generation: analog cellular",
+     "level": 1,
+     "blocks": [
+      {
+       "type": "bullets",
+       "items": [
+        "1979: NTT launches cellular service in Tokyo",
+        "1983: Ameritech starts AMPS in Chicago",
+        "Analog calls were easy to overhear",
+        "Talk time was about 30 minutes"
+       ],
+       "ordered": false
+      }
+     ],
+     "notes": ""
+    },
+    {
+     "heading": "Second generation: digital and SMS",
+     "level": 1,
+     "blocks": [
+      {
+       "type": "bullets",
+       "items": [
+        "1991: first GSM call in Finland",
+        "1992: the first text message is sent",
+        "Digital voice made calls clearer and more private",
+        "SIM cards moved numbers between phones"
+       ],
+       "ordered": false
+      }
+     ],
+     "notes": ""
+    },
+    {
+     "heading": "Feature phones and the Nokia years",
+     "level": 1,
+     "blocks": [
+      {
+       "type": "bullets",
+       "items": [
+        "Nokia 3310 sold about 126 million units",
+        "Snake and ringtones made phones personal",
+        "Batteries lasted for days"
+       ],
+       "ordered": false
+      }
+     ],
+     "notes": ""
+    },
+    {
+     "heading": "Mobile internet and 3G",
+     "level": 1,
+     "blocks": [
+      {
+       "type": "bullets",
+       "items": [
+        "1999: i-mode brings mobile internet to Japan",
+        "2001: first 3G network opens in Japan"
+       ],
+       "ordered": false
+      },
+      {
+       "type": "flow",
+       "title": "How a mobile call connects",
+       "nodes": [
+        {
+         "id": "phone",
+         "label": "Phone"
+        },
+        {
+         "id": "tower",
+         "label": "Cell tower"
+        },
+        {
+         "id": "core",
+         "label": "Core network"
+        },
+        {
+         "id": "callee",
+         "label": "Other phone"
+        }
+       ],
+       "edges": [
+        {
+         "from": "phone",
+         "to": "tower"
+        },
+        {
+         "from": "tower",
+         "to": "core"
+        },
+        {
+         "from": "core",
+         "to": "callee"
+        }
+       ]
+      }
+     ],
+     "notes": ""
+    }
+   ]
+  },
+  {
+   "title": "",
+   "subtitle": "",
+   "sections": [
+    {
+     "heading": "Smartphones arrive",
+     "level": 1,
+     "blocks": [
+      {
+       "type": "bullets",
+       "items": null
+      }
+     ],
+     "notes": ""
+    },
+    {
+     "heading": "Touchscreens and app stores",
+     "level": 1,
+     "blocks": [
+      {
+       "type": "bullets",
+       "items": [
+        "2007: the iPhone brings multi-touch to the mainstream",
+        "2008: the App Store and the first Android phone",
+        "Apps turned phones into general computers"
+       ],
+       "ordered": false
+      }
+     ],
+     "notes": ""
+    },
+    {
+     "heading": "4G and the mobile video era",
+     "level": 1,
+     "blocks": [
+      {
+       "type": "bullets",
+       "items": [
+        "2009: first commercial 4G LTE networks in Stockholm and Oslo",
+        "Video calls and streaming became common",
+        "Mobile data use grew many times over"
+       ],
+       "ordered": false
+      }
+     ],
+     "notes": ""
+    },
+    {
+     "heading": "Mobile phones today",
+     "level": 1,
+     "blocks": [
+      {
+       "type": "bullets",
+       "items": [
+        "Most adults worldwide now own a mobile phone",
+        "Phones replace cameras, maps and wallets"
+       ],
+       "ordered": false
+      },
+      {
+       "type": "tree",
+       "title": "Generations of mobile networks",
+       "nodes": [
+        {
+         "id": "cell",
+         "parent": "",
+         "label": "Cellular networks"
+        },
+        {
+         "id": "g1",
+         "parent": "cell",
+         "label": "1G analog"
+        },
+        {
+         "id": "g2",
+         "parent": "cell",
+         "label": "2G digital"
+        },
+        {
+         "id": "g3",
+         "parent": "cell",
+         "label": "3G data"
+        },
+        {
+         "id": "g4",
+         "parent": "cell",
+         "label": "4G LTE"
+        },
+        {
+         "id": "g5",
+         "parent": "cell",
+         "label": "5G"
+        }
+       ]
+      }
+     ],
+     "notes": ""
+    },
+    {
+     "heading": "What comes next",
+     "level": 1,
+     "blocks": [
+      {
+       "type": "bullets",
+       "items": [
+        "2019: 5G networks open in South Korea and the United States",
+        "Foldable screens and on-device AI",
+        "Satellite messaging reaches phones"
+       ],
+       "ordered": false
+      }
+     ],
+     "notes": ""
+    }
+   ]
+  }
+ ],
+ "broken": {
+  "section": 7,
+  "heading": "Smartphones arrive"
+ },
+ "repair": {
+  "title": "",
+  "subtitle": "",
+  "sections": [
+   {
+    "heading": "Smartphones arrive",
+    "level": 1,
+    "blocks": [
+     {
+      "type": "bullets",
+      "items": [
+       "2000s: BlackBerry puts email in business pockets",
+       "Smartphones added full web browsers",
+       "Cameras and GPS moved into the phone"
+      ],
+      "ordered": false
+     }
+    ],
+    "notes": ""
+   }
+  ]
+ }
+}

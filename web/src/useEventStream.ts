@@ -43,6 +43,9 @@ export interface Run {
   compare_id: string | null
   files: string[]
   tokens?: import('./protocol').RunTokens // from `done`; absent for runs loaded from history
+  cost?: import('./protocol').RunCost | null // estimated vs used model calls (docs/PLAN-files-robust.md 5.4)
+  file_failed?: boolean // the run's primary file step made no file
+  checkpoints?: import('./protocol').CheckpointInfo[] // file steps' checkpoints, so a timed-out step still offers Resume
   marks: Marks // client receipt times (performance.now ms); empty for runs loaded from history
 }
 
@@ -97,7 +100,7 @@ const newRun = (qid: number, text = '', source: Source = 'you'): Run => ({
 const newTask = (tid: string, text = ''): Task => ({ tid, text, stream: '', depends_on: [] })
 
 const ROUTED_EXTRAS = ['examples', 'cached', 'forced', 'trace', 'signals', 'bound', 'assumption', 'frame_used'] as const
-const ANSWERED_EXTRAS = ['checks', 'created_files', 'caveats', 'frame'] as const
+const ANSWERED_EXTRAS = ['checks', 'created_files', 'caveats', 'frame', 'phases', 'llm_in', 'llm_out', 'checkpoint'] as const
 
 /** Builds a client Run from a history/persisted record (hello.history, /api/runs, sessions, compare). */
 export function fromRecord(r: HistoryRecord): Run {
@@ -133,6 +136,9 @@ export function fromRecord(r: HistoryRecord): Run {
   const rec = r as Partial<RunRecord>
   if (rec.suspects) run.suspects = rec.suspects
   if (rec.dry_run) run.dry_run = rec.dry_run
+  if (rec.cost) run.cost = rec.cost
+  if (rec.file_failed) run.file_failed = true
+  if (rec.checkpoints?.length) run.checkpoints = rec.checkpoints
   run.total_ms = r.total_ms
   run.status = r.status ?? (r.total_ms == null ? 'running' : r.error ? 'error' : 'done')
   run.done = r.total_ms != null || (r.status != null && r.status !== 'running') // in-flight record: later live events finish it
@@ -207,6 +213,7 @@ function apply(s: Store, e: ServerEvent, rx: number): Store {
       return {
         ...s, stats: e.stats ?? s.stats, runs: withRun(s.runs, e.qid, r => ({
           ...r, done: true, total_ms: e.total_ms, marks: { ...r.marks, done: rx }, tokens: e.tokens ?? r.tokens,
+          cost: e.cost ?? r.cost, file_failed: e.file_failed ?? r.file_failed, checkpoints: e.checkpoints ?? r.checkpoints,
           // `cancelled` arrives before `done`; keep it if done carries no status (older servers).
           status: e.status ?? (r.status === 'running' ? (r.error ? 'error' : 'done') : r.status),
         })),

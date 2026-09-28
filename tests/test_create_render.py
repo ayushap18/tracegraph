@@ -687,3 +687,190 @@ def test_a_family_whose_name_ends_like_a_style_is_found(tmp_path, monkeypatch):
         assert 'arialbold' not in index
     finally:
         fonts.system_index.cache_clear()
+
+
+# ---------- robust rendering (docs/PLAN-files-robust.md 2.4 to 2.6, 4.6) ----------
+
+from pathlib import Path  # noqa: E402
+
+from jevrouter.create import render_safe, themes  # noqa: E402
+
+
+def test_pdf_heading_split_at_a_page_end_keeps_every_outline_entry():
+    """reportlab splits a long heading at a page end by calling Heading(None, style, bulletText=..., frags=...); that
+    used to raise and discard the file."""
+    from pypdf import PdfReader
+    from reportlab.platypus import Paragraph
+    head = ' '.join(['Evolution'] * 11)
+    spec = {'title': 'T', 'sections': [{'heading': 'Intro', 'blocks': [para_block('word ' * 40)]}] +
+            [{'heading': f'{head} {i}', 'level': 1, 'blocks': []} for i in range(30)] +
+            [{'heading': 'Long ' * 40, 'blocks': [para_block('x')]}]}
+    splits, orig = [], Paragraph.split
+
+    def split(self, w, h):
+        parts = orig(self, w, h)
+        if type(self).__name__ == 'Heading' and len(parts) > 1:
+            splits.append(len(parts))
+        return parts
+    Paragraph.split = split
+    try:
+        data = render(spec, 'pdf')
+    finally:
+        Paragraph.split = orig
+    assert splits, 'the spec no longer splits a heading; make it longer'
+    titles = re.findall(r"'/Title': '([^']+)'", str(PdfReader(io.BytesIO(data)).outline))
+    assert len(titles) == 33 and titles[-2].endswith('29') and len(titles[-1]) == 120  # headings drawn at most 120 long
+    checks = {r.id: r for r in verify(spec, 'pdf', data)}
+    assert checks['V2'].ok and checks['V3'].ok and checks['A1'].ok
+
+
+def para_block(text):
+    return {'type': 'paragraph', 'text': text}
+
+
+@pytest.mark.parametrize('fmt', FORMATS)
+def test_a_5000_character_column_name(fmt):
+    spec = one({'type': 'table', 'columns': ['x' * 5000, 'word ' * 1000], 'rows': [[1, 2], [3, 4]]})
+    data = render(spec, fmt)
+    reopen_ok(spec, fmt, data)
+
+
+def test_pdf_layout_error_retries_with_plain_headers(monkeypatch):
+    from reportlab.platypus.doctemplate import LayoutError
+    orig, seen = render_mod._pdf_once, []
+
+    def once(spec, name, safe):
+        seen.append(safe)
+        if not safe:
+            raise LayoutError('header row taller than the page')
+        return orig(spec, name, safe)
+    monkeypatch.setattr(render_mod, '_pdf_once', once)
+    data = render(one({'type': 'table', 'columns': ['a' * 60, 'b'], 'rows': [[1, 2]]}), 'pdf')
+    assert seen == [False, True] and data.startswith(b'%PDF')
+
+
+@pytest.mark.parametrize('n', [256, 300])
+@pytest.mark.parametrize('fmt', FORMATS)
+def test_long_subtitles(fmt, n):
+    sub = ('word ' * 80)[:n]
+    spec = {**one(para_block('x')), 'subtitle': sub}
+    data = render(spec, fmt)
+    reopen_ok(spec, fmt, data)
+    if fmt == 'docx':
+        from docx import Document
+        got = Document(io.BytesIO(data)).core_properties.subject
+    elif fmt == 'pptx':
+        from pptx import Presentation
+        got = Presentation(io.BytesIO(data)).core_properties.subject
+    else:
+        return
+    assert len(got) <= 255 and got.endswith('word') and sub.startswith(got)
+
+
+SAFE = {'title': 'Safe', 'sections': [
+    {'heading': 'Fine', 'blocks': [para_block('first'), {'type': 'table', 'columns': ['a', 'b'], 'rows': [[1, 2]]}]},
+    {'heading': 'Boom', 'blocks': [para_block('breaks'), {'type': 'table', 'columns': ['k', 'v'], 'rows': [['x', 9]]}]},
+    {'heading': 'Also fine', 'blocks': [para_block('last')]}]}
+
+
+def breaking(monkeypatch, fmt, when):
+    """The renderer for fmt raises whenever `when(sections)` is true."""
+    name = {'pdf': '_pdf', 'docx': '_docx', 'pptx': '_pptx', 'xlsx': '_xlsx', 'md': '_md'}[fmt]
+    orig = getattr(render_mod, name)
+
+    def bad(spec, theme, *a, **kw):
+        if when(spec['sections']):
+            raise RuntimeError('cannot lay this out')
+        return orig(spec, theme, *a, **kw)
+    monkeypatch.setattr(render_mod, name, bad)
+
+
+@pytest.mark.parametrize('fmt', FORMATS)
+def test_render_safe_retries_a_failing_section_as_plain_text(monkeypatch, fmt):
+    breaking(monkeypatch, fmt, lambda secs: any(s['heading'] == 'Boom' and any(b['type'] == 'table' for b in s['blocks'])
+                                                for s in secs))
+    with pytest.raises(SpecError):
+        render(SAFE, fmt)
+    data, res = render_safe(SAFE, fmt)
+    v11 = res[0]
+    what = 'slide' if fmt == 'pptx' else 'section'
+    assert v11.id == 'V11' and v11.severity == 'fix' and not v11.ok
+    assert v11.note == f'{what} 2 (Boom) could not be laid out in {render_mod.FORMAT_NAMES[fmt]} and is shown as plain text'
+    checks = {r.id: r for r in verify(SAFE, fmt, data, extra=res)}
+    assert checks['V1'].ok and checks['V2'].ok and checks['V3'].ok and 'V11' not in checks
+
+
+@pytest.mark.parametrize('fmt', FORMATS)
+def test_render_safe_leaves_out_a_section_that_never_lays_out(monkeypatch, fmt):
+    breaking(monkeypatch, fmt, lambda secs: any(s['heading'] == 'Boom' for s in secs))
+    data, res = render_safe(SAFE, fmt)
+    assert 'could not be laid out even as plain text and was left out' in res[0].note and '(Boom)' in res[0].note
+    checks = {r.id: r for r in verify(SAFE, fmt, data, extra=res)}
+    assert checks['V1'].ok and checks['V3'].ok
+
+
+def test_render_safe_on_a_good_file_and_its_block_errors(monkeypatch):
+    data, res = render_safe(SAFE, 'md')
+    assert res[0].ok and res[0].note == 'every section laid out' and res[0].to_dict()['id'] == 'V11'
+    with pytest.raises(SpecError) as e:
+        render_safe(SAFE, 'html')
+    assert e.value.rule_id == 'X1'
+    breaking(monkeypatch, 'md', lambda secs: True)
+    with pytest.raises(SpecError) as e:
+        render_safe(SAFE, 'md')
+    assert e.value.rule_id == 'V1'
+
+
+def design_spec() -> dict:
+    from jevrouter.create import design
+    text = (Path(__file__).resolve().parent.parent / 'evals' / 'fixtures' / 'design_system.md').read_text()
+    return {'title': 'Mobile phones', 'subtitle': 'Then and now',
+            'design': design.to_spec(design.parse_design(text, 'design_system.md')), 'sections': [
+                {'heading': 'History', 'blocks': [para_block('From **brick** phones to pocket computers.'),
+                                                  {'type': 'table', 'columns': ['Year', 'Phone'],
+                                                   'rows': [[1983, 'DynaTAC'], [2007, 'iPhone']]}]},
+                {'heading': 'Growth', 'blocks': [
+                    {'type': 'chart', 'kind': 'bar', 'title': 'Users', 'labels': ['2000', '2020'],
+                     'series': [{'name': 'Billions', 'values': [0.7, 5.2]}]},
+                    {'type': 'timeline', 'title': 'Milestones', 'events': ['1973: first call', '2007: iPhone']}]}]}
+
+
+@pytest.mark.parametrize('fmt', FORMATS)
+def test_a_design_file_colours_every_format(fmt):
+    spec = design_spec()
+    t = themes.resolve(spec)
+    assert (t['bg'], t['text'], t['header_bg']) == ('F7F4ED', '1C1C1C', '1C1C1C')
+    assert themes.worst_contrast(t)[0] >= 4.5
+    data = render(spec, fmt)
+    checks = {r.id: r for r in verify(spec, fmt, data)}
+    assert checks['V10'].ok and checks['A4'].ok, checks['V10'].note
+    if fmt == 'pdf':
+        from jevrouter.create.rules import pdf_scan
+        seen = {''.join(f'{round(c * 255):02X}' for c in rgb) for rgb in pdf_scan(data)['colors']}
+        assert {'F7F4ED', '1C1C1C'} <= seen
+    elif fmt == 'docx':
+        xml = zipfile.ZipFile(io.BytesIO(data)).read('word/document.xml').decode()
+        assert '<w:background w:color="F7F4ED"' in xml
+        assert b'displayBackgroundShape' in zipfile.ZipFile(io.BytesIO(data)).read('word/settings.xml')
+    elif fmt == 'pptx':
+        from pptx import Presentation
+        slides = Presentation(io.BytesIO(data)).slides
+        assert all(str(s.background.fill.fore_color.rgb) == 'F7F4ED' for s in slides)
+    elif fmt == 'xlsx':
+        from openpyxl import load_workbook
+        ws = next(ws for ws in load_workbook(io.BytesIO(data)).worksheets if ws.freeze_panes == 'A2')
+        assert ws['A1'].fill.fgColor.rgb.endswith('1C1C1C') and ws['A1'].font.color.rgb.endswith('FCFBF8')
+    else:
+        assert 'carries no colours' in checks['V10'].note
+
+
+def test_a_design_with_unreadable_text_is_repaired_and_a_dark_design_keeps_sheets_readable():
+    spec = design_spec()
+    spec['design'] = {**spec['design'], 'colors': {**spec['design']['colors'], 'text': 'CCCCCC', 'bg': 'FFFFFF'}}
+    assert themes.worst_contrast(themes.resolve(spec))[0] >= 4.5
+    dark = design_spec()
+    dark['design'] = {**dark['design'], 'colors': {'bg': '111111', 'text': 'EEEEEE', 'heading': 'FFFFFF'}}
+    data = render(dark, 'xlsx')
+    from openpyxl import load_workbook
+    notes = load_workbook(io.BytesIO(data))['Notes']
+    assert themes.contrast(notes['A1'].font.color.rgb[-6:], 'FFFFFF') >= 4.5  # the title stays readable on white

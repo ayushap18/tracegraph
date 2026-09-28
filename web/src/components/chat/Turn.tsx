@@ -168,6 +168,7 @@ export function Answer({ run, selected, onShowTrace, extras, actions, engineLabe
         </span>
         <span className="ml-auto flex flex-wrap items-center gap-1">
           {run.done && run.status !== 'done' && <StatusBadge status={run.status} />}
+          {run.done && run.status === 'done' && run.file_failed && <Badge tone="bad" icon="error" title="The file step made no file. Use Resume on the step to try again without repeating what was paid for.">no file made</Badge>}
           {run.total_ms != null && <span className="mx-1 inline-flex items-center gap-1 text-xs tabular-nums text-muted-foreground" title="Total time"><Icon name="latency" size={12} />{secs(run.total_ms)}</span>}
           {answer && run.done && <IconButton icon="copy" label="Copy answer" size="sm" onClick={() => void copy()} />}
           {actions}

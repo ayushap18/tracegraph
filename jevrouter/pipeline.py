@@ -148,6 +148,57 @@ def body_font() -> str | None:
         return Path(path).stem
 
 
+CHECKPOINT_PHASES = ('outline', 'sections', 'topup', 'render', 'done')
+CHECKPOINT_SAVE_S = 3.0  # a running file step's checkpoint is saved with the run at most this often (and per phase)
+
+
+def checkpoint_info(state: dict, qid: int, tid: str) -> dict:
+    """The CheckpointInfo summary of a create step's saved state (web/src/protocol.ts): longdoc.info when the long writer
+    provides it, else the same summary read from the state's documented shape (docs/PLAN-files-robust.md 3.3)."""
+    try:
+        from .create import longdoc
+        info = getattr(longdoc, 'info', None)
+        if info is not None:
+            return info(state, qid, tid)
+    except Exception:
+        pass
+    state = state if isinstance(state, dict) else {}
+    kind = 'single' if state.get('kind') == 'single' else 'longdoc'
+    file_id = state.get('file_id') or None
+    if kind == 'single':
+        planned, written, missing = 1, 1 if file_id else 0, []
+        resumable = not file_id
+    else:
+        parts = [p for p in state.get('parts') or [] if isinstance(p, dict)]
+        done = state.get('written') if isinstance(state.get('written'), dict) else {}
+        failed = {str(i) for i in state.get('failed') or []}
+        usable = {k for k, s in done.items() if k not in failed and isinstance(s, dict) and s.get('blocks')}
+        missing = [str(p.get('heading') or f'Section {i + 1}') for i, p in enumerate(parts) if str(i) not in usable]
+        planned, written = len(parts), len(parts) - len(missing)
+        resumable = bool(missing) or bool(failed) or not file_id
+    by = state.get('resumed_by') if isinstance(state.get('resumed_by'), dict) else None
+    if by and by.get('file_id'):
+        resumable = False
+    phase = state.get('phase') if state.get('phase') in CHECKPOINT_PHASES else 'sections'
+    out = {'qid': qid, 'tid': tid, 'kind': kind, 'format': state.get('format') or 'pdf', 'phase': phase,
+           'planned': planned, 'written': written, 'missing': missing, 'tokens_in': int(state.get('tokens_in') or 0),
+           'tokens_out': int(state.get('tokens_out') or 0), 'at': float(state.get('at') or 0), 'resumable': resumable,
+           'file_id': file_id}
+    if by and type(by.get('qid')) is int:
+        out['resumed_by'] = by['qid']
+    return out
+
+
+def public_run(rec: dict | None) -> dict | None:
+    """A run as the API and the event stream show it: the full checkpoint state (H2) stays on the server, and only its
+    summaries (`checkpoints`) go out."""
+    if not isinstance(rec, dict) or 'checkpoints_state' not in rec:
+        return rec
+    out = {k: v for k, v in rec.items() if k != 'checkpoints_state'}
+    out['checkpoints'] = [checkpoint_info(s, rec.get('qid'), tid) for tid, s in (rec['checkpoints_state'] or {}).items()]
+    return out
+
+
 def table_files(attached: list[dict], engine, query: str) -> list[dict]:
     """The attached files the sql agent can query: tables, when an engine can write the SQL or (keyless) the user
     wrote a SELECT themselves."""
@@ -301,6 +352,68 @@ class Router:
         engine = Steered(auto, pick.name) if hasattr(auto, 'fastest') and pick.name in auto.engines else pick
         return engine, 'low' if easy else 'high'
 
+    def engine_view(self, e):
+        """What the cost estimate knows of an engine (estimate.EngineView): its billing, web search, health and p50."""
+        from .estimate import EngineView
+        if e is None:
+            return None
+        h = self.health.stats.get(e.name)
+        ms = sorted(h['ms']) if h else []
+        return EngineView(e.name, getattr(e, 'label', e.name), getattr(e, 'billing', 'api') or 'api',
+                          bool(getattr(e, 'supports_web', False)), self.healthy(e), pct(ms, 0.5) if len(ms) >= 3 else None)
+
+    def lean_engine(self, engine, brief, request: str, attached: list[dict], deps: list) -> str | None:
+        """H8 (docs/PLAN-files-robust.md 5.5): on Auto, a long file goes first to the healthy backend whose estimate for
+        it is lowest (Antigravity adds about 12,400 tokens of its own to every turn). None keeps Auto's own order: the
+        switch is off (TG_LEAN_LONG_FILES=0), the engine is not Auto, or the file is not long."""
+        from .config import lean_long_files_on
+        if not lean_long_files_on() or getattr(engine, 'name', None) != 'auto' or not hasattr(engine, 'chain'):
+            return None
+        try:
+            from .create.brief import asks_more
+            if not asks_more(brief):
+                return None
+            from . import estimate as est
+            from .create.spec import detect_format
+            views = [self.engine_view(e) for e in engine.chain()]
+            ctx = sum(len(a or '') for _, a in deps) + sum(int(f.get('chars') or 0) for f in attached)
+            return est.cheapest(views, request, brief, fmt=detect_format(request) or brief.format, ctx_chars=ctx,
+                                attached=bool(attached))
+        except Exception:
+            return None
+
+    def design_history(self, rec: dict, sandbox: str | None, attached: list[dict], texts: dict, query: str,
+                       qid: int) -> list[tuple[dict, str]]:
+        """H5: the request asks to use a design file ("use the design.md") but none is attached to this message: the
+        design-like files attached to earlier turns of the same chat, newest first, at most 2."""
+        try:
+            from .create import design
+            mention, is_design = design.MENTION, design.is_design
+        except (ImportError, AttributeError):
+            return []
+        try:
+            if not mention.search(query) or any(is_design(f, texts.get(f['id']) or '', query) >= 0.5 for f in attached):
+                return []
+            seen, out = {f['id'] for f in attached}, []
+            if sandbox:
+                mem = self.sandboxes.peek(sandbox)
+                held = list((mem.files if mem else {}).values())[::-1]
+                candidates = [(m, t) for m, t in held if m.get('id') not in seen]
+            else:
+                sid = rec.get('session_id')
+                recs = self.store.session_records(sid, qid, create_agent.LOOKBACK) if sid else []
+                ids = [f for r in reversed(recs) for f in r.get('files') or [] if f not in seen]
+                metas = {m['id']: m for m in self.store.list_files(list(dict.fromkeys(ids)))} if ids else {}
+                candidates = [(metas[i], self.store.file_text(i)) for i in dict.fromkeys(ids) if i in metas]
+            for meta, text in candidates:
+                if is_design(meta, text or '', query) >= 0.5:
+                    out.append((meta, text or ''))
+                if len(out) == 2:
+                    break
+            return out
+        except Exception:
+            return []
+
     def web_engine(self):
         """Research mode's engine when none is named: the active one if it can search the web, else the first
         available engine that can, else None."""
@@ -328,7 +441,7 @@ class Router:
     def hello(self) -> dict:
         # history fills in completion order; replay wants qid order, with in-flight runs included
         records = sorted([*self.history, *(r for q, r in self.inflight.items() if q not in self.sandbox)], key=lambda r: r['qid'])
-        return {'type': 'hello', **self.config(), 'history': records[-HISTORY:]}
+        return {'type': 'hello', **self.config(), 'history': [public_run(r) for r in records[-HISTORY:]]}
 
     def deadline(self, query: str, engine) -> float:
         """Seconds a run may take: the long-document deadline when an engine will write a long or illustrated file."""
@@ -489,6 +602,8 @@ class Router:
             'chosen': True if group_id is None else bool(chosen)}
         if extras.get('dry_run') == 'route':
             rec['dry_run'] = 'route'
+        if isinstance(extras.get('estimate'), dict):  # 5.4: estimated vs used, filled in at the end
+            rec['cost'] = {'estimate': extras['estimate'], 'actual': None}
         if not sandbox:
             if session_id:
                 self.store.touch_session(session_id, query)
@@ -496,6 +611,7 @@ class Router:
         stats = self.stats_for(qid)
         emit = self.bus.emit
         deadline = self.deadline(query, engine)
+        extras['deadline_at'] = time.monotonic() + deadline  # H2: the create agent's repair ladder reads what is left
         try:
             async with asyncio.timeout(deadline):
                 status = await self._handle(query, source, qid, t0, rec, engine, extras)
@@ -525,8 +641,20 @@ class Router:
             rec['suspects'] = [] if rec.get('dry_run') else suspects_mod.suspects(rec, specs)
         except Exception:
             rec['suspects'] = []
+        after = {}
+        if rec.get('cost') is not None:
+            try:
+                from .estimate import actual_of
+                rec['cost']['actual'] = actual_of(rec)
+            except Exception:
+                pass
+            after['cost'] = rec['cost']
+        if rec.get('file_failed'):
+            after['file_failed'] = True
+        if rec.get('checkpoints_state'):  # a timed-out or cancelled file step still offers Resume in live views
+            after['checkpoints'] = (public_run(rec) or {}).get('checkpoints') or []
         emit('done', qid=qid, total_ms=rec['total_ms'], stats=stats, status=status, tokens=rec['tokens'],
-             timings=rec['timings'])
+             timings=rec['timings'], **after)
         self.inflight.pop(qid, None)
         if sandbox:
             self.remember_sandbox_turn(sandbox, rec, extras, status)
@@ -539,12 +667,18 @@ class Router:
                 self.settle_group(rec['group_id'])
 
     def remember_sandbox_turn(self, sid: str, rec: dict, extras: dict | None = None, status: str = 'done'):
-        """Adds a finished sandbox run to its thread (in place of the turn it replaces, if any). Cancelled runs and
-        `remember: false` runs leave the memory alone, and a sandbox forgotten meanwhile isn't brought back."""
+        """Adds a finished sandbox run to its thread (in place of the turn it replaces, if any). Cancelled runs (unless
+        a file step left a resumable checkpoint) and `remember: false` runs leave the memory alone, and a sandbox
+        forgotten meanwhile isn't brought back."""
         extras = extras or {}
         mem = self.sandboxes.get(sid) if sid in self.sandboxes else None
-        if mem is None or status == 'cancelled' or not extras.get('remember', True):
+        if mem is None or not extras.get('remember', True):
             return
+        if status == 'cancelled':
+            # a cancelled file step that paid for parts keeps its checkpoint, so Resume can still continue it
+            infos = (public_run(rec) or {}).get('checkpoints') or []
+            if not any(i.get('resumable') for i in infos):
+                return
         mem.record(rec, extras.get('replaces'))
 
     def clear_sandbox(self, sid: str) -> int:
@@ -603,6 +737,10 @@ class Router:
                 if held is not None:
                     meta, spec, data = held
                     meta = {**meta, 'qid': rec['qid'], 'sandbox': None}
+                    if isinstance(meta.get('partial'), dict) and isinstance(meta['partial'].get('resume'), dict):
+                        # Resume on the kept file continues in the saved chat, from the kept run's checkpoint
+                        meta['partial'] = {**meta['partial'], 'resume': {'qid': rec['qid'], 'tid': t.get('tid'),
+                                                                         'sandbox': None}}
                     if self.store.get_created(meta['id']) is None:
                         self.store.add_created(meta, spec, data)
                     kept.append(meta)
@@ -670,6 +808,49 @@ class Router:
             if frames:
                 return r.get('text') or '', (r.get('merged') or {}).get('answer') or '', frames[-1]
         return None
+
+    def mark_resumed(self, rec: dict, tid: str, by_qid: int, sandbox: str | None, file_id: str | None = None):
+        """Records on a run's checkpoint that run `by_qid` resumes it (and, once it has one, the file it made), so the
+        same checkpoint is never written twice. A stored run is saved; a sandbox run's record lives in memory."""
+        state = (rec.get('checkpoints_state') or {}).get(tid)
+        if not isinstance(state, dict):
+            return
+        state['resumed_by'] = {'qid': by_qid, 'file_id': file_id}
+        if file_id:  # the source's partial file no longer offers Resume: it names the run that finished it
+            for t in rec.get('tasks') or []:
+                for i, f in enumerate(t.get('created_files') or []):
+                    ref = (f.get('partial') or {}).get('resume') if isinstance(f.get('partial'), dict) else None
+                    if isinstance(ref, dict) and ref.get('tid') == tid:
+                        partial = {**f['partial'], 'resume': None, 'resumed_by': by_qid}
+                        t['created_files'][i] = {**f, 'partial': partial}
+                        try:
+                            if sandbox:
+                                mem = self.sandboxes.peek(sandbox)
+                                held = mem.created.get(f.get('id')) if mem else None
+                                if held is not None:
+                                    mem.created[f['id']] = ({**held[0], 'partial': partial}, held[1], held[2])
+                            else:
+                                self.store.update_created(f['id'], partial=partial)
+                        except Exception:
+                            pass
+        if not sandbox and rec.get('status') != 'running':
+            try:
+                self.store.save_run(rec)
+            except Exception:
+                pass
+
+    def resume_done(self, resume: dict, by_qid: int, file_id: str, sandbox: str | None):
+        """A resume run made its file: the source run's checkpoint says so."""
+        src_qid, src_tid = resume.get('qid'), resume.get('tid')
+        if type(src_qid) is not int or not isinstance(src_tid, str):
+            return
+        if sandbox:
+            mem = self.sandboxes.peek(sandbox)
+            src = next((t['record'] for t in (mem.thread if mem else []) if t['qid'] == src_qid), None)
+        else:
+            src = self.inflight.get(src_qid) or self.store.get_run(src_qid)
+        if isinstance(src, dict):
+            self.mark_resumed(src, src_tid, by_qid, sandbox, file_id)
 
     def created_spec(self, file_id: str, sandbox: str | None) -> dict | None:
         """The stored spec of a file this run (or its sandbox) made, so a dependent create step can start from it."""
@@ -780,7 +961,13 @@ class Router:
                 spec['task'] = asyncio.create_task(jev_route(sent, criteria_for(plan_query, '', plan_query), extra, block))
 
         tp0 = time.perf_counter()
-        if extras.get('plan'):
+        # H6: a resume run writes the missing parts of one file step: no planner and no routing, one create step
+        resume = extras.get('resume') if isinstance(extras.get('resume'), dict) else None
+        if resume is not None:
+            state = resume.get('state') if isinstance(resume.get('state'), dict) else {}
+            p = {'planner': 'pinned', 'subtasks': [str(state.get('request') or query)], 'deps': [[]], 'multi': None,
+                 'jev_tokens': 0, 'claude_in': 0, 'claude_out': 0}
+        elif extras.get('plan'):
             p = pinned_plan(extras['plan'])
         else:
             try:
@@ -794,7 +981,7 @@ class Router:
         clock['planner'], clock['hits'] = plan_kind(p), clock['hits'] + bool(p.get('cached'))
         self.usage(rec, p)
         step_texts, step_deps = p['subtasks'], p['deps']
-        if engine is not None:  # A5: a place named only by description is looked up by its own step first
+        if engine is not None and resume is None:  # A5: a place named only by description is looked up first
             step_texts, step_deps = expand_steps(step_texts, step_deps)
         lookups = {i for i, t in enumerate(step_texts) if LOOKUP_STEP.fullmatch(t)}  # never the @agent's step
         subtasks = [{'tid': f'{qid}.{n}', 'text': s, 'depends_on': [f'{qid}.{d + 1}' for d in deps]}
@@ -969,6 +1156,9 @@ class Router:
 
         async def route(st, text, ctx):
             t1 = time.perf_counter()
+            if resume is not None:
+                clock['route'].append((t1, time.perf_counter()))
+                return route_resume(st)
             try:
                 return await (route_forced(st, text, ctx) if st['tid'] == bound_tid else route_jev(st, text, ctx))
             finally:
@@ -1041,6 +1231,16 @@ class Router:
                 dec.trace.insert(0, {'rule': 'forced', 'agent': forced, 'why': bind_note})
             return routed(st, d, dec)
 
+        def route_resume(st):
+            """H6: the resume step goes to create with no route question (its content passed the checks when it was
+            first written, and the file it makes still goes through X4)."""
+            why = 'resume a partial file'
+            d = {'agent': 'create', 'pick': 'create', 'reason': why, 'probabilities': {'create': 1.0}, 'confidence': 1.0,
+                 'urgency': 0.0, 'unsafe': 0.0, 'clear': 1.0, 'jev_ms': 0, 'model': '', 'examples': False,
+                 'input_tokens': 0, 'forced': True, 'bound': True,
+                 'trace': [{'rule': 'resume', 'agent': 'create', 'why': why}]}
+            return routed(st, d)
+
         def route_failed(st, e):
             stats['errors'] += 1
             by_tid[st['tid']]['error'] = f'Jev: {str(e)[:200]}'
@@ -1098,10 +1298,12 @@ class Router:
             msg, tin, tout = await gate.clarify_llm(engine, text, msg)
             return agent_registry.AgentResult(msg, False, None, engine.name if tin or tout else 'keyless', tin, tout)
 
-        async def make_file(st) -> tuple[agent_registry.AgentResult, list[dict], list[str]]:
+        async def make_file(st) -> tuple[agent_registry.AgentResult, list[dict], list[str], dict]:
             """The create step (docs/PLAN-files.md): its file from the earlier steps' answers and files, the chat, the
             attached files or the engine, stored by id (or in the sandbox's memory). Returns (the answer, [the
-            CreatedFile], the caveats: what the file could not honour)."""
+            CreatedFile], the caveats: what the file could not honour, the fields `answered` gains for a create step:
+            phases, tokens and the checkpoint summary, on success and on failure; docs/PLAN-files-robust.md H3)."""
+            t_make = time.perf_counter()
             deps = [(by_tid[d].get('input') or by_tid[d]['text'], results[d]['answer'] if results[d].get('ok') else '')
                     for d in st['depends_on']]
             dep_files = [(f, s) for d in st['depends_on'] for f in results[d].get('created_files') or []
@@ -1116,18 +1318,79 @@ class Router:
             whole = len(subtasks) == 1 or (whole_query and st['tid'] == bound_tid)
             request = query if whole else by_tid[st['tid']].get('input') or st['text']
             primary = primary_file_step(st)
-            job = create_agent.Job(request, deps, turns, tables, docs, last, brief=brief_for(st), dep_files=dep_files,
-                                   role='primary' if primary else 'working', http=self.http)
-            made = await create_agent.make(job, agent_registry.Tuned(engine) if engine is not None else None, jev, mode)
+            brief = brief_for(st)
+            tid = st['tid']
+
+            saved = {'phase': None, 'at': 0.0}
+
+            def sink(state):  # H2: the long writer's state after every paid call, kept with the run
+                if isinstance(state, dict):
+                    rec.setdefault('checkpoints_state', {})[tid] = state
+                    # and saved with it (at most every few seconds, and on each phase change), so a server restart
+                    # mid-run keeps what was paid for: startup marks the run failed and Resume continues from here
+                    now = time.monotonic()
+                    if not sandbox and (state.get('phase') != saved['phase'] or now - saved['at'] >= CHECKPOINT_SAVE_S):
+                        saved.update(phase=state.get('phase'), at=now)
+                        try:
+                            self.store.save_run(rec)
+                        except Exception:
+                            pass
+
+            wanted = {'checkpoint': sink, 'deadline': extras.get('deadline_at'),
+                      'resume': resume,  # {qid, tid, state}: the new file's resumed_from names the source run and step
+                      'design_docs': self.design_history(rec, sandbox, attached, texts, query, qid) if primary else []}
+            fields = getattr(create_agent.Job, '__dataclass_fields__', {})
+            if 'tally' in fields:
+                try:
+                    from .create.longdoc import Tally
+                    wanted['tally'] = Tally()
+                except Exception:
+                    pass
+            job = create_agent.Job(request, deps, turns, tables, docs, last, brief=brief, dep_files=dep_files,
+                                   role='primary' if primary else 'working', http=self.http,
+                                   **{k: v for k, v in wanted.items() if k in fields and v is not None})
+            tuned = None
+            if engine is not None:
+                prefer = self.lean_engine(engine, brief, request, attached, deps) if primary else None
+                tuned = agent_registry.Tuned(engine, prefer=prefer)
+            try:
+                made = await create_agent.make(job, tuned, jev, mode)
+            except Exception as e:  # make() keeps what was spent itself; this keeps it even if it did not
+                tally = getattr(job, 'tally', None)
+                tin, tout = getattr(tally, 'tokens', (0, 0)) if tally is not None else (0, 0)
+                why = str(e)[:160] or type(e).__name__
+                made = create_agent.Made(f'No file was made: {why}', False, getattr(tally, 'engine', None) or
+                                         (engine.name if engine is not None else 'keyless'), tin, tout,
+                                         phases=list(getattr(tally, 'phases', {}).values()) if tally is not None else [])
             self.usage(rec, {'jev_tokens': made.jev_tokens})
             files = []
+            state = (rec.get('checkpoints_state') or {}).get(tid)
             if made.file is not None:
                 meta = made.file
                 if made.data is not None:  # a new file (not one the chat already had in that format)
-                    meta = self.save_created({**meta, 'qid': qid}, made.spec, made.data, sandbox)
+                    meta = {**meta, 'qid': qid}
+                    partial = meta.get('partial') or getattr(made, 'partial', None)
+                    if isinstance(partial, dict):  # H7: the Resume button on the file card knows where to go
+                        meta['partial'] = {**partial, 'resume': {'qid': qid, 'tid': tid, 'sandbox': sandbox}}
+                    if rec.get('cost') is not None:  # 5.4: the file's own share of the estimate, and its own use
+                        from .estimate import file_share
+                        meta['cost'] = {'estimate': file_share(rec['cost'].get('estimate')), 'actual': {
+                            'calls': sum(int(p.get('calls') or 0) for p in made.phases or [] if isinstance(p, dict)),
+                            'tokens_in': int(made.llm_in or 0), 'tokens_out': int(made.llm_out or 0),
+                            'seconds': round(time.perf_counter() - t_make, 1)}}
+                    meta = self.save_created(meta, made.spec, made.data, sandbox)
+                    if isinstance(state, dict) and not state.get('file_id'):
+                        state['file_id'] = meta['id']
+                    if isinstance(resume, dict):  # the source checkpoint is taken: its Resume is not offered again
+                        self.resume_done(resume, qid, meta['id'], sandbox)
                 files.append(meta)
+            elif primary and not made.ok:  # H4: the run's file step made no file
+                rec['file_failed'] = True
             out = agent_registry.AgentResult(made.answer, made.ok, None, made.engine, made.llm_in, made.llm_out)
-            return out, files, list(getattr(made, 'caveats', None) or [])
+            extra = {'phases': list(made.phases or []), 'llm_in': int(made.llm_in or 0), 'llm_out': int(made.llm_out or 0)}
+            if isinstance(state, dict):
+                extra['checkpoint'] = checkpoint_info(state, qid, tid)
+            return out, files, list(getattr(made, 'caveats', None) or []), extra
 
         async def run(st, r, text):
             tid, agent = st['tid'], r['agent']
@@ -1135,6 +1398,7 @@ class Router:
             delta = lambda chunk: text_out(tid, chunk)
             efforts: list[str] = []
             made: list[dict] = []  # files a create step made
+            create_fields: dict = {}  # H3: phases, tokens and checkpoint of a create step
             limits: list[str] = list(caveats.get(tid, ()))
             token = agent_registry.EFFORTS.set(efforts)
             feeds = agent_registry.FEEDS_FILE.set(agent != 'create' and feeds_long_file(st))
@@ -1150,7 +1414,7 @@ class Router:
                         out = await ask(by_tid[tid].get('input') or st['text'], r['probabilities'])
                         delta(out.answer)
                     elif agent == 'create':
-                        out, made, file_caveats = await make_file(st)
+                        out, made, file_caveats, create_fields = await make_file(st)
                         limits += file_caveats
                         delta(out.answer)
                     else:
@@ -1171,6 +1435,8 @@ class Router:
                         'source': out.source, 'engine': out.engine}
             if made:
                 answered['created_files'] = made
+            if agent == 'create':
+                answered.update(create_fields)
             if not out.ok:  # a dead end has no figure to hedge (B6)
                 limits = [c for c in limits if c != gate.TIME_SENSITIVE_CAVEAT]
             if limits:
@@ -1295,7 +1561,8 @@ class Router:
             return 'error'
         # A2: an LLM merger adds nothing when every answer is exact; quick mode always joins by template, deep never does.
         all_exact = all(st['tid'] in exact for st, _ in answers)
-        template = engine is None or mode == 'quick' or (mode != 'deep' and all_exact)
+        # H4: a run whose file step made no file says so from the template, never with an LLM call to wrap a failure
+        template = engine is None or mode == 'quick' or (mode != 'deep' and all_exact) or bool(rec.get('file_failed'))
         t2 = time.perf_counter()
         steps_out: list[StepOut] = [
             {'tid': st['tid'], 'text': st['text'], 'agent': a['agent'], 'answer': a['answer'], 'ok': a['ok'],
@@ -1382,5 +1649,9 @@ def renumber(rec: dict, qid: int) -> dict:
             t['tid'] = tid(t['tid'])
         if 'depends_on' in t:
             t['depends_on'] = [tid(d) for d in t['depends_on']]
+        if isinstance(t.get('checkpoint'), dict):  # a failed file step's Resume points at the run's new number
+            t['checkpoint'] = {**t['checkpoint'], 'qid': qid, 'tid': tid(t['checkpoint'].get('tid'))}
+    if isinstance(rec.get('checkpoints_state'), dict):
+        rec['checkpoints_state'] = {tid(k): v for k, v in rec['checkpoints_state'].items()}
     rec['qid'] = qid
     return rec

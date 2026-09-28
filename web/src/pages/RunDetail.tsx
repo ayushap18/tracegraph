@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { ApiError, ask, cancelRun, errorText, getRun, promoteRun } from '../api'
-import type { CreatedFile, PromoteRunResponse, RunRecord, RunTimings, SuspectCheck } from '../protocol'
+import { ApiError, askOrConfirm, cancelRun, errorText, getRun, promoteRun } from '../api'
+import type { AskBody, CheckpointInfo, CreatedFile, PromoteRunResponse, RunCost, RunRecord, RunTimings, SuspectCheck } from '../protocol'
 import { useRunState, useStore } from '../store'
 import type { Run, Task } from '../useEventStream'
 import { Badge, Button, Card, EmptyState, Skeleton, StatusBadge, Tabs, copyText, navigate, timeAgo, useHashPath, useToast } from '../ui'
@@ -12,7 +12,8 @@ import { RouteFeedback, canLabel, useRunLabels } from '../components/RouteFeedba
 import { Waterfall } from '../components/Viz'
 import { Timings } from '../components/Timings'
 import { AgentBadge, BackLink, PageBody } from '../components/app'
-import { CreatedFiles, RunFiles, filesOfTasks } from '../components/chat/CreatedFiles'
+import { CreatedFiles, FailedFiles, RunFiles, failedFileSteps, filesOfTasks, useResume } from '../components/chat/CreatedFiles'
+import { aboutTokens, duration, useCostConfirm } from '../components/chat/CostDialog'
 import { Assumptions, CaveatsBox, withoutAssumptions, withoutCaveats } from '../components/chat/Caveats'
 import { assumptionsOf, caveatsOf } from '../components/chat/Turn'
 import { StepPolicy } from '../components/StepPolicy'
@@ -65,6 +66,7 @@ export default function RunDetail({ params }: { params: Record<string, string> }
   const stored = useStoredRun(Number.isFinite(qid) ? qid : null, run?.done)
   // A client that learns timings from the `done` event may carry them on the run; otherwise use the stored record.
   const timings: RunTimings | undefined = (run as { timings?: RunTimings } | null)?.timings ?? stored.rec?.timings
+  const cost = useCostConfirm()
 
   if (!Number.isFinite(qid)) return <PageBody><Card><EmptyState icon="alert" title="Not a run id" text={`"${params.qid}" is not a number.`} action={<Button onClick={() => navigate('/runs')}>All runs</Button>} /></Card></PageBody>
   if (loading) return <DetailSkeleton />
@@ -84,14 +86,17 @@ export default function RunDetail({ params }: { params: Record<string, string> }
     setBusy('stop')
     try { await cancelRun(run.qid); toast.info(`Stopping run #${run.qid}…`) } catch (e) { toast.error(`Could not stop: ${errorText(e)}`) } finally { setBusy(null) }
   }
-  const replay = async () => {
+  // A costly replay comes back as 409 with an estimate (docs/PLAN-files-robust.md 5.4) and starts only on Continue.
+  const replayWith = async (body: AskBody): Promise<void> => {
     setBusy('replay')
     try {
-      const res = await ask({ query: run.text, source: 'you', engine: run.engine ?? 'none', ...(run.files.length ? { files: run.files } : {}) })
-      toast.success(`Replaying as run #${res.qid}`)
-      navigate('/runs/' + res.qid)
+      const r = await askOrConfirm(body)
+      if (r.kind === 'confirm') { cost.ask({ estimate: r.estimate, body, go: replayWith }); return }
+      toast.success(`Replaying as run #${r.res.qid}`)
+      navigate('/runs/' + r.res.qid)
     } catch (e) { toast.error(`Could not replay: ${errorText(e)}`) } finally { setBusy(null) }
   }
+  const replay = () => replayWith({ query: run.text, source: 'you', engine: run.engine ?? 'none', ...(run.files.length ? { files: run.files } : {}) })
   const tasks = run.order.map(t => run.tasks[t]).filter(Boolean)
 
   const agentNames = [...new Set(tasks.map(t => t.routed?.agent).filter(Boolean))].join(', ')
@@ -104,7 +109,10 @@ export default function RunDetail({ params }: { params: Record<string, string> }
           <div className="flex min-w-0 flex-1 flex-col gap-3">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-xs tabular-nums text-muted-foreground">Run #{run.qid}</span>
-              <StatusBadge status={status} />
+              {/* A run whose file step made no file gets the failure style, not "done". */}
+              {run.done && status === 'done' && (run.file_failed || stored.rec?.file_failed)
+                ? <Badge tone="bad" icon="error" title="The run finished, but its file step made no file">no file made</Badge>
+                : <StatusBadge status={status} />}
               <Badge tone="neutral">{run.source}</Badge>
               {run.engine && <Badge tone="neutral"><EngineIcon name={run.engine} size={12} />{run.engine}</Badge>}
               {run.plan && <Badge tone="neutral" icon="planner">{run.plan.planner} plan</Badge>}
@@ -139,6 +147,7 @@ export default function RunDetail({ params }: { params: Record<string, string> }
           </div>
         </header>
         <Suspects qid={run.qid} suspects={stored.rec?.suspects ?? run.suspects} />
+        {cost.dialog}
       </div>
 
       <div className="flex min-w-0 flex-col gap-4">
@@ -227,6 +236,7 @@ function AnswerTab({ run, rec }: { run: Run; rec: RunRecord | null }) {
   const shown = withoutAssumptions(withoutCaveats(answer, caveats), assumptions)
   const copy = async () => { (await copyText(answer)) ? toast.success('Answer copied') : toast.error('Could not copy') }
   const made = tasks.flatMap(t => filesOfTask(t, rec)).filter((f, i, all) => all.findIndex(x => x.id === f.id) === i)
+  const failed = run.done && failedFileSteps(tasks, rec?.checkpoints ?? run.checkpoints ?? []).length > 0
   return (
     <div className="grid items-start gap-4 lg:grid-cols-3">
       <Card className={tasks.length > 0 ? 'lg:col-span-2' : 'lg:col-span-3'} title="Answer" icon="answer" actions={answer ? <Button variant="ghost" size="sm" icon="copy" onClick={() => void copy()}>Copy</Button> : undefined}
@@ -243,6 +253,12 @@ function AnswerTab({ run, rec }: { run: Run; rec: RunRecord | null }) {
           <RunFiles files={made} primary={run.merged?.primary_file} />
         </Card>
       )}
+      {failed && (
+        <Card className="lg:col-span-2" title="File not made" icon="files" subtitle="What was already written is kept. Resume writes only what is missing.">
+          <FailedFiles tasks={tasks} checkpoints={rec?.checkpoints ?? run.checkpoints} />
+        </Card>
+      )}
+      <CostCard cost={rec?.cost ?? run.cost ?? null} checkpoints={rec?.checkpoints ?? []} className="lg:col-span-2" />
       {tasks.length > 0 && (
         <Card title="Steps" icon="subtasks" className={made.length > 0 ? 'lg:row-span-2 lg:row-start-1 lg:col-start-3' : undefined}>
           <ol className="m-0 flex list-none flex-col p-0">
@@ -263,6 +279,80 @@ function AnswerTab({ run, rec }: { run: Run; rec: RunRecord | null }) {
           </ol>
         </Card>
       )}
+    </div>
+  )
+}
+
+const num = (v: number | null | undefined) => (v == null ? '-' : Math.round(v).toLocaleString())
+const PHASE_TEXT: Record<CheckpointInfo['phase'], string> = { outline: 'outline', sections: 'writing sections', topup: 'top-up', render: 'render', done: 'done' }
+
+/** Estimated vs used model calls, tokens and time (the estimate is made before the run without a model call), and
+ *  the checkpoints of the run's file steps with Resume where something is missing. */
+function CostCard({ cost, checkpoints, className }: { cost: RunCost | null; checkpoints: CheckpointInfo[]; className?: string }) {
+  const est = cost?.estimate ?? null, act = cost?.actual ?? null
+  if (!est && !act && !checkpoints.length) return null
+  const rows: Array<[string, string, string]> = [
+    ['Model calls', est ? `${num(est.calls)}${est.range.calls[1] > est.calls ? `, up to ${num(est.range.calls[1])}` : ''}` : '-', num(act?.calls)],
+    ['Tokens in', est ? `about ${aboutTokens(est.tokens_in)}` : '-', num(act?.tokens_in)],
+    ['Tokens out', est ? `about ${aboutTokens(est.tokens_out)}` : '-', num(act?.tokens_out)],
+    ['Time', est ? duration(est.seconds) : '-', act ? duration(act.seconds) : '-'],
+  ]
+  return (
+    <Card className={className} title="Cost" icon="spend"
+      subtitle={est ? 'Estimated before the run without calling a model, beside what the run really used.' : 'What the run used.'}>
+      <div className="flex flex-col gap-4">
+        {(est || act) && (
+          <div className="overflow-x-auto">
+            <table className="w-full max-w-lg border-collapse text-[13px] tabular-nums">
+              <thead>
+                <tr className="text-xs text-muted-foreground">
+                  <th scope="col" className="py-1.5 pr-4 text-left font-medium"><span className="sr-only">Measure</span></th>
+                  <th scope="col" className="py-1.5 pr-4 text-right font-medium">Estimated</th>
+                  <th scope="col" className="py-1.5 text-right font-medium">Used</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(([label, e, a]) => (
+                  <tr key={label} className="border-t border-border">
+                    <th scope="row" className="py-1.5 pr-4 text-left font-normal text-muted-foreground">{label}</th>
+                    <td className="py-1.5 pr-4 text-right text-foreground">{e}</td>
+                    <td className="py-1.5 text-right text-foreground">{act ? a : (label === 'Model calls' ? 'not finished' : '-')}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {est?.engine_label && <p className="m-0 mt-2 text-xs text-muted-foreground">Estimated for {est.engine_label}.</p>}
+          </div>
+        )}
+        {checkpoints.length > 0 && (
+          <div className="flex flex-col gap-2">
+            <h3 className="m-0 text-[13px] font-semibold text-foreground">Checkpoints</h3>
+            <ul className="m-0 flex list-none flex-col gap-2 p-0">
+              {checkpoints.map(c => <li key={c.tid}><CheckpointRow c={c} /></li>)}
+            </ul>
+          </div>
+        )}
+      </div>
+    </Card>
+  )
+}
+
+function CheckpointRow({ c }: { c: CheckpointInfo }) {
+  const { start, busy, dialog } = useResume()
+  const unit = c.format === 'pptx' ? 'slides' : 'sections'
+  return (
+    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-border px-3 py-2 text-[13px]">
+      <span className="font-mono text-xs text-muted-foreground">step {c.tid}</span>
+      <span className="text-foreground">{c.format.toUpperCase()}, {PHASE_TEXT[c.phase] ?? c.phase}</span>
+      {c.planned > 0 && <span className="tabular-nums text-muted-foreground">{c.written} of {c.planned} {unit} written</span>}
+      <span className="tabular-nums text-muted-foreground">{(c.tokens_in + c.tokens_out).toLocaleString()} tokens spent</span>
+      {c.missing.length > 0 && <span className="min-w-0 basis-full text-xs text-muted-foreground [overflow-wrap:anywhere]">Missing: {c.missing.join(', ')}</span>}
+      {c.resumable && (
+        <Button variant="primary" size="sm" icon="replay" loading={busy} className="ml-auto" onClick={() => start({ qid: c.qid, tid: c.tid })}>
+          {busy ? 'Starting' : 'Resume'}
+        </Button>
+      )}
+      {dialog}
     </div>
   )
 }

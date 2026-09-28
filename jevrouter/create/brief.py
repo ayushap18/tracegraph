@@ -21,6 +21,8 @@ class Brief:
     diagram_kinds: list[str] = field(default_factory=list)   # subset of ('timeline','tree','flow')
     words: int | None = None               # "2000 words"
     capped: bool = False                   # pages or slides above MAX_PAGES/MAX_SLIDES were capped
+    design: str | None = None              # the design file's name, set by agents/create.make (FileBrief.design);
+                                           # describe() never mentions it: the model never sees styling
 
 
 MAX_PAGES = 40
@@ -49,7 +51,8 @@ DARK = re.compile(r'\bdark\s+(?:theme|mode|style|background|slides|colou?rs?)\b|
 WARM = re.compile(r'\bwarm\s+(?:theme|style|colou?rs?|tones?)\b', re.I)
 THEMES = {'mono': MONO, 'dark': DARK, 'warm': WARM}
 
-IMAGES = re.compile(r'\b(?:images?|photos?|photographs?|pictures?|figures?|illustrations?)\b', re.I)
+IMAGES = re.compile(r'\b(?:images?|photos?|photographs?|pictur(?:e|es|ed)|pictorial|illustrat(?:ion|ions|ed)|figures?|'
+                    r'visuals?)\b', re.I)
 WEB = re.compile(r'\b(?:from\s+the\s+(?:web|internet)|online|web|internet|wikimedia|commons|sourced|\w*sources?)\b', re.I)
 DIAGRAMS = re.compile(r'\b(?:diagrams?|flow\s?charts?|timelines?|hierarch(?:y|ies|ical)|tree\s+(?:diagram|chart|'
                       r'structure|view)s?|charts?|graphs?|mind\s?maps?|org(?:anisation|anization)?\s+charts?)\b', re.I)
@@ -219,6 +222,7 @@ def merge(query: Brief, step: Brief) -> Brief:
         diagram_kinds=list(dict.fromkeys([*query.diagram_kinds, *step.diagram_kinds])),
         words=query.words or step.words,
         capped=query.capped or step.capped,
+        design=query.design or step.design,
     )
 
 

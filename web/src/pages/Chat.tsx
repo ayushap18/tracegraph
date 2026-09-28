@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react'
-import { ask, cancelRun, chooseRun, deleteSession, errorText, getSession, listFiles, listSessions, uploadFile } from '../api'
-import type { AskBody, CreatedFile, FileInfo, RunRecord, SessionSummary } from '../protocol'
+import { askOrConfirm, cancelRun, chooseRun, deleteSession, errorText, getSession, listFiles, listSessions, uploadFile } from '../api'
+import type { AskBody, CreatedFile, FileInfo, ResumeResponse, RunRecord, SessionSummary } from '../protocol'
 import { useStore } from '../store'
 import { fromRecord, type Run } from '../useEventStream'
 import { Button, EmptyState, IconButton, Kbd, Skeleton, Spinner, buttonClass, navigate, timeAgo, useHashPath, useNow, useToast } from '../ui'
@@ -14,7 +14,8 @@ import { BotHead, Turn, UserMessage, answerOf } from '../components/chat/Turn'
 import { AnswerGroup, RetryMenu } from '../components/chat/AnswerGroup'
 import { CompareMenu, LengthCounter, ModeSwitch, PresetMenu, PresetRow, StyleMenu, tooLong } from '../components/chat/ChatOptions'
 import { AgentChip, MentionList, useMention } from '../components/chat/AgentMention'
-import { CreatedFiles, RunFiles, filesOfTasks } from '../components/chat/CreatedFiles'
+import { CreatedFiles, FailedFiles, FileActionsContext, RunFiles, filesOfTasks, resumedKeys, type FileActions } from '../components/chat/CreatedFiles'
+import { costRemembered, rememberCost, useCostConfirm } from '../components/chat/CostDialog'
 import {
   PRESETS, engineLabel, extrasOf, pickableEngines, readCompare, readOpts, researchReason, takeAgent, writeCompare, writeOpts,
   type ChatOpts, type Preset, type RunExtras,
@@ -52,6 +53,16 @@ const FILE_ONLY_AGENTS = ['document', 'data', 'sql']
 const TABLE_AGENT = 'sql'
 
 interface Attachment { key: string; name: string; size: number; status: 'uploading' | 'ready' | 'error'; info?: FileInfo; error?: string }
+
+// What one send put in the composer, so a 409 (confirm the cost) or an error can put it back exactly.
+interface Sent {
+  q: string; sid: string | null; attached: Attachment[]; ready: FileInfo[]; agent: string | null
+  mode: ChatOpts['mode']; optsMode: ChatOpts['mode']; style: ChatOpts['style']
+}
+
+// A name like DESIGN.md or brand-guide.json: when a file is asked for, the server may apply it as the look (colours and
+// fonts, by code, 0 tokens) instead of reading it as content (docs/PLAN-files-robust.md 4.2). Only a hint on the chip.
+const DESIGN_NAME = /(design|style|brand|theme|tokens)[^/]*\.(md|json|txt)$/i
 
 const fmtSize = (n: number) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`)
 
@@ -274,7 +285,60 @@ export default function Chat() {
     requestAnimationFrame(() => { const el = ta.current; if (el) { el.focus(); const i = at < 0 ? t.length : at; el.setSelectionRange(i, i) } })
   }
 
+  // Cost preflight (docs/PLAN-files-robust.md 6.2): a costly run comes back as 409 with an estimate and starts nothing.
+  // The composer is put back as it was and the dialog decides: Continue resends with confirm_cost, "Use X instead"
+  // resends on that engine, Cancel leaves the composer as it is.
+  const cost = useCostConfirm()
+  const rememberNew = useRef(false) // "Don't ask again" ticked in a chat that has no id yet
+
   const sendLock = useRef(false)
+  const dispatch = useCallback(async (body: AskBody, m: Sent) => {
+    if (sendLock.current) return
+    sendLock.current = true
+    setSending({ text: m.q, files: m.ready.map(f => f.name), agent: m.agent, engines: body.engines?.length ?? 0 })
+    setText('')
+    setFiles([])
+    setAgentPick(null)
+    const restore = () => {
+      setText(current => current || m.q)
+      setFiles(current => [...m.attached, ...current])
+      setAgentPick(current => current ?? m.agent)
+    }
+    try {
+      const r = await askOrConfirm(body)
+      if (r.kind === 'confirm') {
+        restore()
+        cost.ask({
+          estimate: r.estimate, body, go: (b: AskBody) => dispatch(b, m),
+          onRemember: () => { if (m.sid) rememberCost(m.sid); else rememberNew.current = true },
+        })
+        return
+      }
+      const res = r.res
+      const newSid = res.session_id ?? m.sid
+      if (rememberNew.current && newSid) { rememberCost(newSid); rememberNew.current = false }
+      const qids = res.qids?.length ? res.qids : [res.qid]
+      if (newSid) for (const qid of qids) mine.current.set(qid, newSid)
+      addExtras(qids.map((qid, i) => [qid, {
+        mode: m.mode, style: m.style, agent: m.agent, group_id: res.group_id ?? null, ...(qids.length > 1 ? { chosen: i === 0 } : {}),
+      }]))
+      for (const f of m.ready) knownFiles.current.set(f.id, f.name)
+      setSelQid(null)
+      if (newSid && newSid !== m.sid) {
+        writeOpts(newSid, { mode: m.optsMode, style: m.style }) // the new chat keeps the choices it was started with
+        setDetail({ id: newSid, title: m.q, runs: [] })
+        location.replace('#/?s=' + encodeURIComponent(newSid))
+      }
+      loadSessions()
+    } catch (e) {
+      toast.error(`Could not send: ${errorText(e)}`)
+      restore()
+    } finally {
+      sendLock.current = false
+      setSending(null)
+    }
+  }, [loadSessions, toast, addExtras, cost])
+
   const send = useCallback(async (raw: string, sid: string | null) => {
     if (sendLock.current || files.some(f => f.status === 'uploading')) return
     const q0 = raw.trim()
@@ -286,57 +350,40 @@ export default function Chat() {
     if (!q) { toast.error(`Add a question for @${agent}`); return }
     const engines = comparing ? comparePicks : []
     if (comparing && engines.length < 2) { toast.error('Pick at least 2 engines to compare, or turn Compare off'); return }
-    sendLock.current = true
-    const attached = files
     const ready = files.filter(f => f.status === 'ready' && f.info).map(f => f.info!)
-    setSending({ text: q, files: ready.map(f => f.name), agent, engines: engines.length })
-    setText('')
-    setFiles([])
-    setAgentPick(null)
     const body: AskBody = {
       query: q, source: 'chat', ...(sid ? { session_id: sid } : {}), ...(ready.length ? { files: ready.map(f => f.id) } : {}),
       ...(mode !== 'balanced' ? { mode } : {}), ...(opts.style !== 'default' ? { style: opts.style } : {}),
       ...(agent ? { agent } : {}), ...(engines.length ? { engines } : {}),
+      ...(costRemembered(sid) ? { confirm_cost: true } : {}),
     }
-    try {
-      const res = await ask(body)
-      const newSid = res.session_id ?? sid
-      const qids = res.qids?.length ? res.qids : [res.qid]
-      if (newSid) for (const qid of qids) mine.current.set(qid, newSid)
-      addExtras(qids.map((qid, i) => [qid, {
-        mode, style: opts.style, agent, group_id: res.group_id ?? null, ...(qids.length > 1 ? { chosen: i === 0 } : {}),
-      }]))
-      for (const f of ready) knownFiles.current.set(f.id, f.name)
-      setSelQid(null)
-      if (newSid && newSid !== sid) {
-        writeOpts(newSid, { mode: opts.mode, style: opts.style }) // the new chat keeps the choices it was started with
-        setDetail({ id: newSid, title: q, runs: [] })
-        location.replace('#/?s=' + encodeURIComponent(newSid))
-      }
-      loadSessions()
-    } catch (e) {
-      toast.error(`Could not send: ${errorText(e)}`)
-      setText(current => current || q)
-      setFiles(current => [...attached, ...current])
-      setAgentPick(current => current ?? agent)
-    } finally {
-      sendLock.current = false
-      setSending(null)
-    }
-  }, [files, loadSessions, toast, offered, agentPick, comparing, comparePicks, mode, opts, addExtras, limit])
+    await dispatch(body, { q, sid, attached: files, ready, agent, mode, optsMode: opts.mode, style: opts.style })
+  }, [files, toast, offered, agentPick, comparing, comparePicks, mode, opts, limit, dispatch])
 
   // "Try another engine": a new run for the same question, added to its answer group (not chosen until picked).
   const [retrying, setRetrying] = useState<number | null>(null)
   const retry = async (run: Run, engine: string) => {
     const x = extras[run.qid]
     const sid = run.session_id ?? sessionId
+    const body: AskBody = {
+      query: run.text, source: 'chat', retry_of: run.qid, engine, ...(sid ? { session_id: sid } : {}),
+      ...(x?.mode && x.mode !== 'balanced' ? { mode: x.mode } : {}), ...(x?.style && x.style !== 'default' ? { style: x.style } : {}),
+      ...(x?.agent ? { agent: x.agent } : {}), ...(costRemembered(sid) ? { confirm_cost: true } : {}),
+    }
+    await retryWith(run, body)
+  }
+  const retryWith = async (run: Run, body: AskBody): Promise<void> => {
+    const x = extras[run.qid]
+    const sid = run.session_id ?? sessionId
+    const engine = body.engine ?? ''
     setRetrying(run.qid)
     try {
-      const res = await ask({
-        query: run.text, source: 'chat', retry_of: run.qid, engine, ...(sid ? { session_id: sid } : {}),
-        ...(x?.mode && x.mode !== 'balanced' ? { mode: x.mode } : {}), ...(x?.style && x.style !== 'default' ? { style: x.style } : {}),
-        ...(x?.agent ? { agent: x.agent } : {}),
-      })
+      const r = await askOrConfirm(body)
+      if (r.kind === 'confirm') {
+        cost.ask({ estimate: r.estimate, body, go: (b: AskBody) => retryWith(run, b), ...(sid ? { onRemember: () => rememberCost(sid) } : {}) })
+        return
+      }
+      const res = r.res
       if (sid) mine.current.set(res.qid, sid)
       const gid = res.group_id ?? x?.group_id ?? null
       addExtras([
@@ -429,6 +476,19 @@ export default function Chat() {
     if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files)
   }
 
+  // Resume on a file card: the new run joins this chat, so follow it to the bottom.
+  // A file step some file in this chat was resumed from no longer offers Resume (the server refuses it too).
+  const resumed = useMemo(() => resumedKeys(turns.flatMap(r => filesOf(r))), [turns, filesOf])
+  const fileActions = useMemo<FileActions>(() => ({
+    rememberKey: sessionId, resumed,
+    onResumed: (res: ResumeResponse) => {
+      const sid = res.session_id ?? sidRef.current
+      if (sid) mine.current.set(res.qid, sid)
+      stick.current = true
+      setSelQid(null)
+    },
+  }), [sessionId, resumed])
+
   const title = sessionId ? (sessions?.find(s => s.id === sessionId)?.title || detail?.title || turns[0]?.text || 'Chat') : 'New chat'
   const empty = !sessionId && !sending
 
@@ -441,6 +501,7 @@ export default function Chat() {
   const engineOf = (r: Run) => ({ name: runEngine(r), label: engineLabel(store.engines, runEngine(r)) })
 
   return (
+    <FileActionsContext.Provider value={fileActions}>
     <div className={cn('relative grid h-full min-h-0 grid-cols-1 grid-rows-[minmax(0,1fr)] overflow-hidden bg-background',
       'lg:grid-cols-[260px_minmax(0,1fr)]', showTracePanel && 'xl:grid-cols-[260px_minmax(0,1fr)_380px]')}>
       <TopActions>
@@ -536,6 +597,7 @@ export default function Chat() {
                         engineLabel={run.engine ? engineLabel(store.engines, run.engine) : undefined} actions={actionsFor(run)}
                         onShowTrace={() => showTrace(run.qid)} />
                       {made.length > 0 && <RunFiles files={made} primary={run.merged?.primary_file} className="pl-[18px]" />}
+                      {run.done && <FailedFiles tasks={run.order.map(t => run.tasks[t]).filter(Boolean)} checkpoints={run.checkpoints} className="pl-[18px]" />}
                     </div>
                   )
                 }
@@ -548,6 +610,7 @@ export default function Chat() {
                       fileName={fileName} engineOf={engineOf} onShowTrace={showTrace} onChoose={qid => void choose(qid, group)} choosing={choosing}
                       actionsFor={actionsFor} />
                     {made.length > 0 && <CreatedFiles files={made} className="pl-[18px]" />}
+                    {group.filter(r => r.done).map(r => <FailedFiles key={r.qid} tasks={r.order.map(t => r.tasks[t]).filter(Boolean)} checkpoints={r.checkpoints} className="pl-[18px]" />)}
                   </div>
                 )
               })}
@@ -597,6 +660,12 @@ export default function Chat() {
                         : <Icon name={f.status === 'error' ? 'alert' : f.name.endsWith('.csv') ? 'file-csv' : f.name.endsWith('.json') ? 'file-json' : 'file-text'} size={14}
                           className={cn('shrink-0', f.status === 'error' ? 'text-destructive' : 'text-primary')} />}
                       <span className="min-w-0 max-w-[200px] truncate font-medium">{f.name}</span>
+                      {f.status === 'ready' && DESIGN_NAME.test(f.name) && (
+                        <span className="inline-flex shrink-0 items-center gap-0.5 rounded-sm bg-primary/10 px-1 text-[11px] font-medium text-primary"
+                          title="Looks like a design file. When you ask for a file, its colours and fonts are applied by code, which costs no tokens.">
+                          <Icon name="palette" size={11} />design
+                        </span>
+                      )}
                       <span className={cn('whitespace-nowrap text-xs tabular-nums', f.status === 'error' ? 'text-destructive' : 'text-muted-foreground')}>
                         {f.status === 'error' ? 'failed' : f.status === 'uploading' ? 'uploading' : f.info?.rows != null ? `${f.info.rows} rows` : fmtSize(f.size)}
                       </span>
@@ -665,7 +734,9 @@ export default function Chat() {
           )}
         </aside>
       )}
+      {cost.dialog}
     </div>
+    </FileActionsContext.Provider>
   )
 }
 

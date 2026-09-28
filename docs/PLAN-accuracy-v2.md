@@ -957,7 +957,8 @@ The lookup order:
   work, plus `suite_sha`.
 - **CI job `route-evals`**, on every PR with no secret: `pytest -q`, then
   `python -m jevrouter.evals --mode route --jev replay --gates evals/gates.json`. It fails on any gate, on `unrecorded
-  > 2%`, or on a suite_sha mismatch without a cassette refresh. The existing keyless live suite runs nightly
+  > 2%`, or on a route_sha mismatch without a cassette refresh (route_sha hashes only the cases route mode runs, so a
+  case added for cli or api engines alone doesn't need one). The existing keyless live suite runs nightly
   (`schedule`), only when `TYPESAFE_API_KEY` is set.
 - **Suite size.** `tests/test_evals_harness.py:109` replaces `180 <= len(cases) <= 260` with per-kind floors
   (single ≥ 120, multi_turn ≥ 30, file ≥ 60, judge ≥ 14, real-traffic ≥ 12) and a ceiling of 600.

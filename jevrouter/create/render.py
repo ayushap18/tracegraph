@@ -24,12 +24,79 @@ def theme_name(spec: dict, theme: str | None) -> str:
     return name if name in themes.THEMES else 'clean'
 
 
+def theme_for(spec: dict, name: str, paper: bool = False) -> dict:
+    """The theme dict a file is drawn with: the design file's (themes.resolve) when the spec carries one and no other
+    theme was asked for at render time, else the named theme (paper: the variant for white pages)."""
+    if spec.get('design') and name == theme_name(spec, None) and hasattr(themes, 'resolve'):
+        return themes.resolve(spec, paper=paper)
+    return themes.get(name, paper)
+
+
+def on_white(t: dict) -> dict:
+    """A design theme for pages that stay white (XLSX sheets): every text colour kept readable on white. A dark
+    design's light text is replaced (by the design's own dark background colour when it reads on white), and its
+    muted and heading colours are mixed toward black, so near-white text never turns into a saturated mid tone. The
+    roles changed are added to `nudged` and said in `design_notes`."""
+    if t.get('bg', 'FFFFFF') == 'FFFFFF':
+        return t
+    out = {**t, 'bg': 'FFFFFF', 'stripe': 'F3F4F6', 'code_bg': 'F3F4F6'}
+    dark = themes._lum(t['bg']) < 0.18
+    changed = []
+
+    def toward_black(c: str) -> str:
+        for i in range(1, 21):
+            cand = themes.mix(c, '000000', i * 0.05)
+            if themes.contrast(cand, 'FFFFFF') >= 4.5:
+                return cand
+        return '000000'
+    for k in ('text', 'muted', 'heading', 'accent'):
+        if themes.contrast(out[k], 'FFFFFF') >= 4.5:
+            continue
+        if k == 'text' and dark:
+            out[k] = t['bg'] if themes.contrast(t['bg'], 'FFFFFF') >= 4.5 else '1F2328'
+        elif k in ('muted', 'heading') and dark:
+            out[k] = toward_black(out[k])
+        else:
+            out[k] = themes.nudge(out[k], 'FFFFFF')
+        changed.append(k)
+    if themes.contrast(out['text'], out['stripe']) < 4.5:
+        out['stripe'] = out['code_bg'] = 'FFFFFF'
+    if changed:
+        names = [themes.ROLE_NAMES.get(k, k).lower() if i else themes.ROLE_NAMES.get(k, k)
+                 for i, k in enumerate(changed)]
+        said = names[0] if len(names) == 1 else ', '.join(names[:-1]) + ' and ' + names[-1]
+        out['nudged'] = list(dict.fromkeys([*(t.get('nudged') or []), *changed]))
+        out['design_notes'] = [*(t.get('design_notes') or []),
+                               f'Sheets stay white, so {said} {"was" if len(changed) == 1 else "were"} darkened to '
+                               f'stay readable on white.']
+    return out
+
+
+def sheet_theme(t: dict) -> dict:
+    """The theme an XLSX sheet is drawn with: on_white for a design with a coloured background."""
+    return on_white(t) if t.get('bg', 'FFFFFF') != 'FFFFFF' else t
+
+
+def hatched(t: dict) -> bool:
+    """Charts told apart by pattern, not colour (black and white, or a design with too few colours)."""
+    return bool(t.get('hatch', t.get('patterns')))
+
+
+def grey_images(t: dict) -> bool:
+    """Pictures greyscaled (black and white only)."""
+    return bool(t.get('grey_images', t.get('patterns')))
+
+
 def render(spec: dict, fmt: str, theme: str = 'clean') -> bytes:
     """The file for one format. The spec is normalized first (idempotent), so a stored raw spec renders directly."""
     if fmt not in FORMATS:
         raise SpecError('X1', f'Files are made as {", ".join(FORMATS)} only, not {str(fmt)[:12]!r}.')
     spec, _ = normalize(spec, fmt)
-    name = theme_name(spec, theme)
+    return _draw(spec, fmt, theme_name(spec, theme))
+
+
+def _draw(spec: dict, fmt: str, name: str) -> bytes:
+    """A normalized spec drawn in one format; a layout or library failure is an honest V1, never a crash."""
     try:
         data = {'pdf': _pdf, 'docx': _docx, 'pptx': _pptx, 'xlsx': _xlsx, 'md': _md}[fmt](spec, name)
     except SpecError:
@@ -241,9 +308,24 @@ def fit_box(size: tuple[int, int], max_w: float, max_h: float) -> tuple[float, f
     return w * s, h * s
 
 
-def body_font(spec: dict, fmt: str, name: str) -> font_mod.FontChoice:
-    """The font this file's body text uses: the one the brief asked for when it can be used (create/fonts.py)."""
+def body_font(spec: dict, fmt: str, name: str, t: dict | None = None) -> font_mod.FontChoice:
+    """The font this file's body text uses: the one the brief asked for when it can be used, else the design file's
+    font stack when it can be used here (create/fonts.py)."""
+    if t is not None and t.get('font_stack'):
+        return font_mod.resolve(spec.get('font'), fmt, theme=t)
     return font_mod.resolve(spec.get('font'), fmt, theme=name)
+
+
+font_choice = body_font  # _xlsx has a local named body_font
+
+
+def subject(text: str) -> str:
+    """F2, F3: the document's subject property holds at most 255 characters of the subtitle, cut at a word."""
+    text = str(text or '').replace('\n', ' ')
+    if len(text) <= 255:
+        return text
+    cut = text[:255]
+    return (cut[:cut.rfind(' ')] if cut.rfind(' ') > 120 else cut).rstrip(' ,;:')
 
 
 # ---------- PDF (reportlab platypus) ----------
@@ -400,7 +482,22 @@ class _Fonts:
         return self.bold if bold else self.regular
 
 
-def _pdf(spec: dict, name: str) -> bytes:
+MAX_PDF_HEADING = 120
+
+
+def _pdf(spec: dict, name: str, safe: bool = False) -> bytes:
+    """The PDF. `safe` is the retry after a LayoutError: table headers no longer repeat and are cut to 40 characters,
+    so a header row taller than a page can still be laid out."""
+    from reportlab.platypus.doctemplate import LayoutError
+    try:
+        return _pdf_once(spec, name, safe)
+    except LayoutError:
+        if safe:
+            raise
+        return _pdf_once(spec, name, True)
+
+
+def _pdf_once(spec: dict, name: str, safe: bool) -> bytes:
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_RIGHT
     from reportlab.lib.pagesizes import A4, letter
@@ -409,8 +506,8 @@ def _pdf(spec: dict, name: str) -> bytes:
     from reportlab.platypus import (BaseDocTemplate, Frame, Image, KeepTogether, PageBreak, PageTemplate, Paragraph,
                                     Preformatted, Spacer, Table, TableStyle)
 
-    t = themes.get(name)
-    fonts = _Fonts(t, body_font(spec, 'pdf', name))
+    t = theme_for(spec, name)
+    fonts = _Fonts(t, body_font(spec, 'pdf', name, t))
     c = {k: colors.HexColor('#' + t[k]) for k in ('bg', 'text', 'muted', 'heading', 'accent', 'header_bg',
                                                      'header_text', 'stripe', 'code_bg', 'border')}
     page = letter if spec.get('paper') == 'letter' else A4
@@ -457,16 +554,33 @@ def _pdf(spec: dict, name: str) -> bytes:
         return Paragraph(_markup(text), style, **kw)
 
     class Heading(Paragraph):
-        """A heading paragraph that also becomes a PDF outline entry (F1, A1)."""
+        """A heading paragraph that also becomes a PDF outline entry (F1, A1). reportlab builds the parts of a heading
+        it splits at a page end with (None, style, bulletText=..., frags=...): those pass straight through, and only the
+        first part keeps the outline entry."""
 
-        def __init__(self, text, style, level):
-            super().__init__(_markup(fonts.fit(text)[0]), style if not fonts.fit(text)[1] else ParagraphStyle(
-                style.name + '-u', parent=style, fontName=fonts.uni[1]))
+        def __init__(self, text, style, level=None, **kw):
+            if text is None or level is None:
+                super().__init__(text, style, **kw)
+                self.outline = None
+                return
+            if len(text) > MAX_PDF_HEADING:
+                text = _short(text, MAX_PDF_HEADING)
+            drawn, uni = fonts.fit(text)
+            if uni:
+                style = ParagraphStyle(style.name + '-u', parent=style, fontName=fonts.uni[1])
+            super().__init__(_markup(drawn), style, **kw)
             self.outline = (strip_emphasis(text), level)
+
+        def split(self, availWidth, availHeight):
+            parts = super().split(availWidth, availHeight)
+            for i, part in enumerate(parts):
+                if isinstance(part, Heading):
+                    part.outline = self.outline if i == 0 else None
+            return parts
 
     class Doc(BaseDocTemplate):
         def afterFlowable(self, flowable):
-            if isinstance(flowable, Heading):
+            if isinstance(flowable, Heading) and flowable.outline:
                 text, level = flowable.outline
                 key = f'h{id(flowable)}'
                 self.canv.bookmarkPage(key)
@@ -501,9 +615,9 @@ def _pdf(spec: dict, name: str) -> bytes:
         for gi, (g, widths) in enumerate(groups):
             if gi:
                 out.append(para(continued_note(cols, g, 1 if g[0] == 0 else 0), styles['summary']))
-            data = [[para(show(cols[j]), head) for j in g]]
+            data = [[para(_short(show(cols[j]), 40) if safe else show(cols[j]), head) for j in g]]
             data += [[para(show(r[j], formats[j]), num if is_num(r[j]) else cell) for j in g] for r in rows]
-            tbl = Table(data, colWidths=widths, repeatRows=1, hAlign='LEFT', splitInRow=1)
+            tbl = Table(data, colWidths=widths, repeatRows=0 if safe else 1, hAlign='LEFT', splitInRow=1)
             tbl.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), c['header_bg']),
                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [c['bg'], c['stripe']]),
@@ -560,7 +674,7 @@ def _pdf(spec: dict, name: str) -> bytes:
                 parts.append(KeepTogether([para(b['title'], styles['caption']), drawing, Spacer(1, 10)]))
             elif kind == 'image':
                 w, h = fit_box(image_size(b['asset']), width, (page[1] - 2 * margin) * 0.55)
-                pic = Image(image_data(b['asset'], bool(t.get('patterns'))), width=w, height=h)
+                pic = Image(image_data(b['asset'], grey_images(t)), width=w, height=h)
                 pic.hAlign = 'CENTER'
                 items = [pic]
                 if b.get('caption'):
@@ -585,7 +699,7 @@ def _pdf(spec: dict, name: str) -> bytes:
         story += heading
     buf = io.BytesIO()
     doc = Doc(buf, pagesize=page, leftMargin=margin, rightMargin=margin, topMargin=margin, bottomMargin=margin,
-              title=title, author=AUTHOR, subject=spec.get('subtitle') or '', creator=AUTHOR)
+              title=title, author=AUTHOR, subject=subject(spec.get('subtitle')), creator=AUTHOR)
     frame = Frame(margin, margin, width, page[1] - 2 * margin, id='body', leftPadding=0, rightPadding=0,
                   topPadding=0, bottomPadding=0)
     doc.addPageTemplates([PageTemplate(id='page', frames=[frame], onPage=decorate)])
@@ -604,7 +718,7 @@ def _pdf_chart(b: dict, t: dict, fonts: _Fonts, width: float):
     from reportlab.lib import colors
 
     text_c, palette = colors.HexColor('#' + t['text']), [colors.HexColor('#' + p) for p in t['palette']]
-    patterns = bool(t.get('patterns'))
+    patterns = hatched(t)
     if patterns:  # black and white: light fills under hatching, so the series differ by pattern, not colour
         palette = [colors.HexColor('#' + p) for p in ('FFFFFF', 'D9D9D9', 'FFFFFF', 'BFBFBF', 'FFFFFF', 'F2F2F2')]
     labels = [fonts.fit(_short(x, 18))[0] for x in b['labels']]
@@ -776,14 +890,25 @@ def _docx(spec: dict, name: str) -> bytes:
     from docx.oxml.ns import qn
     from docx.shared import Cm, Pt, RGBColor
 
-    t = themes.get(name, paper=True)
-    choice = body_font(spec, 'docx', name)
+    t = theme_for(spec, name, paper=True)
+    choice = body_font(spec, 'docx', name, t)
     if choice.requested:  # the font the brief named, by name (Word draws it where it is installed)
         t = {**t, 'font': choice.used, 'heading_font': choice.used}
     doc = Document()
     rgb = {k: RGBColor(*_rgb(t[k])) for k in ('text', 'muted', 'heading', 'accent', 'header_text')}
     cp = doc.core_properties
-    cp.title, cp.subject, cp.author, cp.last_modified_by = spec['title'], spec.get('subtitle') or '', AUTHOR, AUTHOR
+    cp.title, cp.subject, cp.author, cp.last_modified_by = spec['title'], subject(spec.get('subtitle')), AUTHOR, AUTHOR
+    if t.get('bg', 'FFFFFF') != 'FFFFFF':  # a design's page colour: the document background, shown on screen
+        page_bg = OxmlElement('w:background')
+        page_bg.set(qn('w:color'), t['bg'])
+        doc.element.insert(0, page_bg)
+        settings = doc.settings.element
+        show_bg = OxmlElement('w:displayBackgroundShape')
+        zoom = settings.find(qn('w:zoom'))
+        if zoom is not None:
+            zoom.addnext(show_bg)
+        else:
+            settings.insert(0, show_bg)
     cp.comments = 'Created by TraceGraph'
     for sec in doc.sections:
         if spec.get('paper') != 'letter':
@@ -954,7 +1079,7 @@ def _docx(spec: dict, name: str) -> bytes:
                 doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
             elif kind == 'image':
                 w, h = fit_box(image_size(b['asset']), 17, 12)
-                doc.add_picture(image_data(b['asset'], bool(t.get('patterns'))), width=Cm(w))
+                doc.add_picture(image_data(b['asset'], grey_images(t)), width=Cm(w))
                 doc.inline_shapes[-1]._inline.docPr.set('descr', (b.get('caption') or b['credit'])[:1000])
                 doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
                 if b.get('caption'):
@@ -985,8 +1110,8 @@ def _pptx(spec: dict, name: str) -> bytes:
 
     from pptx.enum.dml import MSO_LINE_DASH_STYLE, MSO_PATTERN
 
-    t = themes.get(name)
-    choice = body_font(spec, 'pptx', name)
+    t = theme_for(spec, name)
+    choice = body_font(spec, 'pptx', name, t)
     if choice.requested:
         t = {**t, 'font': choice.used, 'heading_font': choice.used}
     rgb = {k: RGBColor(*_rgb(t[k])) for k in ('bg', 'text', 'muted', 'heading', 'accent', 'header_bg', 'header_text',
@@ -995,7 +1120,7 @@ def _pptx(spec: dict, name: str) -> bytes:
     prs = Presentation()
     prs.slide_width, prs.slide_height = Inches(SLIDE_W), Inches(SLIDE_H)  # 16:9 (F3)
     prs.core_properties.title, prs.core_properties.author = spec['title'], AUTHOR
-    prs.core_properties.subject = spec.get('subtitle') or ''
+    prs.core_properties.subject = subject(spec.get('subtitle'))
     margin, top, body_h = 0.6, 1.55, SLIDE_H - 1.55 - 0.45
     body_w = SLIDE_W - 2 * margin
 
@@ -1120,13 +1245,13 @@ def _pptx(spec: dict, name: str) -> bytes:
                       MSO_LINE_DASH_STYLE.DASH_DOT, MSO_LINE_DASH_STYLE.SQUARE_DOT, MSO_LINE_DASH_STYLE.LONG_DASH]
             for i, s in enumerate(plot.series):
                 if b['kind'] == 'line':
-                    s.format.line.color.rgb = rgb['text'] if t.get('patterns') else palette[i % len(palette)]
-                    if t.get('patterns'):
+                    s.format.line.color.rgb = rgb['text'] if hatched(t) else palette[i % len(palette)]
+                    if hatched(t):
                         s.format.line.dash_style = dashes[i % len(dashes)]
                     s.marker.style = markers[i % len(markers)]
                     s.marker.format.fill.solid()
-                    s.marker.format.fill.fore_color.rgb = rgb['text'] if t.get('patterns') else palette[i % len(palette)]
-                elif t.get('patterns'):  # black and white: hatch patterns, outlined
+                    s.marker.format.fill.fore_color.rgb = rgb['text'] if hatched(t) else palette[i % len(palette)]
+                elif hatched(t):  # black and white: hatch patterns, outlined
                     s.format.fill.patterned()
                     s.format.fill.pattern = patterns[i % len(patterns)]
                     s.format.fill.fore_color.rgb = rgb['text']
@@ -1170,7 +1295,7 @@ def _pptx(spec: dict, name: str) -> bytes:
         x, y, w, h = box
         room = 0.45 + (0.45 if b.get('caption') else 0)
         pw, ph = fit_box(image_size(b['asset']), w, h - room)
-        pic = slide.shapes.add_picture(image_data(b['asset'], bool(t.get('patterns'))), Inches(x + (w - pw) / 2),
+        pic = slide.shapes.add_picture(image_data(b['asset'], grey_images(t)), Inches(x + (w - pw) / 2),
                                        Inches(y), Inches(pw), Inches(ph))
         pic.name = 'Image'
         pic._element.nvPicPr.cNvPr.set('descr', (b.get('caption') or b['credit'])[:1000])
@@ -1304,14 +1429,14 @@ def _xlsx(spec: dict, name: str) -> bytes:
 
     from openpyxl.drawing.fill import ColorChoice, PatternFillProperties
 
-    t = themes.get(name, paper=True)
-    choice = font_mod.resolve(spec.get('font'), 'xlsx', theme=name)
-    if choice.requested:
-        t = {**t, 'font': choice.used}
+    t = sheet_theme(theme_for(spec, name, paper=True))  # sheets stay white: a design's text kept readable on white
+    choice = font_choice(spec, 'xlsx', name, t)
+    if choice.requested or t.get('font_stack'):
+        t = {**t, 'font': choice.used or t['font']}
     wb = Workbook()
     wb.remove(wb.active)
     wb.properties.title, wb.properties.creator = spec['title'], AUTHOR
-    wb.properties.subject = spec.get('subtitle') or ''
+    wb.properties.subject = subject(spec.get('subtitle'))
     head_font = Font(bold=True, color=t['header_text'], name=t['font'])
     head_fill = PatternFill('solid', fgColor=t['header_bg'])
     body_font = Font(name=t['font'], color=t['text'], size=11)
@@ -1354,12 +1479,12 @@ def _xlsx(spec: dict, name: str) -> bytes:
             for i, s in enumerate(ch.series):
                 color = t['palette'][i % len(t['palette'])]
                 if kind == 'line':
-                    s.graphicalProperties.line.solidFill = t['text'] if t.get('patterns') else color
-                    if t.get('patterns'):
+                    s.graphicalProperties.line.solidFill = t['text'] if hatched(t) else color
+                    if hatched(t):
                         s.graphicalProperties.line.prstDash = dash[i % len(dash)]
                     s.marker = Marker(symbol=markers[i % len(markers)], size=7)
-                    s.marker.graphicalProperties.solidFill = t['text'] if t.get('patterns') else color
-                elif t.get('patterns'):  # black and white: hatch patterns, outlined
+                    s.marker.graphicalProperties.solidFill = t['text'] if hatched(t) else color
+                elif hatched(t):  # black and white: hatch patterns, outlined
                     s.graphicalProperties.pattFill = PatternFillProperties(
                         prst=hatch[i % len(hatch)], fgClr=ColorChoice(srgbClr=t['text']), bgClr=ColorChoice(srgbClr=t['bg']))
                     s.graphicalProperties.line.solidFill = t['text']
@@ -1542,3 +1667,160 @@ def _md(spec: dict, name: str) -> bytes:
                     out.append(f'*Figure: {_md_line(b["caption"])}*')
                 out.append(_md_escape(b['credit']))
     return ('\n\n'.join(out) + '\n').encode('utf-8')
+
+
+# ---------- render_safe: a section that breaks the layout never costs the whole file (V11) ----------
+
+SAFE_RENDERS = 40  # renders spent finding the sections that fail, at most
+FORMAT_NAMES = {'pdf': 'PDF', 'docx': 'Word', 'pptx': 'PowerPoint', 'xlsx': 'Excel', 'md': 'Markdown'}
+_WORD = re.compile(r'\S{61,}')
+
+
+def _flat(text: str) -> str:
+    """Text for a plain-text retry: no emphasis markup, and words over 60 characters broken so any layout can wrap them."""
+    return _WORD.sub(lambda m: ' '.join(m.group(0)[i:i + 60] for i in range(0, len(m.group(0)), 60)),
+                     strip_emphasis(str(text or '')))
+
+
+def plain_section(sec: dict) -> dict:
+    """A section as plain text: every block becomes paragraphs and bullets (tables as bullets of "column: value"
+    pairs, charts and diagrams as their title and values), with no pictures."""
+    blocks = []
+
+    def para(text):
+        text = _flat(text).strip()
+        if text:
+            blocks.append({'type': 'paragraph', 'text': text})
+
+    def bullets(items, ordered=False):
+        items = [x for x in (_flat(i).strip() for i in items) if x]
+        if items:
+            blocks.append({'type': 'bullets', 'items': items[:200], 'ordered': ordered})
+    for b in sec.get('blocks') or []:
+        t = b.get('type')
+        if t == 'paragraph':
+            para(b['text'])
+        elif t == 'bullets':
+            bullets(b['items'], bool(b.get('ordered')))
+        elif t == 'quote':
+            para(f'"{b["text"]}"' + (f' ({b["by"]})' if b.get('by') else ''))
+        elif t == 'code':
+            bullets([ln for ln in b['text'].split('\n') if ln.strip()])
+        elif t == 'table':
+            if b.get('title'):
+                para(b['title'])
+            fm = formats_of(b)
+            bullets(['; '.join(f'{show(c)}: {show(v, fm[j])}' for j, (c, v) in enumerate(zip(b['columns'], r))
+                               if v is not None) for r in b['rows']])
+        elif t == 'chart':
+            para(b.get('title') or '')
+            bullets([f'{lab}: ' + ', '.join(show(s['values'][i]) for s in b['series'] if i < len(s['values']))
+                      for i, lab in enumerate(b['labels'])])
+        elif t in DIAGRAMS:
+            para(b.get('title') or '')
+            try:
+                cols, rows = diagram.table_of(b)
+                bullets([' : '.join(str(x) for x in r if x) for r in rows])
+            except Exception:
+                bullets(diagram.labels_of(b) if b.get('events') or b.get('nodes') else [])
+        elif t == 'image':
+            para(' '.join(x for x in (b.get('caption'), b.get('credit')) if x))
+    out = {**sec, 'heading': _flat(sec.get('heading') or ''), 'blocks': blocks}
+    if not out['heading'] and not blocks:
+        out['heading'] = 'Section'
+    return out
+
+
+def _plain_fonts(spec: dict) -> dict:
+    """The spec with built-in fonts only: no requested font, no design font stack (colours stay)."""
+    out = {k: v for k, v in spec.items() if k != 'font'}
+    if isinstance(out.get('design'), dict):
+        out['design'] = {**out['design'], 'heading_font': None, 'body_font': None, 'mono_font': None}
+    return out
+
+
+def render_safe(spec: dict, fmt: str, theme: str = 'clean') -> tuple[bytes, list]:
+    """render(), and on any failure but X1, X3 or X6: (1) render sections alone to find the ones that fail (at most
+    40 renders), (2) retry those as plain text with built-in fonts, (3) leave out what still fails. Returns the bytes
+    and the V11 result ('fix', naming each section); the result carries the spec actually drawn as `.rendered`, which
+    verify() reads. Raises SpecError('V1') only when a text-only file of the whole spec also fails."""
+    from .rules import RuleResult
+    if fmt not in FORMATS:
+        raise SpecError('X1', f'Files are made as {", ".join(FORMATS)} only, not {str(fmt)[:12]!r}.')
+    norm, _ = normalize(spec, fmt)
+    name = theme_name(norm, theme)
+
+    def result(ok: bool, note: str, drawn: dict) -> list:
+        r = RuleResult('V11', 'fix', ok, note)
+        r.rendered = drawn
+        return [r]
+    try:
+        return _draw(norm, fmt, name), result(True, 'every section laid out', norm)
+    except SpecError as e:
+        if e.rule_id in ('X1', 'X3', 'X6'):
+            raise
+        first = e
+    sections = norm['sections']
+    budget = [SAFE_RENDERS]
+
+    def works(secs: list[dict], base: dict = norm) -> bool:
+        budget[0] -= 1
+        try:
+            _draw({**base, 'sections': secs}, fmt, name)
+            return True
+        except SpecError as e:
+            if e.rule_id in ('X1', 'X3', 'X6'):
+                raise
+            return False
+
+    def failing(idx: list[int]) -> list[int]:
+        if not idx:
+            return []
+        if budget[0] <= 0:
+            return idx
+        if works([sections[i] for i in idx]):
+            return []
+        if len(idx) == 1:
+            return idx
+        mid = len(idx) // 2
+        return failing(idx[:mid]) + failing(idx[mid:])
+    bad = failing(list(range(len(sections)))) if len(sections) > 1 else list(range(len(sections)))
+    kept, as_text, left_out = list(sections), [], []
+    plain_base = _plain_fonts(norm)
+    for i in bad:
+        ps = plain_section(sections[i])
+        if budget[0] > -len(sections) and works([ps], plain_base):
+            kept[i] = ps
+            as_text.append(i)
+        else:
+            kept[i] = None
+            left_out.append(i)
+    what = 'slide' if fmt == 'pptx' else 'section'
+    label = lambda i: f'{what} {i + 1}' + (f' ({_short(sections[i]["heading"], 60)})' if sections[i]['heading']  # noqa: E731
+                                           else '')
+    notes = []
+    if as_text:
+        notes.append(f'{", ".join(label(i) for i in as_text)} could not be laid out in {FORMAT_NAMES[fmt]} and '
+                     f'{"is" if len(as_text) == 1 else "are"} shown as plain text')
+    if left_out:
+        notes.append(f'{", ".join(label(i) for i in left_out)} could not be laid out even as plain text and '
+                     f'{"was" if len(left_out) == 1 else "were"} left out')
+    base = plain_base if as_text else norm
+    drawn = {**base, 'sections': [s for s in kept if s is not None]}
+    if drawn['sections']:
+        try:
+            data = _draw(drawn, fmt, name)
+            return data, result(False, '; '.join(notes) or first.message, drawn)
+        except SpecError as e:
+            if e.rule_id in ('X1', 'X3', 'X6'):
+                raise
+    # the whole file as plain text, with built-in fonts
+    drawn = {**plain_base, 'sections': [plain_section(s) for s in sections]}
+    try:
+        data = _draw(drawn, fmt, name)
+    except SpecError as e:
+        if e.rule_id in ('X1', 'X3', 'X6', 'L4'):
+            raise
+        raise SpecError('V1', f'The {fmt.upper()} file could not be laid out, even as plain text ({first.message})')
+    return data, result(False, f'the file could not be laid out in {FORMAT_NAMES[fmt]} ({first.message[:120]}), so '
+                               f'every {what} is shown as plain text', drawn)

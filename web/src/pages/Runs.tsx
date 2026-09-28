@@ -187,7 +187,9 @@ export default function Runs() {
             <TableBody>
               {rows.map(r => {
                 const agents = [...new Set(r.order.map(t => r.tasks[t]?.routed?.agent).filter((a): a is string => !!a))]
-                const st = r.done ? r.status : 'running'
+                // A run whose file step made no file is shown as a failure, not a success.
+                const st = r.done ? (r.status === 'done' && r.file_failed ? 'error' : r.status) : 'running'
+                const stLabel = r.done && r.status === 'done' && r.file_failed ? 'no file made' : undefined
                 const when = timeAgo(r.at, now)
                 return (
                   <TableRow key={r.qid} className="cursor-pointer border-border hover:bg-subtle/60 focus-within:bg-subtle/60"
@@ -207,14 +209,14 @@ export default function Runs() {
                       </div>
                       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground lg:hidden">
                         <span className="md:hidden">{r.source}</span>
-                        <StatusDot status={st} className="text-xs md:hidden" />
+                        <StatusDot status={st} label={stLabel} className="text-xs md:hidden" />
                         <span className="tabular-nums md:hidden">{r.done ? secs(r.total_ms) : '…'}</span>
                         <span className="tabular-nums" title={new Date(r.at * 1000).toLocaleString()}>{when}</span>
                         {!!r.suspects?.length && <span className="inline-flex items-center gap-1 text-warn lg:hidden"><Icon name="flag" size={12} />{r.suspects.length} suspect</span>}
                       </div>
                     </TableCell>
                     <TableCell className={COL.source}><Badge tone="neutral">{r.source}</Badge></TableCell>
-                    <TableCell className={COL.status}><StatusDot status={st} /></TableCell>
+                    <TableCell className={COL.status}><StatusDot status={st} label={stLabel} /></TableCell>
                     <TableCell className={COL.engine}><EngineBadge name={r.engine} /></TableCell>
                     <TableCell className={COL.agents}>
                       <span className="flex items-center gap-1">
