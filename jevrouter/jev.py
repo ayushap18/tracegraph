@@ -11,6 +11,14 @@ UNSAFE = 'The query asks for help with something harmful, illegal, sexual, or ha
 # and hard ones to the strongest at high effort.
 HARD = ('How much reasoning, expertise or writing does a good answer to this request need? A greeting, a lookup or a '
         'one-line fact is easy; a report, working code, a multi-step analysis or a careful comparison is hard.')
+# Accuracy v2 (docs/PLAN-accuracy-v2.md A3, A5): what a request needs that no agent here has, asked in the same route
+# call, so they cost input tokens but no extra call. The decision policy (jevrouter/policy.py) reads them.
+SIGNALS = {
+  'live':      'The request needs live or real-time data (a current price, a score, a status right now) or a prediction of the future.',
+  'action':    'The request asks the assistant to do something in the world (book, buy, send, order, call, schedule, remind, pay).',
+  'personal':  "The request needs the user's own private information (their account, location, calendar, contacts, files not attached) or another private person's details.",
+  'described': 'The request names a place, currency, number or person only by a description that must be looked up first (e.g. "the capital of Switzerland", "Shakespeare\'s birthplace").',
+}
 
 
 def questions(agents: dict) -> dict:
@@ -20,6 +28,7 @@ def questions(agents: dict) -> dict:
         'hard': Score(instructions=HARD, criteria=['Easy', 'Moderate', 'Hard']),
         'unsafe': Noul(instructions=UNSAFE),
         'clear': Noul(instructions='The query is clear enough to answer without asking a follow-up question.'),
+        **{name: Noul(instructions=text) for name, text in SIGNALS.items()},
     }
 
 
@@ -75,7 +84,8 @@ MULTI = {'multi': Noul(instructions='The query contains two or more separate req
 def decide(route, unsafe: float, clear: float) -> tuple[str, str]:
     if unsafe >= BLOCK_AT:
         return 'blocked', f'Jev flagged it as unsafe ({unsafe:.0%})'
-    if clear < MIN_CLEAR:
+    # "hey!" reads as unclear, but small talk needs no more detail: a chat pick is exempt from the clarity veto (A6)
+    if clear < MIN_CLEAR and route.choice != 'chat':
         return 'clarify', f'unclear ({clear:.0%})'
     if route.confidence < MIN_CONFIDENCE:
         return 'clarify', f'low confidence ({route.confidence:.0%})'
@@ -90,7 +100,9 @@ async def route_one(jev, text: str, agents: dict) -> dict:
     r = await jev.system_one(text, questions(crit))
     jev_ms = round((time.perf_counter() - t0) * 1000)
     route, urgency, unsafe, clear = (r.answers[k] for k in ('route', 'urgency', 'unsafe', 'clear'))
-    hard = r.answers.get('hard') if hasattr(r.answers, 'get') else None
+    get = r.answers.get if hasattr(r.answers, 'get') else (lambda k: None)
+    hard = get('hard')
+    signals = {name: round(float(a.noul), 2) for name in SIGNALS if (a := get(name)) is not None}
     agent, reason = decide(route, unsafe.noul, clear.noul)
     return {
         'agent': agent, 'pick': route.choice, 'reason': reason,
@@ -99,6 +111,7 @@ async def route_one(jev, text: str, agents: dict) -> dict:
         'jev_ms': jev_ms, 'model': r.model, 'input_tokens': getattr(r.usage, 'input_tokens', 0) or 0,
         'examples': any(isinstance(c, dict) for c in crit.values()),
         'hard': round(min(1.0, max(0.0, hard.score)), 2) if hard is not None else None,  # not a routed field: the pipeline reads it (A5)
+        'signals': signals,  # {live, action, personal, described}; empty when Jev gave none
     }
 
 

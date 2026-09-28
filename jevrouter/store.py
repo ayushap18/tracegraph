@@ -365,13 +365,18 @@ def file_meta(r) -> dict:
     return m
 
 
+# docs/PLAN-accuracy-v2.md C8: what the create agent adds to a file's meta, returned when the file has it
+CREATED_V2 = ('brief', 'role', 'theme', 'font_used', 'diagrams', 'images', 'credits', 'phases')
+
+
 def created_meta(r) -> dict:
     """A created row as a CreatedFile (web/src/protocol.ts)."""
     meta = json.loads(r['meta'] or '{}')
     return {'id': r['id'], 'name': r['name'], 'format': r['format'], 'size': r['size'], 'created': r['created'],
             'qid': r['qid'], 'title': meta.get('title', ''), 'pages': meta.get('pages'), 'slides': meta.get('slides'),
             'sheets': meta.get('sheets'), 'tokens': r['tokens'] or 0, 'source': meta.get('source', 'llm'),
-            'from_id': meta.get('from_id'), 'rules': json.loads(r['rules'] or '[]'), 'sandbox': None}
+            'from_id': meta.get('from_id'), 'rules': json.loads(r['rules'] or '[]'), 'sandbox': None,
+            **{k: meta[k] for k in CREATED_V2 if k in meta}}
 
 
 def eval_row(r, cases: bool) -> dict:

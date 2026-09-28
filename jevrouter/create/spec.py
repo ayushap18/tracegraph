@@ -10,17 +10,22 @@ import math
 import re
 import unicodedata
 
+from . import diagram
 from .rules import RuleResult, SpecError
 
 FORMATS = ('pdf', 'docx', 'pptx', 'xlsx', 'md')
 EXTENSIONS = {f: '.' + f for f in FORMATS}
-BLOCKS = ('paragraph', 'bullets', 'table', 'chart', 'quote', 'code')
+# timeline, tree and flow are native diagrams; a figure is a web image the create agent looks up (create/assets.py) and
+# turns into the internal `image` block, which the model can never write (strip_internal)
+BLOCKS = ('paragraph', 'bullets', 'table', 'chart', 'quote', 'code', 'timeline', 'tree', 'flow', 'figure', 'page_break',
+          'image')
+DIAGRAMS = diagram.KINDS
 CHART_KINDS = ('bar', 'line', 'pie')
 CHART_ALIASES = {'column': 'bar', 'columns': 'bar', 'bars': 'bar', 'histogram': 'bar', 'area': 'line', 'lines': 'line',
                  'scatter': 'line', 'donut': 'pie', 'doughnut': 'pie'}
-THEMES = ('clean', 'dark', 'warm')
+THEMES = ('clean', 'dark', 'warm', 'mono')
 
-MAX_SPEC_BYTES = 60_000
+MAX_SPEC_BYTES = 200_000  # a 40-page document (create/longdoc.py) fits; table rows are limited by L2 instead
 MAX_SECTIONS = 40
 MAX_BLOCKS = 30
 MAX_TITLE = 120
@@ -58,18 +63,32 @@ DOCSPEC_SCHEMA = _obj({
                       'type': 'array', 'items': {'anyOf': [{'type': 'number'}, {'type': 'null'}]}}})}}),
             _obj({'type': {'type': 'string', 'enum': ['quote']}, 'text': _STR, 'by': _STR}),
             _obj({'type': {'type': 'string', 'enum': ['code']}, 'lang': _STR, 'text': _STR}),
+            _obj({'type': {'type': 'string', 'enum': ['timeline']}, 'title': _STR,
+                  'events': {'type': 'array', 'items': _obj({'date': _STR, 'label': _STR})}}),
+            _obj({'type': {'type': 'string', 'enum': ['tree']}, 'title': _STR,
+                  'nodes': {'type': 'array', 'items': _obj({'id': _STR, 'parent': _STR, 'label': _STR})}}),
+            _obj({'type': {'type': 'string', 'enum': ['flow']}, 'title': _STR,
+                  'nodes': {'type': 'array', 'items': _obj({'id': _STR, 'label': _STR})},
+                  'edges': {'type': 'array', 'items': _obj({'from': _STR, 'to': _STR, 'label': _STR})}}),
+            _obj({'type': {'type': 'string', 'enum': ['figure']}, 'query': _STR, 'caption': _STR}),
+            _obj({'type': {'type': 'string', 'enum': ['page_break']}}),
         ]}},
     })},
 })
 
 # Keys each object may carry after normalize (anything else is dropped).
-KEYS = {'spec': ('title', 'subtitle', 'format', 'theme', 'paper', 'sections'),
+KEYS = {'spec': ('title', 'subtitle', 'format', 'theme', 'paper', 'font', 'sections'),
         'section': ('heading', 'level', 'blocks', 'notes'),
         'paragraph': ('type', 'text'), 'bullets': ('type', 'items', 'ordered'),
         'table': ('type', 'title', 'columns', 'rows', 'formats'), 'chart': ('type', 'kind', 'title', 'labels', 'series'),
-        'quote': ('type', 'text', 'by'), 'code': ('type', 'lang', 'text')}
+        'quote': ('type', 'text', 'by'), 'code': ('type', 'lang', 'text'), 'timeline': ('type', 'title', 'events'),
+        'tree': ('type', 'title', 'nodes'), 'flow': ('type', 'title', 'nodes', 'edges'),
+        'figure': ('type', 'query', 'caption'), 'page_break': ('type',), 'image': ('type', 'asset', 'caption', 'credit')}
 REQUIRED = {'paragraph': ('text',), 'bullets': ('items',), 'table': ('columns', 'rows'),
-            'chart': ('labels', 'series'), 'quote': ('text',), 'code': ('text',)}
+            'chart': ('labels', 'series'), 'quote': ('text',), 'code': ('text',), 'timeline': ('events',),
+            'tree': ('nodes',), 'flow': ('nodes',), 'figure': (), 'page_break': (), 'image': ('asset',)}
+MAX_FIGURE_QUERY, MAX_CAPTION, MAX_CREDIT = 100, 200, 400
+ASSET_ID = re.compile(r'^[0-9a-f]{64}$')
 # S7: a spec asks for nothing outside itself; keys like these mean "go and fetch".
 FETCH_KEYS = {'url', 'urls', 'src', 'href', 'image', 'images', 'img', 'fetch', 'include', 'import', 'link', 'links',
               'remote', 'file', 'path'}
@@ -397,7 +416,8 @@ def _check_block(b, where) -> str:
     missing = [k for k in REQUIRED[t] if b.get(k) is None]
     if missing:
         raise SpecError('S1', f'{where} ({t}) is missing {", ".join(missing)}.')
-    lists = {'bullets': ('items',), 'table': ('columns', 'rows'), 'chart': ('labels', 'series')}.get(t, ())
+    lists = {'bullets': ('items',), 'table': ('columns', 'rows'), 'chart': ('labels', 'series'), 'timeline': ('events',),
+             'tree': ('nodes',), 'flow': ('nodes',)}.get(t, ())
     for k in lists:
         if not isinstance(b[k], list):
             raise SpecError('S1', f'{where} ({t}): {k} must be a list.')
@@ -428,6 +448,19 @@ def _block(b: dict, t: str, res: dict) -> dict | None:
         text = clean_chars(b['text']).replace('\r\n', '\n').expandtabs(4).strip('\n')
         lang = re.sub(r'[^\w+#.-]', '', str(b.get('lang') or ''))[:20]
         return {'type': t, 'lang': lang, 'text': text} if text.strip() else None
+    if t in DIAGRAMS:
+        if t == 'flow' and not isinstance(b.get('edges') if b.get('edges') is not None else [], list):
+            raise SpecError('S1', 'A flow diagram: edges must be a list.')
+        return diagram.clean_block(b, lambda x: plain(x, emphasis=False).replace('\n', ' '),
+                                   lambda rid, note: _note(res, rid, 'fix', note))
+    if t == 'page_break':
+        return {'type': t}
+    if t == 'figure':
+        query = plain(b.get('query') or '', emphasis=False).replace('\n', ' ')[:MAX_FIGURE_QUERY]
+        caption = plain(b.get('caption') or '', emphasis=False).replace('\n', ' ')[:MAX_CAPTION]
+        return {'type': t, 'query': query or caption[:MAX_FIGURE_QUERY], 'caption': caption} if query or caption else None
+    if t == 'image':
+        return _image(b)
     if t == 'table':
         cols = [plain(c, emphasis=False) for c in b['columns']]
         rows = [r if isinstance(r, list) else [r] for r in b['rows']]
@@ -488,6 +521,34 @@ def _block(b: dict, t: str, res: dict) -> dict | None:
         title = ' and '.join(s['name'] for s in series[:2])
         _note(res, 'A3', 'warn', 'a chart without a title got one from its series names')
     return {'type': 'chart', 'kind': kind, 'title': title, 'labels': labels, 'series': series}
+
+
+def _image(b: dict) -> dict | None:
+    """X6: an image is only ever bytes from the local asset cache, re-encoded, with a credit line. One that is not in
+    the cache is left out; one with no credit blocks the file."""
+    from . import assets
+    asset = str(b.get('asset') or '').lower()
+    if not ASSET_ID.match(asset) or not (assets.CACHE / f'{asset}.png').is_file():
+        return None
+    credit = plain(b.get('credit') or '', emphasis=False).replace('\n', ' ')[:MAX_CREDIT]
+    if not credit:
+        raise SpecError('X6', 'An image in the file has no credit line (title, author, licence and source).')
+    return {'type': 'image', 'asset': asset, 'caption': plain(b.get('caption') or '', emphasis=False)[:MAX_CAPTION],
+            'credit': credit}
+
+
+def strip_internal(spec):
+    """A model's spec with what only code may write removed: internal `image` blocks (their asset ids point at local
+    files) and a `font` (the brief sets it). Everything else is left for normalize."""
+    if not isinstance(spec, dict):
+        return spec
+    spec = {k: v for k, v in spec.items() if k != 'font'}
+    if isinstance(spec.get('sections'), list):
+        spec['sections'] = [{**s, 'blocks': [b for b in s['blocks'] if not (isinstance(b, dict) and
+                                                                             b.get('type') == 'image')]}
+                            if isinstance(s, dict) and isinstance(s.get('blocks'), list) else s
+                            for s in spec['sections']]
+    return spec
 
 
 def _fix_levels(sections: list, res: dict, fmt: str):
@@ -581,6 +642,8 @@ def _pptx_slides(sec: dict, res: dict) -> list[dict]:
         return {'text': [], 'visuals': [], 'notes': [], 'items': 0}
     cur = new()
     for b in sec['blocks']:
+        if b['type'] in ('page_break', 'figure'):
+            continue
         if b['type'] in ('paragraph', 'bullets', 'quote'):
             shown, notes, cost = _slide_text(b, res)
             if cur['visuals'] and cur['items'] >= SLIDE_BULLETS_BESIDE:
@@ -663,7 +726,7 @@ def normalize(spec: dict, fmt: str) -> tuple[dict, list[RuleResult]]:
         for bi, b in enumerate(blocks, 1):
             t = _check_block(b, f'Section {si}, block {bi}')
             nb = _block(b, t, res)
-            if nb is None:
+            if nb is None or (t == 'page_break' and cleaned and cleaned[-1]['type'] == 'page_break'):
                 continue
             if t == 'paragraph' and '\n' in nb['text']:
                 parts = [p.strip() for p in nb['text'].split('\n\n') if p.strip()]
@@ -700,6 +763,9 @@ def normalize(spec: dict, fmt: str) -> tuple[dict, list[RuleResult]]:
     out = {'title': title, 'subtitle': plain(spec.get('subtitle') or '', emphasis=False).replace('\n', ' ')[:300],
            'format': fmt, 'theme': spec.get('theme') if spec.get('theme') in THEMES else 'clean',
            'paper': 'letter' if str(spec.get('paper') or '').lower() == 'letter' else 'a4', 'sections': out_sections}
+    font = ' '.join(plain(spec.get('font') or '', emphasis=False).lower().split())[:60]
+    if font:
+        out['font'] = font
     if fmt == 'pptx':
         slides = []
         for s in out_sections:

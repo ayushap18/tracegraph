@@ -2,37 +2,47 @@
 protocol in PLAN.md and docs/PLAN-v4.md, with the stage timings, caches and chat modes of docs/PLAN-speed-evals-chat.md."""
 import asyncio
 import copy
+import hashlib
 import itertools
 import os
 import random
+import re
 import time
 import uuid
 from collections import deque
+from pathlib import Path
 
 from . import agents as agent_registry
 from . import cache as cache_mod
 from . import gate
+from . import policy
+from . import suspects as suspects_mod
 from . import verify as verify_mod
 from .agents import create as create_agent
 from .agents.llm import COMMON
-from .agents.tools import dates_question, sql_agent, sql_in, units_question
-from .config import (AGENTS, BLOCK_AT, CONFIRM_AT, DEEP_MIN_OK, EASY_AT, GUARDS, HARD_AT, HISTORY, KEYLESS, PRICES, REPORT,
-                     RESEARCH, RUN, RUN_TIMEOUT, SAMPLES, SQL_AGENT, STRONGEST, env_flag)
-from . import create as cf
+from .agents.tools import sql_agent, sql_in
+from .config import (AGENTS, BLOCK_AT, DEEP_MIN_OK, DEP_CONTEXT_CHARS, EASY_AT, FORCED_MIN, GUARDS, HARD_AT, HISTORY,
+                     KEYLESS, MAX_QUERY_CHARS, MAX_SUBTASKS, PRICES, REPORT, RESEARCH, RUN, RUN_TIMEOUT, SAMPLES, SQL_AGENT,
+                     STRONGEST, env_flag)
+from .create.brief import Brief, merge as brief_merge, parse_brief
 from .engines.auto import Steered
 from .engines.health import Health, instrument_all, pct
 from .events import Broadcaster
-from .files import FILE_AGENTS, file_agents, to_table
+from .files import FILE_AGENTS, file_agents, search, to_table
 from .jev import clean, criteria, route_one, unsafe_score
-from .merger import STYLES, merge
-from .planner import SCHEMA as PLAN_SCHEMA, SYSTEM as PLAN_SYSTEM, is_file_request, kind as plan_kind, plan, resolve_step
+from .merger import STYLES, StepOut, compose
+from .planner import (SCHEMA as PLAN_SCHEMA, elliptical, expand_described, fill_from_frame, is_file_request,
+                      kind as plan_kind, parse_steps, plan, resolve_step, system_for as plan_system)
 from .sandbox import DEFAULT_TTL, MAX_SANDBOXES, TURNS as SANDBOX_TURNS, Sandboxes, SandboxError
 from .store import Store
 
 ROUTED_KEYS = ('agent', 'pick', 'reason', 'probabilities', 'confidence', 'urgency', 'unsafe', 'clear', 'jev_ms', 'model',
                'examples')
 USE_ACTIVE = object()  # a run's engine argument: the engine active at submit time (None means keyless)
-CONTEXT_CHARS = 500
+ROUTE_CHARS = 2000  # Jev reads at most this much of a step (B4); the planner and the agents get all of it
+RESOLVE_CHARS = 1500  # of each earlier answer, for the dependent-step rewrite (it needs facts, not whole answers)
+ATTACHED_CONTEXT_CHARS = 2000  # of an attached file, for a step that builds on a document or data step (B1)
+FAILED_CONTEXT_CHARS = 200
 MEANINGS_TIMEOUT = 3.0  # seconds the lone-term lookup (jevrouter/gate.py) may add after Jev has routed
 # Sandbox runs are never stored. Their qids come from a separate range so they can't collide with
 # (or leave gaps in) the persisted run numbers, and they're forgotten when they finish.
@@ -46,7 +56,8 @@ async def warm_up(engine):
     """Starts the CLI processes a run is most likely to need, so the first query doesn't wait for a cold start."""
     if engine is None:
         return
-    for call in [dict(system=PLAN_SYSTEM, effort='low', schema=PLAN_SCHEMA), *(dict(system=s, effort=e) for s, e in COMMON)]:
+    planner = dict(system=plan_system(getattr(engine, 'supports_web', False)), effort='low', schema=PLAN_SCHEMA)
+    for call in [planner, *(dict(system=s, effort=e) for s, e in COMMON)]:
         try:
             await engine.prewarm(**call)
         except Exception:
@@ -55,6 +66,86 @@ async def warm_up(engine):
 
 def ms_since(t: float) -> int:
     return round((time.perf_counter() - t) * 1000)
+
+
+def pinned_plan(pinned: dict) -> dict:
+    """A plan given with the run ({subtasks: [str], deps: [[int]]}, D3), replayed instead of calling the planner. It is
+    checked like an LLM plan: blank steps dropped, at most MAX_SUBTASKS, dependencies only on earlier steps."""
+    texts = pinned.get('subtasks') or []
+    deps = pinned.get('deps') or [[] for _ in texts]
+    raw = [{'text': t, 'depends_on': d} for t, d in zip(texts, [*deps, *([[]] * max(0, len(texts) - len(deps)))])]
+    subtasks, deps = parse_steps(raw)
+    if not subtasks:
+        raise ValueError('the pinned plan has no steps')
+    return {'planner': 'pinned', 'subtasks': subtasks, 'deps': deps, 'multi': None, 'jev_tokens': 0, 'claude_in': 0,
+            'claude_out': 0}
+
+
+def expand_steps(texts: list[str], deps: list[list[int]]) -> tuple[list[str], list[list[int]]]:
+    """A5 with an engine: a step whose place or currency is named only by a description the static tables can't
+    settle becomes a lookup step plus the step itself (planner.expand_described), while the plan has room."""
+    out_texts, out_deps, where = [], [], {}
+    for i, (text, dep) in enumerate(zip(texts, deps)):
+        pieces = expand_described(text)
+        if len(pieces) > 1 and len(out_texts) + len(pieces) + (len(texts) - i - 1) > MAX_SUBTASKS:
+            pieces = [(text, [])]
+        if len(pieces) > 1 and any(texts[d] == pieces[0][0] for d in dep if d < len(texts)):
+            pieces = [(text, [])]  # already expanded (a plan pinned from a run): its lookup is one of its dependencies
+        base = len(out_texts)
+        for j, (piece, own) in enumerate(pieces):
+            out_texts.append(piece)
+            out_deps.append(sorted({base + k for k in own} | ({where[d] for d in dep} if j == len(pieces) - 1 else set())))
+        where[i] = len(out_texts) - 1
+    return out_texts, out_deps
+
+
+ROUTE_DEP_CHARS = 500  # of each earlier answer Jev sees when it routes a dependent step (the agent gets DEP_CONTEXT_CHARS)
+
+
+def route_context(ctx: str) -> str:
+    """The dependency context as Jev routes on it: each earlier answer cut to ROUTE_DEP_CHARS."""
+    if not ctx:
+        return ''
+    lines = ctx.split('\n')
+    return '\n'.join(ln if len(ln) <= ROUTE_DEP_CHARS else ln[:ROUTE_DEP_CHARS].rstrip() + ' [...]' for ln in lines)
+
+
+# the ambiguous_term trace note of a route-only run, which never looks a lone term's meanings up (evals.check reads it)
+ROUTE_TERM = 'a lone term: its meanings are looked up only when the run answers'
+# the lookup step expand_described writes before a request that names its place or currency by description
+LOOKUP_STEP = re.compile(r'What is .+\? Give only the (?:place name|currency code)\.')
+
+
+def allot(lengths: dict, budget: int) -> dict:
+    """Shares of `budget` for texts of these lengths: each gets an equal share, and a short one's unused share goes to
+    the longer ones."""
+    shares, left = {}, max(0, budget)
+    for n, (key, size) in enumerate(sorted(lengths.items(), key=lambda kv: kv[1])):
+        give = min(size, left // (len(lengths) - n))
+        shares[key], left = give, left - give
+    return shares
+
+
+def cut(text: str, limit: int) -> str:
+    """The text within `limit` characters, cut at the last blank line or line end before it, and marked."""
+    if len(text) <= limit:
+        return text
+    at = text.rfind('\n\n', 0, limit)
+    at = at if at > limit // 2 else text.rfind('\n', 0, limit)
+    at = at if at > limit // 2 else limit
+    return text[:at].rstrip() + f'\n[truncated {len(text) - at:,} chars]'
+
+
+def body_font() -> str | None:
+    """The family of TRACEGRAPH_BODY_FONT (the font file created documents embed), or None when it isn't set."""
+    path = os.environ.get('TRACEGRAPH_BODY_FONT', '').strip()
+    if not path:
+        return None
+    try:
+        from .create import fonts
+        return fonts.env_family() or Path(path).stem
+    except Exception:
+        return Path(path).stem
 
 
 def table_files(attached: list[dict], engine, query: str) -> list[dict]:
@@ -222,12 +313,14 @@ class Router:
         e = self.engine
         # Subscription engines cost nothing per call here; the plan's own limits apply instead.
         prices = PRICES if e is None or e.billing == 'api' else {**PRICES, 'claude_in': 0.0, 'claude_out': 0.0}
+        from .evals import CASSETTE
         features = {'files': True, 'compare': True, 'evals': True, 'custom_agents': True,
-                    'exec': bool(getattr(e, 'supports_exec', False))}
+                    'exec': bool(getattr(e, 'supports_exec', False)), 'cassette': CASSETTE.exists()}
         return {'agents': {**self.agents, **FILE_AGENTS, **SQL_AGENT}, 'guards': GUARDS, 'claude': e is not None, 'state': self.state,
                 'stats': self.stats, 'samples': SAMPLES, 'prices': prices,
                 'engine': e.info() if e is not None else None, 'engines': [x.info() for x in self.engines.values()],
-                'features': features, 'route_examples': self.route_examples}
+                'features': features, 'route_examples': self.route_examples,
+                'limits': {'query_chars': MAX_QUERY_CHARS}, 'fonts': {'body': body_font()}}
 
     def hello(self) -> dict:
         # history fills in completion order; replay wants qid order, with in-flight runs included
@@ -380,6 +473,8 @@ class Router:
             'tokens': {'jev_in': 0, 'llm_in': 0, 'llm_out': 0},
             'mode': mode, 'style': style, 'agent': agent, 'group_id': group_id,
             'chosen': True if group_id is None else bool(chosen)}
+        if extras.get('dry_run') == 'route':
+            rec['dry_run'] = 'route'
         if not sandbox:
             if session_id:
                 self.store.touch_session(session_id, query)
@@ -409,6 +504,12 @@ class Router:
             emit('error', qid=qid, tid=None, message=rec['error'])
         rec['status'], rec['total_ms'] = status, ms_since(t0)
         rec['timings'] = timings(extras['clock'], t0)
+        try:  # D6: signs this run went wrong, so real traffic can become eval cases
+            made = [f['id'] for t in rec.get('tasks') or [] for f in t.get('created_files') or [] if f.get('id')]
+            specs = {fid: s for fid in made if (s := self.created_spec(fid, sandbox)) is not None}
+            rec['suspects'] = [] if rec.get('dry_run') else suspects_mod.suspects(rec, specs)
+        except Exception:
+            rec['suspects'] = []
         emit('done', qid=qid, total_ms=rec['total_ms'], stats=stats, status=status, tokens=rec['tokens'],
              timings=rec['timings'])
         self.inflight.pop(qid, None)
@@ -539,6 +640,30 @@ class Router:
                 t['error'] = f'{why} before it answered'
                 self.bus.emit('error', qid=qid, tid=t['tid'], message=t['error'])
 
+    def previous_turn(self, rec: dict, sandbox: str | None, extras: dict, qid: int) -> tuple[str, str, dict] | None:
+        """(question, answer, frame) of the chat's latest finished turn when it left a frame (A4), else None. Only the
+        latest turn counts: a follow-up refers to what was just said."""
+        if sandbox:
+            mem = self.sandboxes.peek(sandbox) if extras.get('remember', True) else None
+            recs = [t['record'] for t in (mem.thread if mem else []) if t['qid'] != extras.get('replaces')][-1:]
+        elif rec.get('session_id'):
+            recs = self.store.session_records(rec['session_id'], extras.get('context_before') or qid, 1)
+        else:
+            recs = []
+        for r in recs[-1:]:
+            frames = [t['frame'] for t in r.get('tasks') or [] if isinstance(t.get('frame'), dict)]
+            if frames:
+                return r.get('text') or '', (r.get('merged') or {}).get('answer') or '', frames[-1]
+        return None
+
+    def created_spec(self, file_id: str, sandbox: str | None) -> dict | None:
+        """The stored spec of a file this run (or its sandbox) made, so a dependent create step can start from it."""
+        if sandbox:
+            mem = self.sandboxes.peek(sandbox)
+            held = mem.created.get(file_id) if mem else None
+            return held[1] if held else None
+        return self.store.created_spec(file_id)
+
     async def _handle(self, query, source, qid, t0, rec, engine, extras) -> str:
         emit = self.bus.emit
         emit('query', qid=qid, text=query, source=source, session_id=rec['session_id'], compare_id=rec['compare_id'],
@@ -547,7 +672,13 @@ class Router:
         stats['queries'] += 1
         mode, style, forced = rec['mode'], rec['style'], rec['agent']
         clock = extras['clock']  # stage intervals and counters for RunTimings (see timings())
-        use_cache = source != 'eval'  # evals measure routing itself: every case asks Jev
+        # D3 (docs/PLAN-accuracy-v2.md): an eval may route with its own Jev (a recorded one, jevrouter/cassette.py) and
+        # a pinned plan, and a route-only run stops before any agent, merger, engine or HTTP call.
+        jev = extras.get('jev') or self.jev
+        dry = extras.get('dry_run') == 'route'
+        use_cache = source != 'eval' and jev is self.jev  # evals measure routing itself: every case asks Jev
+        web = bool(engine is not None and engine.supports_web)
+        show_trace = env_flag('TG_POLICY_TRACE', True)
 
         def text_out(tid, chunk):
             """A delta of answer text; the first one of the run is its time to first token."""
@@ -582,20 +713,47 @@ class Router:
         # Jev only sees text: without the file names, "the attached CSV" reads as unclear and gets gated to clarify.
         files_note = f"\n\n(Attached files: {', '.join(f['name'] for f in attached)})" if attached else ''
 
+        # A4: a keyless follow-up ("make it 500", "and in GBP?") is completed from the previous turn's frame; when it
+        # can't be, Jev sees the previous turn next to it. With an LLM planner, the planner resolves follow-ups instead.
+        keyless_plan = engine is None or mode == 'quick'
+        prev = self.previous_turn(rec, sandbox, extras, qid) if keyless_plan and context else None
+        frame = prev[2] if prev else None
+        filled = fill_from_frame(query, frame) if frame else None
+        plan_query = filled or query
+        prev_block = (f'\n\nPrevious turn: {prev[0][:200]} -> {prev[1][:200]}'
+                      if prev and not filled and elliptical(query) else '')
+        prev_hash = hashlib.sha1(prev_block.encode()).hexdigest()[:12] if prev_block else None
+
         def criteria_for(text, ctx, st_text):
             return self.criteria_without(agents, (holdout, text + ctx, st_text)) if holdout else crit
 
-        async def jev_route(text: str, c: dict) -> dict:
-            """Jev's decision for this text, from the route cache when the same text met the same criteria before."""
-            key = self.route_cache.key(text, c) if use_cache else None
+        def jev_text(text: str, ctx: str) -> tuple[str, str, str | None]:
+            """(the text a step is routed on, what Jev also sees after it, the route cache's extra key part). Jev routes
+            on a short context (ROUTE_DEP_CHARS of each earlier answer), not the one the agent gets."""
+            block = prev_block if prev_block and elliptical(text) else ''
+            return text + route_context(ctx), block, prev_hash if block else None
+
+        async def jev_route(text: str, c: dict, extra: str | None = None, block: str = '') -> dict:
+            """Jev's decision for this text, from the route cache when the same text met the same criteria before. Jev
+            reads at most ROUTE_CHARS of it (B4); the planner and the agents still get all of it. The attached-files
+            note and the previous-turn block always reach Jev: what is cut is the end of the step's text."""
+            key = self.route_cache.key(text + files_note, c, extra) if use_cache else None
             d = self.route_cache.get(key) if key else None
             if d is not None:
                 clock['hits'] += 1
                 return {**d, 'cached': True, 'jev_ms': 0, 'input_tokens': 0}
-            d = await route_one(self.jev, text, c)
+            tail = files_note + block
+            room = max(0, ROUTE_CHARS - len(tail))
+            d = await route_one(jev, text[:room] + tail, c)
+            if len(text) > room:
+                d['cut'] = len(text) + len(tail)
             if key:
                 self.route_cache.put(key, d)
             return d
+
+        def route_args(st, text, ctx):
+            sent, block, extra = jev_text(text, ctx)
+            return sent, criteria_for(text, ctx, st.get('text')), extra, block
 
         # Speculative routing (A2): while the LLM planner works, Jev routes the whole query; when the plan comes back as
         # that same single step, its route is already done.
@@ -603,27 +761,35 @@ class Router:
 
         def speculate():
             if not forced:
-                spec['task'] = asyncio.create_task(jev_route(query + files_note, criteria_for(query, '', query)))
+                sent, block, extra = jev_text(plan_query, '')
+                spec['task'] = asyncio.create_task(jev_route(sent, criteria_for(plan_query, '', plan_query), extra, block))
 
         tp0 = time.perf_counter()
-        try:
-            p = await plan(query, self.jev, engine, context, [f['name'] for f in attached], mode=mode, on_llm=speculate,
-                           scores=self.multi_cache if use_cache else None)
-        except BaseException:
-            if spec.get('task'):
-                spec['task'].cancel()
-            raise
+        if extras.get('plan'):
+            p = pinned_plan(extras['plan'])
+        else:
+            try:
+                p = await plan(plan_query, jev, None if dry else engine, context, [f['name'] for f in attached], mode=mode,
+                               on_llm=speculate, scores=self.multi_cache if use_cache else None, forced=forced, web=web)
+            except BaseException:
+                if spec.get('task'):
+                    spec['task'].cancel()
+                raise
         clock['plan'] = (tp0, time.perf_counter())
         clock['planner'], clock['hits'] = plan_kind(p), clock['hits'] + bool(p.get('cached'))
         self.usage(rec, p)
+        step_texts, step_deps = p['subtasks'], p['deps']
+        if engine is not None:  # A5: a place named only by description is looked up by its own step first
+            step_texts, step_deps = expand_steps(step_texts, step_deps)
+        lookups = {i for i, t in enumerate(step_texts) if LOOKUP_STEP.fullmatch(t)}  # never the @agent's step
         subtasks = [{'tid': f'{qid}.{n}', 'text': s, 'depends_on': [f'{qid}.{d + 1}' for d in deps]}
-                    for n, (s, deps) in enumerate(zip(p['subtasks'], p['deps']), 1)]
+                    for n, (s, deps) in enumerate(zip(step_texts, step_deps), 1)]
         by_tid = {st['tid']: dict(st) for st in subtasks}
         rec.update(plan={'planner': p['planner'], 'subtasks': subtasks}, tasks=list(by_tid.values()))
         emit('plan', qid=qid, planner=p['planner'], subtasks=subtasks, multi=p['multi'], ms=ms_since(t0))
         if spec.get('task'):
             one = subtasks[0] if len(subtasks) == 1 else None
-            if one is None or cache_mod.normalize(one['text']) != cache_mod.normalize(query):
+            if one is None or cache_mod.normalize(one['text']) != cache_mod.normalize(plan_query):
                 self.drop_speculation(rec, spec.pop('task'))
             else:
                 spec['tid'] = one['tid']
@@ -654,81 +820,211 @@ class Router:
             step_engine, effort = pick
             return registry_on(agent_registry.Tuned(step_engine, EFFORT.get(mode) or effort, style_note)).get(agent)
 
-        llm_helpers = engine is not None and mode != 'quick'  # quick mode: no LLM rewrite of steps, no LLM clarify
+        llm_helpers = engine is not None and mode != 'quick' and not dry  # quick: no LLM rewrite of steps, no LLM clarify
+
+        # A1: the @agent binds to exactly one step. A plan of one step is that step; @create binds the last step that
+        # asks for a file (or the last step, which then makes the file the whole query asks for); any other agent binds
+        # the independent step Jev gives it the highest probability, routed here once and reused by route_jev.
+        bound_tid, whole_query, bind_note = None, False, None
+        pre_routed: dict[str, tuple[str, dict]] = {}  # tid -> (the text Jev saw, its decision)
+        if forced:
+            if len(subtasks) == 1:
+                bound_tid = subtasks[0]['tid']
+            elif forced == 'create':
+                asks = [st for st in subtasks if is_file_request(st['text']) or create_agent.asks_for_file(st['text'])]
+                bound_tid, whole_query = (asks or subtasks)[-1]['tid'], not asks
+            else:
+                t1 = time.perf_counter()
+                # every step the plan made for the request, dependent ones too: the planner puts gathering first and the
+                # @agent's own step after it ("What currency does Japan use?" then "Convert 100 USD into that currency")
+                steps = [st for n, st in enumerate(subtasks) if n not in lookups]
+                routes = await asyncio.gather(*(jev_route(*route_args(st, st['text'], '')) for st in steps),
+                                              return_exceptions=True)
+                clock['route'].append((t1, time.perf_counter()))
+                best, best_p = None, -1.0
+                for st, d in zip(steps, routes):
+                    if isinstance(d, BaseException):
+                        continue
+                    pre_routed[st['tid']] = (st['text'], d)
+                    if (pr := (d.get('probabilities') or {}).get(forced, 0.0)) > best_p:
+                        best, best_p = st, pr
+                if best is None or best_p < FORCED_MIN:
+                    best, bind_note = steps[0], 'forced agent fits no step well'
+                bound_tid = best['tid']
+
+        def is_file_step(st) -> bool:
+            return st['tid'] == bound_tid and forced == 'create' or is_file_request(st['text'])
+
+        def primary_file_step(st) -> bool:
+            """The run's primary file step (C1): the bound step when @create is forced, else the last create step."""
+            if forced == 'create':
+                return st['tid'] == bound_tid
+            at = next(i for i, s in enumerate(subtasks) if s['tid'] == st['tid'])
+            return not any(is_file_request(s['text']) or create_agent.asks_for_file(s['text']) for s in subtasks[at + 1:])
+
+        def brief_for(st) -> Brief:
+            text = by_tid[st['tid']].get('input') or st['text']
+            return brief_merge(parse_brief(query), parse_brief(text)) if primary_file_step(st) else parse_brief(text)
+
+        def feeds_long_file(st) -> bool:
+            """B5: a step a create step builds a long file from (pages >= 3, slides >= 8, images or diagrams)."""
+            for s in subtasks:
+                if st['tid'] in s['depends_on'] and is_file_step(s):
+                    try:
+                        b = brief_for(s)
+                    except Exception:
+                        continue
+                    if (b.pages and b.pages[1] >= 3) or (b.slides and b.slides[1] >= 8) or b.images or b.diagrams:
+                        return True
+            return False
+
+        def dep_context(st) -> str:
+            """B1: the answers a step builds on, within DEP_CONTEXT_CHARS shared across them (a short answer leaves its
+            share to the longer ones), each cut at a line end and marked; a failed one keeps 200 chars. A dependency
+            that read an attached document or table also brings up to 2,000 chars of that file."""
+            deps = st['depends_on']
+            good = [d for d in deps if results[d].get('ok')]
+            shares = allot({d: len(results[d]['answer']) for d in good}, DEP_CONTEXT_CHARS - FAILED_CONTEXT_CHARS * (len(deps) - len(good)))
+            lines = []
+            for d in deps:
+                r = results[d]
+                lines.append(f"- {by_tid[d]['text']}: " + (cut(r['answer'], shares[d]) if d in shares else
+                                                            f"(this step failed: {r['answer'][:FAILED_CONTEXT_CHARS]})"))
+                if r.get('agent') in ('document', 'data') and attached:
+                    lines.append(f'  (from the attached file: {attachment_passage(r, st)})')
+            return '\n\nContext from earlier steps:\n' + '\n'.join(lines)
+
+        def attachment_passage(r: dict, st) -> str:
+            names = {n.strip() for n in (r.get('source') or '').split(',')}
+            named = [(f['name'], texts.get(f['id']) or '') for f in attached if f['name'] in names] or \
+                    [(f['name'], texts.get(f['id']) or '') for f in attached]
+            try:
+                hits = search(named, st['text'], 3)
+            except Exception:
+                hits = []
+            passage = '\n'.join(c for _, _, c in hits) or (named[0][1] if named else '')
+            return passage[:ATTACHED_CONTEXT_CHARS]
 
         async def prepare(st) -> tuple[str, str]:
             """(the subtask's own text, possibly made self-contained; the context from its dependencies, or '')."""
+            text = st['text']
+            # A5: "the capital of Switzerland", "the currency of Brazil" from the static tables, at no cost
+            if resolved := gate.resolve_described(text):
+                text = by_tid[st['tid']]['input'] = resolved
             if not st['depends_on']:
-                return st['text'], ''
-            lines = []
-            for d in st['depends_on']:
-                r = results[d]
-                lines.append(f"- {by_tid[d]['text']}: " + (r['answer'][:CONTEXT_CHARS] if r['ok'] else
-                                                            f"(this step failed: {r['answer'][:200]})"))
-            ctx = '\n\nContext from earlier steps:\n' + '\n'.join(lines)
+                return text, ''
             earlier = [by_tid[d].get('input') or by_tid[d]['text'] for d in st['depends_on']]
-            text = None
+            if dry:  # route mode: no dependency has answered, and nothing may call the engine
+                ctx = '\n\nContext from earlier steps:\n' + '\n'.join(
+                    f"- {by_tid[d]['text']}: (not run: route mode)" for d in st['depends_on'])
+                if (there := gate.resolve_there(text, earlier)) is not None:
+                    text = by_tid[st['tid']]['input'] = there
+                return text, ctx
+            ctx = dep_context(st)
+            rewritten = None
             # A file request is built from the earlier answers themselves (docs/PLAN-files.md): rewriting it costs tokens
             # and would only paste those answers into the step's text.
-            if llm_helpers and not is_file_request(st['text']):
+            if llm_helpers and not is_file_request(text):
+                upstream = [results[d]['answer'] for d in st['depends_on'] if results[d].get('ok')]
+                facts = '\n\nContext from earlier steps:\n' + '\n'.join(
+                    f"- {by_tid[d]['text']}: " + (results[d]['answer'][:RESOLVE_CHARS] if results[d].get('ok') else
+                                                  f"(this step failed: {results[d]['answer'][:200]})")
+                    for d in st['depends_on'])
                 try:
-                    text, tin, tout = await resolve_step(engine, st['text'] + ctx)
+                    rewritten, tin, tout = await resolve_step(engine, text + facts, step=text, upstream=upstream)
                     self.usage(rec, {'claude_in': tin, 'claude_out': tout})
                 except Exception:
-                    text = None
+                    rewritten = None
             # Keyless (or when the rewrite left it as it was): "the time there" names the place the earlier steps were
-            # about, a place or the country of the currency converted to, so the time or weather agent can parse it.
-            if text is None or gate.THERE.search(text):
-                text = gate.resolve_there(text or st['text'], earlier) or text
-            if text is None:
-                return st['text'], ctx
-            by_tid[st['tid']]['input'] = text
-            return text, ctx
+            # about, a place or the country of the currency converted to, so the time or weather agent can parse it;
+            # "convert the result to EUR" names the number the earlier step worked out.
+            if rewritten is None or gate.THERE.search(rewritten):
+                rewritten = gate.resolve_there(rewritten or text, earlier) or rewritten
+            if rewritten is None and not llm_helpers:
+                pairs = [(by_tid[d]['text'], results[d]['answer']) for d in st['depends_on'] if results[d].get('ok')]
+                rewritten = gate.resolve_result(text, pairs)
+            if rewritten is None or rewritten == text:
+                return text, ctx
+            by_tid[st['tid']]['input'] = rewritten
+            return rewritten, ctx
 
-        notes: dict[str, agent_registry.AgentResult] = {}  # tid -> the answer a gate decided (jevrouter/gate.py)
+        notes: dict[str, agent_registry.AgentResult] = {}  # tid -> the answer the policy decided (jevrouter/policy.py)
+        caveats: dict[str, list[str]] = {}  # tid -> limits the answer must state (B6)
         hardness: dict[str, float | None] = {}  # tid -> Jev's hard score
 
         async def route(st, text, ctx):
             t1 = time.perf_counter()
             try:
-                return await (route_forced(st, text, ctx) if forced else route_jev(st, text, ctx))
+                return await (route_forced(st, text, ctx) if st['tid'] == bound_tid else route_jev(st, text, ctx))
             finally:
                 clock['route'].append((t1, time.perf_counter()))
 
+        def step_ctx(st, text, ctx, bound: bool = False) -> policy.StepCtx:
+            return policy.StepCtx(text=text, ctx=ctx, tid=st['tid'], offered=agents, runnable=set(registry),
+                                  forced=forced if bound else None, mode=mode, has_engine=engine is not None, web=web,
+                                  attached=bool(attached), has_context=bool(context), depends_on=st['depends_on'],
+                                  frame=frame if keyless_plan else None)
+
         async def route_jev(st, text, ctx):
-            term = None if ctx else gate.bare_term(text)
-            lookup = asyncio.create_task(gate.meanings(self.http, term)) if term and self.http is not None else None
+            term = None if ctx else gate.bare_term(text)  # pure: route mode sees it too, only the lookup is skipped
+            lookup = (asyncio.create_task(gate.meanings(self.http, term))
+                      if term and not dry and self.http is not None else None)
             try:
                 d = None
-                if spec.get('tid') == st['tid']:
+                held = pre_routed.pop(st['tid'], None)
+                if held is not None and held[0] == text and not ctx:
+                    d = held[1]
+                elif spec.get('tid') == st['tid']:
                     try:
                         d = await spec.pop('task')
                     except Exception:
                         d = None  # the speculative call failed: ask again below, as if there had been none
                 if d is None:
-                    d = await jev_route(text + ctx + files_note, criteria_for(text, ctx, st.get('text')))
+                    d = await jev_route(*route_args(st, text, ctx))
             except Exception as e:
                 if lookup:
                     lookup.cancel()
                 return route_failed(st, e)
-            await review(st['tid'], d, text, lookup)
-            if mode == 'research' and d['agent'] == 'knowledge' and 'research' in registry:
-                d['agent'], d['reason'] = 'research', f"{d['reason']}; research mode searches the web"
-            return routed(st, d)
+            try:
+                dec = policy.apply(d, step_ctx(st, text, ctx))
+                # 15. ambiguous_term: a lone term with several meanings ("Mercury") asks which one
+                if (lookup and dec.agent not in (*GUARDS, 'chat', 'create') and dec.note is None
+                        and (options := await meanings_of(lookup))):
+                    dec.agent, dec.reason = 'clarify', f'ambiguous term ({len(options)} meanings)'
+                    dec.note, dec.note_ok = gate.meanings_text(text.strip().rstrip('.!?'), options), False
+                    dec.trace.append({'rule': 'ambiguous_term', 'agent': 'clarify', 'why': dec.reason})
+                elif dry and term and dec.agent not in (*GUARDS, 'chat', 'create') and dec.note is None:
+                    # route mode: a run would look the term's meanings up and ask which one when there are several
+                    dec.trace.append({'rule': 'ambiguous_term', 'agent': dec.agent, 'why': ROUTE_TERM})
+            finally:
+                if lookup and not lookup.done():
+                    lookup.cancel()
+            return routed(st, d, dec)
 
         async def route_forced(st, text, ctx):
-            """@agent: no route question, but Jev's safety check still runs, so an unsafe step is blocked anyway."""
+            """@agent on the bound step: no route question, but Jev's safety check still runs, so an unsafe step is
+            blocked anyway (a step routed for binding already has it)."""
             t1 = time.perf_counter()
-            try:
-                unsafe, tokens = await unsafe_score(self.jev, text + ctx + files_note)
-            except Exception as e:
-                return route_failed(st, e)
-            blocked = unsafe >= BLOCK_AT
-            d = {'agent': 'blocked' if blocked else forced, 'pick': forced,
-                 'reason': f'Jev flagged it as unsafe ({unsafe:.0%})' if blocked else f'you picked @{forced}',
+            held = pre_routed.pop(st['tid'], None)
+            if held is not None:
+                unsafe, tokens, signals = held[1].get('unsafe', 0.0), held[1].get('input_tokens', 0), held[1].get('signals')
+            else:
+                try:
+                    unsafe, tokens = await unsafe_score(jev, text + ctx + files_note)
+                except Exception as e:
+                    return route_failed(st, e)
+                signals = None
+            d = {'agent': 'blocked' if unsafe >= BLOCK_AT else forced, 'pick': forced,
+                 'reason': f'Jev flagged it as unsafe ({unsafe:.0%})' if unsafe >= BLOCK_AT else f'you picked @{forced}',
                  'probabilities': {forced: 1.0}, 'confidence': 1.0, 'urgency': 0.0, 'unsafe': unsafe, 'clear': 1.0,
-                 'jev_ms': ms_since(t1), 'model': '', 'examples': False, 'input_tokens': tokens, 'forced': True}
-            return routed(st, d)
+                 'jev_ms': ms_since(t1), 'model': '', 'examples': False, 'input_tokens': tokens, 'forced': True,
+                 'bound': True}
+            if signals:
+                d['signals'] = signals
+            dec = policy.apply(d, step_ctx(st, text, ctx, bound=True))
+            if bind_note:
+                dec.trace.insert(0, {'rule': 'forced', 'agent': forced, 'why': bind_note})
+            return routed(st, d, dec)
 
         def route_failed(st, e):
             stats['errors'] += 1
@@ -736,71 +1032,41 @@ class Router:
             emit('error', qid=qid, tid=st['tid'], message=by_tid[st['tid']]['error'])
             return None
 
-        def routed(st, d):
-            hardness[st['tid']] = d.get('hard')  # Jev's hard score picks the step's engine (A5); not a routed field
+        def routed(st, d, dec: policy.Decision | None = None):
+            tid = st['tid']
+            if dec is not None:
+                d['agent'], d['pick'], d['reason'] = dec.agent, dec.pick, dec.reason
+                if dec.note is not None:
+                    notes[tid] = agent_registry.AgentResult(dec.note, dec.note_ok)
+                if dec.caveats:
+                    caveats[tid] = list(dec.caveats)
+                trace = list(dec.trace)
+                if filled:
+                    trace.insert(0, {'rule': 'frame', 'agent': d['pick'], 'why': f'completed from the previous turn as "{filled}"'})
+                if d.get('cut'):
+                    trace.append({'rule': trace[-1]['rule'] if trace else 'missing_slot', 'agent': dec.agent,
+                                  'why': f"Jev read the first {ROUTE_CHARS:,} of {d['cut']:,} characters"})
+                d['trace'] = trace
+            hardness[tid] = d.get('hard')  # Jev's hard score picks the step's engine (A5); not a routed field
             self.usage(rec, {'jev_tokens': d['input_tokens']})
             stats['subtasks'] += 1
             stats['by_agent'][d['agent']] = stats['by_agent'].get(d['agent'], 0) + 1
             fields = {k: d[k] for k in ROUTED_KEYS}
-            fields.update({k: True for k in ('cached', 'forced') if d.get(k)})  # only when true: older clients ignore them
-            by_tid[st['tid']].update(fields)
-            extra = {'input': by_tid[st['tid']]['input']} if 'input' in by_tid[st['tid']] else {}
-            emit('routed', qid=qid, tid=st['tid'], **fields, **extra)
+            fields.update({k: True for k in ('cached', 'forced', 'bound') if d.get(k)})  # only when true: older clients ignore them
+            if d.get('trace') and show_trace:
+                fields['trace'] = d['trace']
+            if d.get('signals'):
+                fields['signals'] = d['signals']
+            if dec is not None and dec.assumption:
+                fields['assumption'] = dec.assumption
+            if filled and frame:
+                fields['frame_used'] = frame
+            by_tid[tid].update(fields)
+            if dry:  # route mode: the stored task keeps what the harness scores
+                by_tid[tid].update({'trace': d.get('trace') or [], 'hard': d.get('hard')})
+            extra = {'input': by_tid[tid]['input']} if 'input' in by_tid[tid] else {}
+            emit('routed', qid=qid, tid=tid, **fields, **extra)
             return fields
-
-        async def review(tid, d, text, lookup):
-            """Checks Jev's decision against what the agents can actually do (jevrouter/gate.py). A blocked subtask stays
-            blocked; the reason says which check changed the agent. `text` is what a keyless agent will be given (see
-            `live` below), so its parser is checked on the same text."""
-            try:
-                if d['agent'] == 'blocked':
-                    return
-                # Jev leans to create for "write an email" or "plan a trip"; without a format or a file asked for, the
-                # text answer is what's wanted, so the runner-up takes it (and "send an email" still gets its "can't")
-                if d['pick'] == 'create' and not gate.wants_file(text) and not cf.detect_format(text):
-                    runner = next((a for a in d['probabilities'] if a not in ('create', *GUARDS) and a in agents), None)
-                    if runner:
-                        d['pick'] = runner
-                        if d['agent'] == 'create':
-                            d['agent'], d['reason'] = runner, f"{d['reason']}, but no file was asked for"
-                # "Remind me at 5pm": an honest "I can't", not the current time
-                if cant := gate.cant_do(text, d['pick'], d['probabilities'].get(d['pick'], 0)):
-                    d['agent'], d['reason'] = 'chat', f"can't {cant[0]}"
-                    notes[tid] = agent_registry.AgentResult(cant[1], True)
-                    return
-                pick = d['pick']
-                # "turn these release notes into a summary file": Jev may pick the document Q&A agent; the request is
-                # for a file, so the create agent makes it (from the attachment, an answer, or the engine)
-                if ('create' in agents and d['agent'] not in (*GUARDS, 'create') and gate.wants_file(text)
-                        and d['unsafe'] < BLOCK_AT):
-                    d['agent'], d['reason'] = 'create', f"{d['reason']}, but the request is for a file"
-                    return
-                if (d['agent'] == 'clarify' and pick in KEYLESS and pick in registry
-                        and d['probabilities'].get(pick, 0) >= CONFIRM_AT and gate.confirmed(pick, text)):
-                    d['agent'], d['reason'] = pick, f"{d['reason']}, but the {pick} parser found all it needs"
-                # "the total in this spreadsheet" reads as vague to Jev, which sees only the text; the attached file is
-                # the missing context, so a confident file-agent pick stands.
-                if (d['agent'] == 'clarify' and attached and pick in (*FILE_AGENTS, *SQL_AGENT) and pick in agents
-                        and d['probabilities'].get(pick, 0) >= CONFIRM_AT and d['unsafe'] < BLOCK_AT):
-                    d['agent'], d['reason'] = pick, f"{d['reason']}, but a file is attached"
-                # "put that in a PDF" reads as vague to Jev for the same reason: what "that" means is the chat's earlier
-                # answer, an earlier step or an attached file, which Jev doesn't see. A create pick then stands.
-                if (d['agent'] == 'clarify' and pick == 'create' and d['unsafe'] < BLOCK_AT
-                        and create_agent.asks_for_file(text) and (context or attached or by_tid[tid].get('depends_on'))):
-                    d['agent'], d['reason'] = 'create', f"{d['reason']}, but it asks for a file of what came before"
-                try:
-                    ask = None if d['agent'] in GUARDS else gate.question(d['agent'], text) or tool_question(d['agent'], text)
-                except Exception:  # a parser bug must not fail the whole run; the step's agent reports its own error
-                    ask = None
-                if ask:
-                    d['agent'], d['reason'] = 'clarify', f"missing detail for {d['agent']}"
-                    notes[tid] = agent_registry.AgentResult(ask, False)
-                if lookup and d['agent'] not in (*GUARDS, 'chat') and (options := await meanings_of(lookup)):
-                    d['agent'], d['reason'] = 'clarify', f'ambiguous term ({len(options)} meanings)'
-                    notes[tid] = agent_registry.AgentResult(gate.meanings_text(text.strip().rstrip('.!?'), options), False)
-            finally:
-                if lookup and not lookup.done():
-                    lookup.cancel()
 
         async def meanings_of(lookup) -> list[str] | None:
             """The lone term's meanings, or None: a slow or failed lookup never fails or stalls the route."""
@@ -811,27 +1077,33 @@ class Router:
 
         async def ask(text, probabilities) -> agent_registry.AgentResult:
             """A clarify message: the engine writes the question when there is one, from a plain-English template."""
-            msg = gate.clarify_text(probabilities, text, agents)
+            msg = gate.clarify_text(probabilities, text, agents, earlier=bool(context or attached))
             if not llm_helpers:
                 return agent_registry.AgentResult(msg, False)
             msg, tin, tout = await gate.clarify_llm(engine, text, msg)
             return agent_registry.AgentResult(msg, False, None, engine.name if tin or tout else 'keyless', tin, tout)
 
-        async def make_file(st) -> tuple[agent_registry.AgentResult, list[dict]]:
-            """The create step (docs/PLAN-files.md): its file from the earlier steps' answers, the chat, the attached files
-            or one engine call, stored by id (or in the sandbox's memory). Returns (the answer, [the CreatedFile])."""
+        async def make_file(st) -> tuple[agent_registry.AgentResult, list[dict], list[str]]:
+            """The create step (docs/PLAN-files.md): its file from the earlier steps' answers and files, the chat, the
+            attached files or the engine, stored by id (or in the sandbox's memory). Returns (the answer, [the
+            CreatedFile], the caveats: what the file could not honour)."""
             deps = [(by_tid[d].get('input') or by_tid[d]['text'], results[d]['answer'] if results[d].get('ok') else '')
                     for d in st['depends_on']]
+            dep_files = [(f, s) for d in st['depends_on'] for f in results[d].get('created_files') or []
+                         if (s := self.created_spec(f['id'], sandbox)) is not None]
             tables = [(f, *table) for f in attached if f.get('columns') and (table := to_table(f['kind'], texts[f['id']]))]
             docs = [(f, texts[f['id']]) for f in attached if not f.get('columns')]
             turns, last = self.chat_files(rec, sandbox, extras.get('context_before') or qid, extras.get('remember', True))
             # A plan of one step is the user's own request: the LLM planner rewrites follow-ups into self-contained
             # steps ("put that in a PDF" -> "put the information about Ada Lovelace in a PDF"), and the rewrite hides
-            # the words that say to reuse the answer or file already in the chat (at no token cost).
-            request = query if len(subtasks) == 1 else by_tid[st['tid']].get('input') or st['text']
-            job = create_agent.Job(request, deps, turns, tables, docs, last)
-            made = await create_agent.make(job, agent_registry.Tuned(engine) if engine is not None else None, self.jev,
-                                           mode)
+            # the words that say to reuse the answer or file already in the chat (at no token cost). @create bound to a
+            # step that asks for no file makes the file the whole query asks for (A1).
+            whole = len(subtasks) == 1 or (whole_query and st['tid'] == bound_tid)
+            request = query if whole else by_tid[st['tid']].get('input') or st['text']
+            primary = primary_file_step(st)
+            job = create_agent.Job(request, deps, turns, tables, docs, last, brief=brief_for(st), dep_files=dep_files,
+                                   role='primary' if primary else 'working', http=self.http)
+            made = await create_agent.make(job, agent_registry.Tuned(engine) if engine is not None else None, jev, mode)
             self.usage(rec, {'jev_tokens': made.jev_tokens})
             files = []
             if made.file is not None:
@@ -839,7 +1111,8 @@ class Router:
                 if made.data is not None:  # a new file (not one the chat already had in that format)
                     meta = self.save_created({**meta, 'qid': qid}, made.spec, made.data, sandbox)
                 files.append(meta)
-            return agent_registry.AgentResult(made.answer, made.ok, None, made.engine, made.llm_in, made.llm_out), files
+            out = agent_registry.AgentResult(made.answer, made.ok, None, made.engine, made.llm_in, made.llm_out)
+            return out, files, list(getattr(made, 'caveats', None) or [])
 
         async def run(st, r, text):
             tid, agent = st['tid'], r['agent']
@@ -847,7 +1120,9 @@ class Router:
             delta = lambda chunk: text_out(tid, chunk)
             efforts: list[str] = []
             made: list[dict] = []  # files a create step made
+            limits: list[str] = list(caveats.get(tid, ()))
             token = agent_registry.EFFORTS.set(efforts)
+            feeds = agent_registry.FEEDS_FILE.set(agent != 'create' and feeds_long_file(st))
             try:
                 with cache_mod.track() as hits:
                     if agent == 'blocked':
@@ -860,7 +1135,8 @@ class Router:
                         out = await ask(by_tid[tid].get('input') or st['text'], r['probabilities'])
                         delta(out.answer)
                     elif agent == 'create':
-                        out, made = await make_file(st)
+                        out, made, file_caveats = await make_file(st)
+                        limits += file_caveats
                         delta(out.answer)
                     else:
                         runner = registry.get(agent) if agent in KEYLESS else agent_for(agent, hardness.get(tid))
@@ -868,9 +1144,11 @@ class Router:
                             raise KeyError(agent)
                         out = await runner(text, delta)
             except Exception as e:
-                out = agent_registry.AgentResult(f'{agent} agent failed: {str(e)[:160]}', False)
+                why = str(e)[:160] or ('it took too long' if isinstance(e, TimeoutError) else type(e).__name__)
+                out = agent_registry.AgentResult(f'{agent} agent failed: {why}', False)
                 delta(out.answer)
             finally:
+                agent_registry.FEEDS_FILE.reset(feeds)
                 agent_registry.EFFORTS.reset(token)
                 clock['agents'].append((t1, time.perf_counter()))
             self.usage(rec, {'claude_in': out.claude_in, 'claude_out': out.claude_out})
@@ -878,6 +1156,18 @@ class Router:
                         'source': out.source, 'engine': out.engine}
             if made:
                 answered['created_files'] = made
+            if not out.ok:  # a dead end has no figure to hedge (B6)
+                limits = [c for c in limits if c != gate.TIME_SENSITIVE_CAVEAT]
+            if limits:
+                answered['caveats'] = list(dict.fromkeys(limits))
+            if out.ok and agent not in GUARDS and agent != 'create':  # A4: what the next keyless turn can build on
+                try:
+                    answered['frame'] = {'agent': agent, 'slots': gate.frame_slots(agent, by_tid[tid].get('input') or st['text'])}
+                except Exception:
+                    pass
+            elif agent == 'clarify' and (partial := gate.partial_frame(by_tid[tid].get('pick'),
+                                                                       by_tid[tid].get('input') or st['text'])):
+                answered['frame'] = partial  # the question's answer, next turn, completes what this one parsed
             checks = {}
             if hits[0]:
                 clock['hits'] += hits[0]
@@ -895,6 +1185,14 @@ class Router:
                     v, tin, tout = (verify_mod.skipped('The check could not run.') if deep else {}), 0, 0
                 self.usage(rec, {'claude_in': tin, 'claude_out': tout})
                 checks.update(v)
+            # A5: a keyless math or currency answer uses every number and code the question gave, the right way round
+            coverage = getattr(verify_mod, 'coverage', None)
+            if coverage and agent in ('math', 'currency') and out.ok and out.engine == 'keyless' and tid not in notes:
+                try:
+                    if v := coverage(agent, by_tid[tid].get('input') or st['text'], out.answer):
+                        checks.update(v)
+                except Exception:
+                    pass
             if checks:  # only when there is something to say: older clients ignore the key
                 answered['checks'] = checks
             # a create step's answer is a line code wrote ("Created **x.pdf**, 4 pages"): nothing for an LLM to merge
@@ -909,10 +1207,16 @@ class Router:
             fields = {'agent': 'blocked', 'pick': 'blocked', 'reason': 'depends on a blocked step', 'probabilities': {},
                       'confidence': 0.0, 'urgency': 0.0, 'unsafe': 1.0, 'clear': 0.0, 'jev_ms': 0, 'model': '',
                       'examples': False}
+            trace = [{'rule': 'blocked_dependency', 'agent': 'blocked', 'why': 'depends on a blocked step'}]
+            if show_trace:
+                fields['trace'] = trace
             stats['subtasks'] += 1
             stats['by_agent']['blocked'] = stats['by_agent'].get('blocked', 0) + 1
             by_tid[tid].update(fields)
             emit('routed', qid=qid, tid=tid, **fields)
+            if dry:
+                by_tid[tid].update({'trace': trace, 'hard': None})
+                return {'agent': 'blocked', 'ok': False, 'answer': ''}
             out = agent_registry.BLOCKED
             text_out(tid, out.answer)
             answered = {'agent': 'blocked', 'agent_ms': 0, 'answer': out.answer, 'ok': out.ok, 'source': out.source,
@@ -937,9 +1241,21 @@ class Router:
             if r is None:
                 results[st['tid']] = {'ok': False, 'answer': by_tid[st['tid']]['error']}
                 return
+            if dry:  # route mode stops here: no agent runs (docs/PLAN-accuracy-v2.md D3)
+                results[st['tid']] = {'agent': r['agent'], 'ok': r['agent'] not in GUARDS, 'answer': ''}
+                task = by_tid[st['tid']]
+                if r['agent'] not in GUARDS and r['agent'] != 'create':  # A4: the frame a follow-up turn is routed from
+                    try:
+                        task['frame'] = {'agent': r['agent'], 'slots': gate.frame_slots(r['agent'], task.get('input') or st['text'])}
+                    except Exception:
+                        pass
+                elif r['agent'] == 'clarify' and (partial := gate.partial_frame(r.get('pick'), task.get('input') or st['text'])):
+                    task['frame'] = partial
+                return
             # keyless agents parse places and amounts from plain text: context would only be misread as the step's own
-            # numbers ("convert that amount to EUR" + "100 USD = 8,400 INR" is not 100 USD to EUR)
-            results[st['tid']] = await run(st, r, text if r['agent'] in KEYLESS else text + ctx)
+            # numbers ("convert that amount to EUR" + "100 USD = 8,400 INR" is not 100 USD to EUR). With no engine every
+            # agent is a keyless lookup (knowledge searches for its whole input), so none of them gets it either.
+            results[st['tid']] = await run(st, r, text if r['agent'] in KEYLESS or engine is None else text + ctx)
 
         # Dependencies only point backwards, so every step's dependencies have a task before it does.
         results: dict[str, dict] = {}
@@ -955,6 +1271,8 @@ class Router:
             if spec.get('task'):
                 self.drop_speculation(rec, spec.pop('task'))
 
+        if dry:
+            return 'done'
         answers = [(st, results[st['tid']]) for st in subtasks if 'agent' in results[st['tid']]]
         if not answers:
             rec['error'] = 'Every subtask failed to route; see the errors above.'
@@ -964,9 +1282,14 @@ class Router:
         all_exact = all(st['tid'] in exact for st, _ in answers)
         template = engine is None or mode == 'quick' or (mode != 'deep' and all_exact)
         t2 = time.perf_counter()
-        m = await merge(query, [(a['agent'], a['answer']) for _, a in answers], lambda text: text_out('merge', text),
-                        None if template else engine, style=style, steps=[st['text'] for st, _ in answers],
-                        exact=all_exact)
+        steps_out: list[StepOut] = [
+            {'tid': st['tid'], 'text': st['text'], 'agent': a['agent'], 'answer': a['answer'], 'ok': a['ok'],
+             'files': a.get('created_files') or [], 'caveats': a.get('caveats') or [],
+             'assumption': by_tid[st['tid']].get('assumption'), 'feeds_file': a['agent'] != 'create' and feeds_long_file(st),
+             'probabilities': by_tid[st['tid']].get('probabilities') or {},
+             'asked': a['agent'] == 'clarify' and st['tid'] in notes} for st, a in answers]
+        m = await compose(query, steps_out, lambda text: text_out('merge', text), None if template else engine,
+                          style=style, exact=all_exact)
         clock['merger'] = m['kind']
         if m['kind'] == 'llm':
             clock['merge'] = (t2, time.perf_counter())
@@ -983,6 +1306,11 @@ class Router:
             m['answer'] += warn
         self.usage(rec, m)
         rec['merged'] = {'answer': m['answer'], 'engine': m['engine']}
+        # B2: what the run couldn't do and the file the answer leads with; only when there is something to say
+        if m.get('caveats'):
+            rec['merged']['caveats'] = list(m['caveats'])
+        if m.get('primary_file'):
+            rec['merged']['primary_file'] = m['primary_file']
         emit('merged', qid=qid, **rec['merged'], ms=ms_since(t2))
         return 'done'
 
@@ -999,12 +1327,6 @@ class Router:
             await asyncio.sleep(self.state['interval'])
             if self.state['autopilot'] and self.bus.subscribers:
                 self.submit(random.choice(SAMPLES), 'autopilot')
-
-
-def tool_question(agent: str, text: str) -> str | None:
-    """The unit and date agents' follow-up question when their parser finds nothing to work with (gate.question covers
-    the older agents), so "How much is a pound?" asks which meaning instead of failing."""
-    return units_question(text) if agent == 'units' else dates_question(text) if agent == 'dates' else None
 
 
 def union_ms(spans, start: float | None = None) -> int:

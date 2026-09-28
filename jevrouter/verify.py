@@ -11,8 +11,9 @@ The result is AnswerChecks (web/src/protocol.ts): verified 'ok', 'mismatch' or '
 import math
 import re
 
-from .agents.tools import (ECB_CODES, UrlBlocked, UrlError, cached_json, ddg_abstract, fetch_page, normalize_numbers,
-                           page_text, parse_currency, plain, solve_math, unsupported_currency)
+from .agents.tools import (AMOUNT, ECB_CODES, ISO_CODES, UNUSED_OPERATION, UrlBlocked, UrlError, cached_json, currencies_in,
+                           currency_words, ddg_abstract, fetch_page, normalize_numbers, page_text, parse_currency, plain,
+                           solve_math, target_word, unsupported_currency)
 from .config import CURRENCY_TOLERANCE
 from .engines import parse_json
 from . import cache
@@ -166,3 +167,125 @@ def warning(checks: list[tuple[str, dict]]) -> str:
         return f"\n\n**Check this answer:** {bad[0][1].get('verify_note') or 'a check did not agree with it.'}"
     lines = [f"- {t}: {c.get('verify_note') or 'a check did not agree with it.'}" for t, c in bad]
     return '\n\n**Check these answers:**\n' + '\n'.join(lines)
+
+
+# ---------- keyless coverage (docs/PLAN-accuracy-v2.md A5) ----------
+
+COVERED = {'math', 'currency'}
+# Word operators whose operands have an order: (pattern, which group comes first in the calculation).
+ORDERED = [(re.compile(r'\bsubtract\s+(\S+)\s+from\s+(\S+)', re.I), (2, 1), 'subtracts {0} from {1}'),
+           (re.compile(r'\bdivide\s+(\S+)\s+(?:by|into)\s+(\S+)', re.I), (1, 2), 'divides {0} by {1}'),
+           (re.compile(r'(\S+)\s+divided\s+by\s+(\S+)', re.I), (1, 2), 'divides {0} by {1}'),
+           (re.compile(r'(\S+)\s+minus\s+(\S+)', re.I), (1, 2), 'takes {1} from {0}'),
+           (re.compile(r'(\S+)\s+to\s+the\s+power\s+of\s+(\S+)', re.I), (1, 2), 'raises {0} to the power of {1}')]
+CONVERSION = re.compile(r'(-?\d[\d,]*(?:\.\d+)?)\s*([A-Z]{3})\s*=\s*(-?\d[\d,]*(?:\.\d+)?)\s*([A-Z]{3})')
+# Words between an amount and its currency that name the currency's country ("200 British pounds").
+QUALIFIER = {'british', 'us', 'u.s.', 'american', 'canadian', 'australian', 'indian', 'japanese', 'swiss', 'chinese',
+             'euro', 'new', 'hong', 'kong', 'singapore', 'mexican', 'south', 'african', 'korean', 'swedish', 'norwegian',
+             'danish', 'polish', 'czech', 'hungarian', 'turkish', 'brazilian', 'zealand', 'philippine', 'thai', 'israeli'}
+
+
+def numbers_in(text: str) -> list[float]:
+    """The numbers written in the text, as magnitudes: in "20-5" the minus is an operator, not a sign."""
+    out = []
+    for raw in NUMBER.findall(normalize_numbers((text or '').replace(',', ''))):
+        try:
+            out.append(abs(float(raw)))
+        except ValueError:
+            pass
+    return out
+
+
+def as_number(word: str) -> float | None:
+    nums = numbers_in(word)
+    return nums[0] if len(nums) == 1 else None
+
+
+def covers_math(text: str, answer: str) -> dict | None:
+    """Every number in the question appears in the calculation (the left of the answer's last "="), and ordered word
+    operators ("divide 240 by 8") keep their order."""
+    if '=' not in (answer or ''):
+        return None
+    expr = answer.rsplit('=', 1)[0]
+    if not re.search(r'[-+*/%^]|sqrt|log|ln|sin|cos|tan|abs', expr) and UNUSED_OPERATION.search(text):
+        # "half of 90" answered "90 = 90": the number is there, the operation isn't
+        return {'verified': 'mismatch', 'verify_note': 'The question asks for an operation this calculation does not '
+                                                       'do, so this may not answer what was asked.'}
+    used = numbers_in(expr)
+    pool = list(used)
+    for n in numbers_in(text):
+        hit = next((i for i, u in enumerate(pool) if math.isclose(u, n, rel_tol=1e-9, abs_tol=1e-9)), None)
+        if hit is None:
+            return {'verified': 'mismatch', 'verify_note': f'The question has {plain(n)}, but the calculation does not '
+                                                           f'use it, so this may not answer what was asked.'}
+        pool.pop(hit)
+    for rx, (first, second), says in ORDERED:
+        if not (m := rx.search(normalize_numbers(text.replace(',', '')))):
+            continue
+        a, b = as_number(m.group(first)), as_number(m.group(second))
+        if a is None or b is None or math.isclose(a, b):
+            continue
+        ia = next((i for i, u in enumerate(used) if math.isclose(u, a)), None)
+        ib = next((i for i, u in enumerate(used) if math.isclose(u, b)), None)
+        if ia is not None and ib is not None and ia > ib:
+            x, y = (m.group(1), m.group(2))
+            return {'verified': 'mismatch', 'verify_note': f'The question {says.format(x, y)}, but the calculation has '
+                                                           f'them the other way round.'}
+    return {'verified': 'ok', 'verify_note': None}
+
+
+def asked_conversion(text: str) -> tuple[float, str, str] | None:
+    """(amount, from, to) read from the question on its own: the currency written with the amount is the source ("how
+    many yen is 200 British pounds" is GBP to JPY), else the first one named. None when it names fewer than two."""
+    words = currency_words(text)
+    found = currencies_in(words, ISO_CODES)
+    codes = list(dict.fromkeys(c for _, c in found))
+    if len(codes) < 2:
+        return None
+    num = next((i for i, w in enumerate(words) if AMOUNT.fullmatch(w)), None)
+    amount = float(words[num]) if num is not None else 1.0
+    src = None
+    if num is None:  # "how many rupees is a dollar": one unit of the currency after "a"
+        num = next((i for i, w in enumerate(words[:-1]) if w.lower() in ('a', 'an', 'one') and i + 1 in dict(found)), None)
+    if num is not None:
+        j = num + 1
+        while j < len(words) and words[j].lower() in QUALIFIER:
+            j += 1
+        at = dict(found)
+        # "GBP to USD 100": a currency before the amount that follows "to" is the target, not the source
+        src = at.get(j) or (at.get(num - 1) if not target_word(words, num - 1) else None)
+    src = src or codes[0]
+    dst = next(c for c in codes if c != src)
+    return amount, src, dst
+
+
+def covers_currency(text: str, answer: str) -> dict | None:
+    """The answer converts the question's amount from the question's source currency to its target."""
+    asked = asked_conversion(text)
+    m = CONVERSION.search(answer or '')
+    if asked is None or m is None:
+        return None
+    amount, src, dst = asked
+    got_amount, got_src, got_dst = float(m.group(1).replace(',', '')), m.group(2), m.group(4)
+    if (got_src, got_dst) == (dst, src):
+        return {'verified': 'mismatch', 'verify_note': f'The question converts {src} to {dst}, but this answer converts '
+                                                       f'{dst} to {src}.'}
+    if {got_src, got_dst} != {src, dst}:
+        return {'verified': 'mismatch', 'verify_note': f'The question converts {src} to {dst}, but this answer converts '
+                                                       f'{got_src} to {got_dst}.'}
+    if not math.isclose(got_amount, amount, rel_tol=1e-6, abs_tol=0.005):
+        return {'verified': 'mismatch', 'verify_note': f'The question has {plain(amount)} {src}, but this answer '
+                                                       f'converts {plain(got_amount)} {src}.'}
+    return {'verified': 'ok', 'verify_note': None}
+
+
+def coverage(agent: str, text: str, answer: str) -> dict | None:
+    """AnswerChecks for a keyless math or currency answer: the numbers and currency codes in the step text must appear
+    in the answer, in the right direction. None when the agent is another one or the answer is not a result (a
+    question back, an honest miss)."""
+    if agent not in COVERED or not answer:
+        return None
+    try:
+        return covers_math(text, answer) if agent == 'math' else covers_currency(text, answer)
+    except Exception:
+        return None

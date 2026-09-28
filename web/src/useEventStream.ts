@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import {
   MERGE_TID, emptyStats,
-  type AnsweredFields, type ControlState, type EngineInfo, type Features, type HistoryRecord, type RunStatus, type MergeEngine, type Planner, type Prices,
-  type RoutedFields, type ServerEvent, type Source, type Stats,
+  type AnsweredFields, type ControlState, type EngineInfo, type Features, type FontsInfo, type HistoryRecord, type Limits, type RunStatus,
+  type MergeEngine, type Planner, type Prices, type RoutedFields, type RunRecord, type ServerEvent, type Source, type Stats,
+  type SuspectCheck,
 } from './protocol'
+
+/** The server's query limit (config.MAX_QUERY_CHARS) until hello says otherwise. */
+export const DEFAULT_LIMITS: Limits = { query_chars: 4000 }
 
 export const MAX_RUNS = 60
 
@@ -26,7 +30,10 @@ export interface Run {
   order: string[]
   tasks: Record<string, Task>
   mergeStream: string
-  merged?: { answer: string; engine: MergeEngine; ms: number | null }
+  // caveats: what the run could not do (shown in the "What I couldn't do" box); primary_file: CreatedFile id
+  merged?: { answer: string; engine: MergeEngine; ms: number | null; caveats?: string[]; primary_file?: string | null }
+  suspects?: SuspectCheck[] // stored records only: checks that flag the run as likely wrong
+  dry_run?: 'route' | null // routing-only eval run: no agent ran
   total_ms: number | null
   done: boolean
   error?: string
@@ -62,6 +69,8 @@ export interface Store {
   samples: string[]
   prices: Prices
   features: Features
+  limits: Limits
+  fonts: FontsInfo | null // null: the server does not report document fonts
   runs: Run[] // ascending qid, capped at MAX_RUNS
   lastError: string | null
   rev: number // bumps on every non-delta change, so charts can skip per-token redraws
@@ -76,6 +85,7 @@ const initial: Store = {
   state: { autopilot: false, interval: 3 }, stats: emptyStats(), samples: [],
   prices: { jev_in: 0.042, claude_in: 5, claude_out: 25 }, runs: [], lastError: null, rev: 0,
   features: { files: false, compare: false, evals: false, custom_agents: false, exec: false },
+  limits: DEFAULT_LIMITS, fonts: null,
 }
 
 const newRun = (qid: number, text = '', source: Source = 'you'): Run => ({
@@ -85,6 +95,9 @@ const newRun = (qid: number, text = '', source: Source = 'you'): Run => ({
 })
 
 const newTask = (tid: string, text = ''): Task => ({ tid, text, stream: '', depends_on: [] })
+
+const ROUTED_EXTRAS = ['examples', 'cached', 'forced', 'trace', 'signals', 'bound', 'assumption', 'frame_used'] as const
+const ANSWERED_EXTRAS = ['checks', 'created_files', 'caveats', 'frame'] as const
 
 /** Builds a client Run from a history/persisted record (hello.history, /api/runs, sessions, compare). */
 export function fromRecord(r: HistoryRecord): Run {
@@ -102,18 +115,24 @@ export function fromRecord(r: HistoryRecord): Run {
         confidence: t.confidence ?? 0, urgency: t.urgency ?? 0, unsafe: t.unsafe ?? 0, clear: t.clear ?? 0,
         jev_ms: t.jev_ms ?? 0, model: t.model ?? '',
       }
+      // Optional routing extras, copied only when stored so old records stay as they were.
+      for (const k of ROUTED_EXTRAS) if (t[k] !== undefined) (task.routed as unknown as Record<string, unknown>)[k] = t[k]
     }
     if (t.answer !== undefined) {
       task.answered = {
         agent: t.agent ?? '', agent_ms: t.agent_ms ?? 0, answer: t.answer, ok: t.ok ?? true,
         source: t.source ?? null, engine: t.engine ?? 'keyless',
       }
+      for (const k of ANSWERED_EXTRAS) if (t[k] !== undefined) (task.answered as unknown as Record<string, unknown>)[k] = t[k]
       task.stream = t.answer
     }
     run.tasks[t.tid] = task
   }
   if (r.merged) run.merged = { ...r.merged, ms: null }
   if (r.error) run.error = r.error
+  const rec = r as Partial<RunRecord>
+  if (rec.suspects) run.suspects = rec.suspects
+  if (rec.dry_run) run.dry_run = rec.dry_run
   run.total_ms = r.total_ms
   run.status = r.status ?? (r.total_ms == null ? 'running' : r.error ? 'error' : 'done')
   run.done = r.total_ms != null || (r.status != null && r.status !== 'running') // in-flight record: later live events finish it
@@ -144,14 +163,15 @@ function apply(s: Store, e: ServerEvent, rx: number): Store {
       const runs = (e.history ?? []).map(fromRecord).sort((a, b) => a.qid - b.qid).slice(-MAX_RUNS)
       return {
         ...s, ready: true, agents: e.agents ?? {}, guards: e.guards ?? [], claude: !!e.claude, engine: e.engine ?? null, engines: e.engines ?? [], state: e.state,
-        features: e.features ?? s.features,
+        features: e.features ?? s.features, limits: e.limits ?? s.limits, fonts: e.fonts ?? s.fonts,
         stats: e.stats ?? emptyStats(), samples: e.samples ?? [], prices: e.prices ?? s.prices, runs, lastError: null,
       }
     }
     case 'state': return { ...s, state: e.state }
     case 'config':
       return { ...s, agents: e.agents ?? s.agents, guards: e.guards ?? s.guards, claude: !!e.claude, engine: e.engine ?? null,
-        engines: e.engines ?? s.engines, prices: e.prices ?? s.prices, samples: e.samples ?? s.samples, features: e.features ?? s.features }
+        engines: e.engines ?? s.engines, prices: e.prices ?? s.prices, samples: e.samples ?? s.samples, features: e.features ?? s.features,
+        limits: e.limits ?? s.limits, fonts: e.fonts ?? s.fonts }
     case 'query':
       return {
         ...s, runs: withRun(s.runs, e.qid, r => ({
@@ -182,7 +202,7 @@ function apply(s: Store, e: ServerEvent, rx: number): Store {
       return { ...s, runs: withRun(s.runs, e.qid, r => withTask({ ...r, marks: { ...r.marks, answered: { ...r.marks.answered, [tid]: rx } } }, tid, t => ({ ...t, answered, stream: answered.answer }))) }
     }
     case 'merged':
-      return { ...s, runs: withRun(s.runs, e.qid, r => ({ ...r, merged: { answer: e.answer, engine: e.engine, ms: e.ms }, mergeStream: e.answer, marks: { ...r.marks, merged: rx } })) }
+      return { ...s, runs: withRun(s.runs, e.qid, r => ({ ...r, merged: { answer: e.answer, engine: e.engine, ms: e.ms, caveats: e.caveats, primary_file: e.primary_file }, mergeStream: e.answer, marks: { ...r.marks, merged: rx } })) }
     case 'done':
       return {
         ...s, stats: e.stats ?? s.stats, runs: withRun(s.runs, e.qid, r => ({

@@ -7,9 +7,9 @@ import os
 import re
 from functools import lru_cache
 
-from . import themes
+from . import diagram, fonts as font_mod, themes
 from .rules import SpecError
-from .spec import FORMATS, chart_summary, clean_chars, normalize, runs, show_number, strip_emphasis
+from .spec import DIAGRAMS, FORMATS, chart_summary, clean_chars, normalize, runs, show_number, strip_emphasis
 
 MAX_BYTES = 15 * 1024 * 1024
 AUTHOR = 'TraceGraph'
@@ -208,6 +208,44 @@ def _rgb(hex_color: str) -> tuple[int, int, int]:
     return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
 
 
+def asset_path(asset: str):
+    """The re-encoded PNG of an image block in the local asset cache (create/assets.py, rule X6)."""
+    from . import assets
+    return assets.CACHE / f'{asset}.png'
+
+
+def image_data(asset: str, mono: bool = False) -> io.BytesIO:
+    """An image block's PNG bytes; greyscale in a black and white file even when the cached copy is in colour (a file
+    converted to the mono theme after its images were fetched)."""
+    data = asset_path(asset).read_bytes()
+    if mono:
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as im:
+            if im.mode != 'L':
+                buf = io.BytesIO()
+                im.convert('L').save(buf, 'PNG')
+                data = buf.getvalue()
+    return io.BytesIO(data)
+
+
+def image_size(asset: str) -> tuple[int, int]:
+    from PIL import Image
+    with Image.open(asset_path(asset)) as im:
+        return im.size
+
+
+def fit_box(size: tuple[int, int], max_w: float, max_h: float) -> tuple[float, float]:
+    """(w, h) that keep the aspect ratio and fit inside max_w x max_h (any unit)."""
+    w, h = size
+    s = min(max_w / max(w, 1), max_h / max(h, 1))
+    return w * s, h * s
+
+
+def body_font(spec: dict, fmt: str, name: str) -> font_mod.FontChoice:
+    """The font this file's body text uses: the one the brief asked for when it can be used (create/fonts.py)."""
+    return font_mod.resolve(spec.get('font'), fmt, theme=name)
+
+
 # ---------- PDF (reportlab platypus) ----------
 
 UNICODE_FONTS = [  # (regular, bold); the first one found is embedded (subset) for text Helvetica cannot draw
@@ -288,16 +326,67 @@ def _markup(text: str) -> str:
     return ''.join(out)
 
 
-class _Fonts:
-    """Picks the theme's built-in font for Latin text and the Unicode TTF for everything else."""
+_BODY_TAGS: dict[str, str] = {}
 
-    def __init__(self, t: dict):
+
+@lru_cache(maxsize=8)
+def body_ttf(regular: str, bold: str | None, italic: str | None) -> tuple[str, str, str, str] | None:
+    """Registers a body TrueType font (TRACEGRAPH_BODY_FONT or a matching system font) as TGBody, with its bold and
+    italic faces when there are files for them; None when the file can't be read."""
+    from reportlab.lib.fonts import addMapping
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    tag = 'TGBody' + (str(len(_BODY_TAGS) + 1) if _BODY_TAGS else '')
+    _BODY_TAGS[regular] = tag
+    try:
+        pdfmetrics.registerFont(TTFont(tag, regular))
+        names = [tag, tag, tag, tag]
+        for i, path in ((1, bold), (2, italic)):
+            if path:
+                pdfmetrics.registerFont(TTFont(f'{tag}-{i}', path))
+                names[i] = f'{tag}-{i}'
+        names[3] = names[1]
+        addMapping(tag, 0, 0, names[0])
+        addMapping(tag, 1, 0, names[1])
+        addMapping(tag, 0, 1, names[2])
+        addMapping(tag, 1, 1, names[3])
+        return tuple(names)
+    except Exception:
+        return None
+
+
+# the PDF standard families a body font can switch to, with their bold, italic and bold italic faces
+STANDARD_FACES = {'Helvetica': ('Helvetica', 'Helvetica-Bold', 'Helvetica-Oblique', 'Helvetica-BoldOblique'),
+                  'Times-Roman': ('Times-Roman', 'Times-Bold', 'Times-Italic', 'Times-BoldItalic'),
+                  'Courier': ('Courier', 'Courier-Bold', 'Courier-Oblique', 'Courier-BoldOblique')}
+
+
+class _Fonts:
+    """Picks the body font for text it can draw (the theme's built-in font, or the TrueType body font the brief asked
+    for) and the Unicode TTF for everything else."""
+
+    def __init__(self, t: dict, body: font_mod.FontChoice | None = None):
         self.regular, self.bold, self.italic, self.bold_italic = t['pdf_font']
         self.uni = unicode_font()
+        self.body_glyphs = None
+        if body is not None and body.regular:
+            names = body_ttf(body.regular, body.bold, body.italic)
+            if names:
+                from reportlab.pdfbase import pdfmetrics
+                self.regular, self.bold, self.italic, self.bold_italic = names
+                try:
+                    self.body_glyphs = frozenset(pdfmetrics.getFont(names[0]).face.charToGlyph)
+                except Exception:
+                    self.body_glyphs = frozenset()
+        elif body is not None and body.used in STANDARD_FACES:
+            self.regular, self.bold, self.italic, self.bold_italic = STANDARD_FACES[body.used]
 
     def fit(self, text: str) -> tuple[str, bool]:
         """(text to draw, use the Unicode font). Characters no available font has (emoji, say) become '?'."""
-        if latin(text):
+        if self.body_glyphs is not None:
+            if all(ord(ch) in self.body_glyphs or ch in '\n\t' for ch in text):
+                return text, False
+        elif latin(text):
             return text, False
         if self.uni:
             glyphs = unicode_glyphs()
@@ -317,11 +406,11 @@ def _pdf(spec: dict, name: str) -> bytes:
     from reportlab.lib.pagesizes import A4, letter
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import cm
-    from reportlab.platypus import (BaseDocTemplate, Frame, KeepTogether, PageTemplate, Paragraph, Preformatted, Spacer,
-                                    Table, TableStyle)
+    from reportlab.platypus import (BaseDocTemplate, Frame, Image, KeepTogether, PageBreak, PageTemplate, Paragraph,
+                                    Preformatted, Spacer, Table, TableStyle)
 
     t = themes.get(name)
-    fonts = _Fonts(t)
+    fonts = _Fonts(t, body_font(spec, 'pdf', name))
     c = {k: colors.HexColor('#' + t[k]) for k in ('bg', 'text', 'muted', 'heading', 'accent', 'header_bg',
                                                      'header_text', 'stripe', 'code_bg', 'border')}
     page = letter if spec.get('paper') == 'letter' else A4
@@ -433,8 +522,6 @@ def _pdf(spec: dict, name: str) -> bytes:
         story.append(Spacer(1, 8))
     for sec in spec['sections']:
         heading = [Heading(sec['heading'], styles[sec['level']], sec['level'])] if sec['heading'] else []
-        if not sec['blocks']:
-            story += heading
         for b in sec['blocks']:
             kind, parts = b['type'], []
             if kind == 'paragraph':
@@ -463,13 +550,39 @@ def _pdf(spec: dict, name: str) -> bytes:
             elif kind == 'chart':
                 parts.append(KeepTogether([para(b['title'], styles['caption']), _pdf_chart(b, t, fonts, width),
                                            para(chart_summary(b), styles['summary'])]))
-            if heading:  # a heading never ends a page alone: it travels with the start of its first block
+            elif kind in DIAGRAMS:
+                def fit(text, bold):
+                    drawn, uni = fonts.fit(text)
+                    return drawn, (fonts.uni[1] if bold else fonts.uni[0]) if uni else (fonts.bold if bold else
+                                                                                       fonts.regular)
+                drawing = diagram.pdf_drawing(b, t, width, max_height=page[1] - 2 * margin - 60, fit=fit,
+                                              font=fonts.regular, bold=fonts.bold)
+                parts.append(KeepTogether([para(b['title'], styles['caption']), drawing, Spacer(1, 10)]))
+            elif kind == 'image':
+                w, h = fit_box(image_size(b['asset']), width, (page[1] - 2 * margin) * 0.55)
+                pic = Image(image_data(b['asset'], bool(t.get('patterns'))), width=w, height=h)
+                pic.hAlign = 'CENTER'
+                items = [pic]
+                if b.get('caption'):
+                    items.append(para(b['caption'], ParagraphStyle('figcap', parent=styles['summary'], spaceBefore=4,
+                                                                   spaceAfter=0, textColor=c['text'])))
+                items.append(para(b['credit'], ParagraphStyle('credit', parent=styles['summary'], fontSize=8,
+                                                              leading=10, spaceBefore=2)))
+                parts.append(KeepTogether(items))
+            elif kind == 'page_break':
+                parts.append(PageBreak())
+            if not parts:
+                continue
+            if heading and kind == 'page_break':  # a break before a section's first block starts the section afresh
+                story += parts
+            elif heading:  # a heading never ends a page alone: it travels with the start of its first block
                 big = kind == 'table' and len(b['rows']) > 15 or kind == 'code' and b['text'].count('\n') > 30
                 story.append(KeepTogether(heading + parts[:1]) if not big else heading[0])
                 story += parts[1:] if not big else parts
                 heading = []
             else:
                 story += parts
+        story += heading
     buf = io.BytesIO()
     doc = Doc(buf, pagesize=page, leftMargin=margin, rightMargin=margin, topMargin=margin, bottomMargin=margin,
               title=title, author=AUTHOR, subject=spec.get('subtitle') or '', creator=AUTHOR)
@@ -491,6 +604,9 @@ def _pdf_chart(b: dict, t: dict, fonts: _Fonts, width: float):
     from reportlab.lib import colors
 
     text_c, palette = colors.HexColor('#' + t['text']), [colors.HexColor('#' + p) for p in t['palette']]
+    patterns = bool(t.get('patterns'))
+    if patterns:  # black and white: light fills under hatching, so the series differ by pattern, not colour
+        palette = [colors.HexColor('#' + p) for p in ('FFFFFF', 'D9D9D9', 'FFFFFF', 'BFBFBF', 'FFFFFF', 'F2F2F2')]
     labels = [fonts.fit(_short(x, 18))[0] for x in b['labels']]
     all_text = ' '.join(labels + [s['name'] for s in b['series']])
     font = fonts.name(all_text)
@@ -512,15 +628,16 @@ def _pdf_chart(b: dict, t: dict, fonts: _Fonts, width: float):
         p.data = vals
         p.labels = [f'{v / total:.0%}' for v in vals]
         p.simpleLabels = 1
+        greys = [colors.HexColor('#' + g) for g in t['palette']] if patterns else palette
         for i in range(len(vals)):
-            p.slices[i].fillColor = palette[i % len(palette)]
+            p.slices[i].fillColor = greys[i % len(greys)]
             p.slices[i].strokeColor = colors.white
             p.slices[i].fontName, p.slices[i].fontSize, p.slices[i].fontColor = font, 8, text_c
         d.add(p)
         lg = Legend()
         lg.x, lg.y, lg.alignment = h + 10, h - 30, 'right'
         lg.fontName, lg.fontSize, lg.fillColor = font, 8.5, text_c
-        lg.colorNamePairs = [(palette[i % len(palette)], f'{labs[i]} ({vals[i] / total:.0%})') for i in range(len(vals))]
+        lg.colorNamePairs = [(greys[i % len(greys)], f'{labs[i]} ({vals[i] / total:.0%})') for i in range(len(vals))]
         d.add(lg)
         return d
     if b['kind'] == 'line':
@@ -528,16 +645,20 @@ def _pdf_chart(b: dict, t: dict, fonts: _Fonts, width: float):
         markers = ['FilledCircle', 'FilledSquare', 'FilledDiamond', 'FilledTriangle', 'Circle', 'Square']
         ch.data = [tuple(s['values']) for s in series]
         for i in range(len(series)):
-            ch.lines[i].strokeColor = palette[i % len(palette)]
+            ch.lines[i].strokeColor = text_c if patterns else palette[i % len(palette)]
             ch.lines[i].strokeWidth = 1.8
+            if patterns:
+                ch.lines[i].strokeDashArray = DASHES[i % len(DASHES)]
             ch.lines[i].symbol = makeMarker(markers[i % len(markers)])
-            ch.lines[i].symbol.fillColor = palette[i % len(palette)]
+            ch.lines[i].symbol.fillColor = text_c if patterns else palette[i % len(palette)]
     else:
-        ch = VerticalBarChart()
+        ch = _hatched_bars(text_c) if patterns else VerticalBarChart()
         ch.data = [tuple(v if v is not None else 0 for v in s['values']) for s in series]
         for i in range(len(series)):
             ch.bars[i].fillColor = palette[i % len(palette)]
-            ch.bars[i].strokeColor = None
+            ch.bars[i].strokeColor = text_c if patterns else None
+            if patterns:
+                ch.bars[i].strokeWidth = 0.8
         if len(labels) * len(series) <= 24:
             ch.barLabelFormat = lambda v: _num_label(v)
             ch.barLabels.nudge = 7
@@ -565,8 +686,73 @@ def _pdf_chart(b: dict, t: dict, fonts: _Fonts, width: float):
         lg.fontName, lg.fontSize, lg.fillColor = font, 8.5, text_c
         lg.colorNamePairs = [(palette[i % len(palette)], fonts.fit(_short(s['name'], 20))[0])
                              for i, s in enumerate(series)]
+        if patterns:
+            lg.strokeColor, lg.strokeWidth = text_c, 0.8
+            lg.colorNamePairs = [(p, f'{HATCH_NAMES[i % len(HATCH_NAMES)]}: {n}')
+                                 for i, (p, n) in enumerate(lg.colorNamePairs)]
         d.add(lg)
     return d
+
+
+# Black and white charts: one hatch pattern per bar series (named in the legend) and one dash pattern per line series.
+HATCHES = [(45,), (), (-45,), (0,), (45, -45), (90,)]
+HATCH_NAMES = ['diagonal', 'plain', 'reverse diagonal', 'horizontal', 'cross', 'vertical']
+DASHES = [None, (6, 3), (1.5, 2.5), (8, 3, 2, 3), (3, 3), (10, 4)]
+
+
+def _clip(x0, y0, dx, dy, box) -> tuple[float, float, float, float] | None:
+    """The part of the infinite line through (x0, y0) along (dx, dy) that lies in box (x, y, w, h) (Liang-Barsky)."""
+    bx, by, bw, bh = box
+    t0, t1 = -1e9, 1e9
+    for p, q in ((-dx, x0 - bx), (dx, bx + bw - x0), (-dy, y0 - by), (dy, by + bh - y0)):
+        if abs(p) < 1e-12:
+            if q < 0:
+                return None
+            continue
+        r = q / p
+        if p < 0:
+            t0 = max(t0, r)
+        else:
+            t1 = min(t1, r)
+    if t0 >= t1:
+        return None
+    return x0 + t0 * dx, y0 + t0 * dy, x0 + t1 * dx, y0 + t1 * dy
+
+
+def hatch_lines(x, y, w, h, angles, gap: float = 4.5) -> list[tuple[float, float, float, float]]:
+    import math
+    if w < 0:
+        x, w = x + w, -w
+    if h < 0:
+        y, h = y + h, -h
+    out = []
+    for ang in angles:
+        dx, dy = math.cos(math.radians(ang)), math.sin(math.radians(ang))
+        nx, ny = -dy, dx  # the lines are spaced along the normal
+        span = abs(w * nx) + abs(h * ny)
+        cx, cy = x + w / 2, y + h / 2
+        k = -span / 2
+        while k <= span / 2:
+            seg = _clip(cx + nx * k, cy + ny * k, dx, dy, (x, y, w, h))
+            if seg:
+                out.append(seg)
+            k += gap
+    return out
+
+
+def _hatched_bars(stroke):
+    """A VerticalBarChart whose bars carry the hatch pattern of their series."""
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+    from reportlab.graphics.shapes import Group, Line
+
+    class Hatched(VerticalBarChart):
+        def _makeBar(self, g, x, y, width, height, rowNo, style):
+            super()._makeBar(g, x, y, width, height, rowNo, style)
+            lines = Group()
+            for x1, y1, x2, y2 in hatch_lines(x, y, width, height, HATCHES[rowNo % len(HATCHES)]):
+                lines.add(Line(x1, y1, x2, y2, strokeColor=stroke, strokeWidth=0.5))
+            g.add(lines)
+    return Hatched()
 
 
 def _num_label(v) -> str:
@@ -591,6 +777,9 @@ def _docx(spec: dict, name: str) -> bytes:
     from docx.shared import Cm, Pt, RGBColor
 
     t = themes.get(name, paper=True)
+    choice = body_font(spec, 'docx', name)
+    if choice.requested:  # the font the brief named, by name (Word draws it where it is installed)
+        t = {**t, 'font': choice.used, 'heading_font': choice.used}
     doc = Document()
     rgb = {k: RGBColor(*_rgb(t[k])) for k in ('text', 'muted', 'heading', 'accent', 'header_text')}
     cp = doc.core_properties
@@ -757,6 +946,22 @@ def _docx(spec: dict, name: str) -> bytes:
                 table(cols, rows)
                 add_runs(doc.add_paragraph(), f'{chart_summary(b)} ({b["kind"]} chart shown as a table)',
                          color=rgb['muted'], italic=True)
+            elif kind in DIAGRAMS:
+                # a picture drawn from the same layout as the PDF, with every label as its alt text
+                doc.add_paragraph(f'Diagram: {b["title"]}', style='Caption')
+                doc.add_picture(io.BytesIO(diagram.png(b, t, 1340)), width=Cm(17))
+                doc.inline_shapes[-1]._inline.docPr.set('descr', diagram.alt_text(b)[:1000])
+                doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            elif kind == 'image':
+                w, h = fit_box(image_size(b['asset']), 17, 12)
+                doc.add_picture(image_data(b['asset'], bool(t.get('patterns'))), width=Cm(w))
+                doc.inline_shapes[-1]._inline.docPr.set('descr', (b.get('caption') or b['credit'])[:1000])
+                doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                if b.get('caption'):
+                    add_runs(doc.add_paragraph(style='Caption'), b['caption'])
+                add_runs(doc.add_paragraph(style='Caption'), b['credit'], size=8.5)
+            elif kind == 'page_break':
+                doc.add_page_break()
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
@@ -778,7 +983,12 @@ def _pptx(spec: dict, name: str) -> bytes:
     from pptx.oxml.ns import qn
     from pptx.util import Inches, Pt
 
+    from pptx.enum.dml import MSO_LINE_DASH_STYLE, MSO_PATTERN
+
     t = themes.get(name)
+    choice = body_font(spec, 'pptx', name)
+    if choice.requested:
+        t = {**t, 'font': choice.used, 'heading_font': choice.used}
     rgb = {k: RGBColor(*_rgb(t[k])) for k in ('bg', 'text', 'muted', 'heading', 'accent', 'header_bg', 'header_text',
                                              'stripe', 'code_bg')}
     palette = [RGBColor(*_rgb(p)) for p in t['palette']]
@@ -904,12 +1114,24 @@ def _pptx(spec: dict, name: str) -> bytes:
         else:
             markers = [XL_MARKER_STYLE.CIRCLE, XL_MARKER_STYLE.SQUARE, XL_MARKER_STYLE.DIAMOND,
                        XL_MARKER_STYLE.TRIANGLE, XL_MARKER_STYLE.X, XL_MARKER_STYLE.STAR]
+            patterns = [MSO_PATTERN.WIDE_UPWARD_DIAGONAL, MSO_PATTERN.PERCENT_20, MSO_PATTERN.WIDE_DOWNWARD_DIAGONAL,
+                        MSO_PATTERN.NARROW_HORIZONTAL, MSO_PATTERN.CROSS, MSO_PATTERN.NARROW_VERTICAL]
+            dashes = [MSO_LINE_DASH_STYLE.SOLID, MSO_LINE_DASH_STYLE.DASH, MSO_LINE_DASH_STYLE.ROUND_DOT,
+                      MSO_LINE_DASH_STYLE.DASH_DOT, MSO_LINE_DASH_STYLE.SQUARE_DOT, MSO_LINE_DASH_STYLE.LONG_DASH]
             for i, s in enumerate(plot.series):
                 if b['kind'] == 'line':
-                    s.format.line.color.rgb = palette[i % len(palette)]
+                    s.format.line.color.rgb = rgb['text'] if t.get('patterns') else palette[i % len(palette)]
+                    if t.get('patterns'):
+                        s.format.line.dash_style = dashes[i % len(dashes)]
                     s.marker.style = markers[i % len(markers)]
                     s.marker.format.fill.solid()
-                    s.marker.format.fill.fore_color.rgb = palette[i % len(palette)]
+                    s.marker.format.fill.fore_color.rgb = rgb['text'] if t.get('patterns') else palette[i % len(palette)]
+                elif t.get('patterns'):  # black and white: hatch patterns, outlined
+                    s.format.fill.patterned()
+                    s.format.fill.pattern = patterns[i % len(patterns)]
+                    s.format.fill.fore_color.rgb = rgb['text']
+                    s.format.fill.back_color.rgb = rgb['bg']
+                    s.format.line.color.rgb = rgb['text']
                 else:
                     s.format.fill.solid()
                     s.format.fill.fore_color.rgb = palette[i % len(palette)]
@@ -936,6 +1158,31 @@ def _pptx(spec: dict, name: str) -> bytes:
             r.font.name, r.font.size, r.font.color.rgb = t['mono'], Pt(14), rgb['text']
         return shape
 
+    def diagram_shape(slide, b, box):
+        # native shapes and connectors, with the diagram's title as a small caption above them
+        x, y, w, h = box
+        cap = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(0.45))
+        cap.name = 'Diagram title'
+        style_runs(cap.text_frame.paragraphs[0], b['title'], 16, rgb['muted'], bold=True)
+        diagram.pptx_draw(slide, b, t, (x, y + 0.5, w, h - 0.5), font=t['font'])
+
+    def image_shape(slide, b, box):
+        x, y, w, h = box
+        room = 0.45 + (0.45 if b.get('caption') else 0)
+        pw, ph = fit_box(image_size(b['asset']), w, h - room)
+        pic = slide.shapes.add_picture(image_data(b['asset'], bool(t.get('patterns'))), Inches(x + (w - pw) / 2),
+                                       Inches(y), Inches(pw), Inches(ph))
+        pic.name = 'Image'
+        pic._element.nvPicPr.cNvPr.set('descr', (b.get('caption') or b['credit'])[:1000])
+        tb = slide.shapes.add_textbox(Inches(x), Inches(y + ph + 0.05), Inches(w), Inches(room))
+        tb.name = 'Image credit'
+        tb.text_frame.word_wrap = True
+        p = tb.text_frame.paragraphs[0]
+        if b.get('caption'):
+            style_runs(p, b['caption'], 14, rgb['text'])
+            p = tb.text_frame.add_paragraph()
+        style_runs(p, b['credit'], 10, rgb['muted'])
+
     slide = prs.slides.add_slide(prs.slide_layouts[0])  # the title slide (F3)
     background(slide)
     set_title(slide.shapes.title, spec['title'], 40, rgb['heading'], (margin + 0.2, 2.3, body_w - 0.4, 1.6))
@@ -950,7 +1197,7 @@ def _pptx(spec: dict, name: str) -> bytes:
         slide = prs.slides.add_slide(prs.slide_layouts[5])  # Title Only: a real title placeholder (A1)
         background(slide)
         text = [b for b in sec['blocks'] if b['type'] in ('paragraph', 'bullets', 'quote')]
-        visuals = [b for b in sec['blocks'] if b['type'] in ('table', 'chart', 'code')]
+        visuals = [b for b in sec['blocks'] if b['type'] in ('table', 'chart', 'code', 'image', *DIAGRAMS)]
         only_title = not text and not visuals
         set_title(slide.shapes.title, sec['heading'], TITLE_PT if not only_title else 40, rgb['heading'],
                   (margin, 0.35 if not only_title else 2.8, body_w, 1.05 if not only_title else 1.6))
@@ -964,7 +1211,8 @@ def _pptx(spec: dict, name: str) -> bytes:
         else:
             vbox = (margin, top, body_w, body_h)
         for b in visuals[:1]:
-            {'table': table_shape, 'chart': chart_shape, 'code': code_box}[b['type']](slide, b, vbox)
+            {'table': table_shape, 'chart': chart_shape, 'code': code_box, 'image': image_shape, 'timeline': diagram_shape,
+             'tree': diagram_shape, 'flow': diagram_shape}[b['type']](slide, b, vbox)
         if sec.get('notes'):
             slide.notes_slide.notes_text_frame.text = sec['notes']  # overflow text lives in the notes (L3, F3)
     buf = io.BytesIO()
@@ -1014,7 +1262,8 @@ def xlsx_plan(spec: dict) -> list[dict]:
     """The workbook's sheets in order: a Notes sheet when there is text, one sheet per table (with the charts of its
     section that plot it or sit after it), and a sheet for each chart with no table before it."""
     used, plan = set(), []
-    has_text = any(b['type'] in ('paragraph', 'bullets', 'quote', 'code') for s in spec['sections'] for b in s['blocks'])
+    has_text = any(b['type'] in ('paragraph', 'bullets', 'quote', 'code', *DIAGRAMS) for s in spec['sections']
+                   for b in s['blocks'])
     if has_text:
         plan.append({'name': sheet_name('Notes', used), 'kind': 'notes'})
     n_table = n_chart = 0
@@ -1053,7 +1302,12 @@ def _xlsx(spec: dict, name: str) -> bytes:
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
 
+    from openpyxl.drawing.fill import ColorChoice, PatternFillProperties
+
     t = themes.get(name, paper=True)
+    choice = font_mod.resolve(spec.get('font'), 'xlsx', theme=name)
+    if choice.requested:
+        t = {**t, 'font': choice.used}
     wb = Workbook()
     wb.remove(wb.active)
     wb.properties.title, wb.properties.creator = spec['title'], AUTHOR
@@ -1095,12 +1349,20 @@ def _xlsx(spec: dict, name: str) -> bytes:
         ch.width, ch.height = 18, 9
         if kind != 'pie':
             ch.x_axis.delete = ch.y_axis.delete = False
+            hatch = ['wdUpDiag', 'pct20', 'wdDnDiag', 'narHorz', 'smGrid', 'narVert']
+            dash = ['solid', 'dash', 'sysDot', 'dashDot', 'sysDash', 'lgDash']
             for i, s in enumerate(ch.series):
                 color = t['palette'][i % len(t['palette'])]
                 if kind == 'line':
-                    s.graphicalProperties.line.solidFill = color
+                    s.graphicalProperties.line.solidFill = t['text'] if t.get('patterns') else color
+                    if t.get('patterns'):
+                        s.graphicalProperties.line.prstDash = dash[i % len(dash)]
                     s.marker = Marker(symbol=markers[i % len(markers)], size=7)
-                    s.marker.graphicalProperties.solidFill = color
+                    s.marker.graphicalProperties.solidFill = t['text'] if t.get('patterns') else color
+                elif t.get('patterns'):  # black and white: hatch patterns, outlined
+                    s.graphicalProperties.pattFill = PatternFillProperties(
+                        prst=hatch[i % len(hatch)], fgClr=ColorChoice(srgbClr=t['text']), bgClr=ColorChoice(srgbClr=t['bg']))
+                    s.graphicalProperties.line.solidFill = t['text']
                 else:
                     s.graphicalProperties.solidFill = color
             if len(ch.series) < 2:
@@ -1149,6 +1411,17 @@ def _xlsx(spec: dict, name: str) -> bytes:
                     elif b['type'] == 'chart':
                         put(ws, r, 1, f'Chart: {b["title"]}. {chart_summary(b)}',
                             Font(italic=True, color=t['muted'], name=t['font'])).alignment = wrap
+                        r += 1
+                    elif b['type'] in DIAGRAMS:  # a diagram becomes its table
+                        put(ws, r, 1, f'Diagram: {b["title"]}', Font(italic=True, color=t['muted'], name=t['font']))
+                        r += 1
+                        cols, rows = diagram.table_of(b)
+                        for j, c in enumerate(cols, 1):
+                            put(ws, r, j, c, Font(bold=True, name=t['font'], color=t['text']))
+                        for row in rows:
+                            r += 1
+                            for j, v in enumerate(row, 1):
+                                put(ws, r, j, v)
                         r += 1
             continue
         if sh['kind'] == 'table':
@@ -1260,4 +1533,12 @@ def _md(spec: dict, name: str) -> bytes:
                 out.append(f'**Chart: {_md_line(b["title"])}** ({b["kind"]} chart)')
                 out.append(_md_table(cols, rows))
                 out.append(f'*{_md_line(chart_summary(b))}*')
+            elif kind in DIAGRAMS:  # mermaid for viewers that draw it, and the same facts as a table for those that don't
+                out.append(f'**Diagram: {_md_line(b["title"])}**')
+                out.append('```mermaid\n' + diagram.mermaid(b) + '\n```')
+                out.append(_md_table(*diagram.table_of(b)))
+            elif kind == 'image':  # X3: a Markdown file can't embed image bytes, so only the caption and credit stay
+                if b.get('caption'):
+                    out.append(f'*Figure: {_md_line(b["caption"])}*')
+                out.append(_md_escape(b['credit']))
     return ('\n\n'.join(out) + '\n').encode('utf-8')

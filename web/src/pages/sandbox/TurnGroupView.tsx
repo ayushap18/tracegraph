@@ -6,11 +6,13 @@ import { RoutingWhy } from './RoutingWhy'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { DEFAULT_LIMITS } from '../../useEventStream'
+import { COUNT_FROM } from '../../components/chat/ChatOptions'
 
 // One question in the sandbox, with every edited version of it. The active version is shown with its answer and
 // the routing explanation; earlier versions stay available through the switcher, nothing is thrown away.
 
-const MAX_CHARS = 500
+const MAX_CHARS = DEFAULT_LIMITS.query_chars
 
 export function TurnGroupView({ group, byQid, agents, draftName, selectedQid, busy, onShowTrace, onEdit, onSelectVersion, fileName = id => id }: TurnGroupViewProps) {
   const count = group.qids.length
@@ -89,7 +91,7 @@ export function TurnGroupView({ group, byQid, agents, draftName, selectedQid, bu
             <span className="mr-auto hidden items-center gap-1 text-xs text-muted-foreground sm:flex">
               <Kbd>Enter</Kbd> re-run <Kbd>Esc</Kbd> cancel
             </span>
-            {draft.length > 400 && <span className="text-xs tabular-nums text-muted-foreground">{draft.length}/{MAX_CHARS}</span>}
+            {draft.length >= COUNT_FROM && <span className="text-xs tabular-nums text-muted-foreground">{draft.length.toLocaleString()}/{MAX_CHARS.toLocaleString()}</span>}
             <Button variant="ghost" size="sm" onClick={cancel}>Cancel</Button>
             <Button type="submit" variant="primary" size="sm" icon="replay" disabled={!canRerun}>Re-run</Button>
           </div>

@@ -15,7 +15,8 @@ from tests.fakes import FakeEngine, FakeJev, ScriptEngine
 
 
 def route(text):
-    for word, agent in (('weather', 'weather'), ('orders', 'data'), ('EUR', 'currency'), ('double', 'math'), ('%', 'math')):
+    for word, agent in (('weather', 'weather'), ('orders', 'data'), ('EUR', 'currency'), ('double', 'math'), ('%', 'math'),
+                        (' * ', 'math')):
         if word in text:
             return agent, 0.9
     return 'chat', 0.3
@@ -106,11 +107,12 @@ def test_select_by_split_and_tags():
 
 def test_committed_suite_shape():
     cases = evals.load_cases(evals.CASES)
-    assert 180 <= len(cases) <= 260
+    assert len(cases) <= 600  # per-kind floors instead of a fixed size (docs/PLAN-accuracy-v2.md D7)
     holdout = sum(c.get('split') == 'holdout' for c in cases)
-    assert 0.2 <= holdout / len(cases) <= 0.3
-    kinds = {k: sum(evals.case_kind(c) == k for c in cases) for k in ('multi_turn', 'file', 'judge')}
-    assert kinds['multi_turn'] >= 15 and kinds['file'] >= 25 and kinds['judge'] >= 10
+    assert 0.2 <= holdout / len(cases) <= 0.35
+    kinds = {k: sum(evals.case_kind(c) == k for c in cases) for k in ('single', 'multi_turn', 'file')}
+    assert kinds['single'] >= 120 and kinds['multi_turn'] >= 30 and kinds['file'] >= 60
+    assert sum(bool(c.get('judge')) for c in cases) >= 14 and sum('real-traffic' in c['tags'] for c in cases) >= 12
     assert sum(bool(c.get('paraphrases')) for c in cases) >= 10 and sum('max_ms' in c for c in cases) >= 8
     tags = {t for c in cases for t in c['tags']}
     assert {'safety', 'injection', 'honesty', 'units', 'dates', 'files', 'multi-turn', 'dag', 'latency'} <= tags
@@ -360,15 +362,22 @@ async def test_cli_json_split_tags(cli_env, capsys):
     assert await evals.cli('none', save=False, tags=['nothing']) == 2
 
 
-async def test_save_baseline_merges_a_partial_run(cli_env):
+async def test_save_baseline_keeps_tag_rates_per_suite(cli_env, monkeypatch):
     base = cli_env / 'baseline.json'
-    base.write_text('{"none": {"w": false, "h": false, "gone": true}, "codex": {"w": true}}')
-    assert await evals.cli('none', save=True, split='holdout') == 0
-    saved = json.loads(base.read_text())
-    # only h was run: w keeps its entry, a case no longer in cases.jsonl drops out, other engines are untouched
-    assert saved == {'none': {'w': False, 'h': True}, 'codex': {'w': True}}
+    base.write_text('{"codex": {"w": true}}')  # an older per-case baseline for another engine stays as it was
+    monkeypatch.setattr(evals, 'suite_sha', lambda path=None: 'sha1')
     assert await evals.cli('none', save=True, tags=['w']) == 0
-    assert json.loads(base.read_text())['none'] == {'w': True, 'h': True}
+    saved = json.loads(base.read_text())
+    assert saved['codex'] == {'w': True} and saved['keyless']['rates'] == {'w': 1.0}
+    assert saved['keyless']['suite_sha'] == 'sha1' and saved['keyless']['totals'] == {'w': 1}
+    # a partial run adds its own tags and keeps the others while the suite is the same
+    saved['keyless']['rates']['old'] = 0.5
+    base.write_text(json.dumps(saved))
+    assert await evals.cli('none', save=True, tags=['h']) == 0  # h is unjudged: no tag rate to record
+    assert json.loads(base.read_text())['keyless']['rates'] == {'w': 1.0, 'old': 0.5}
+    monkeypatch.setattr(evals, 'suite_sha', lambda path=None: 'sha2')  # the cases changed: start over
+    assert await evals.cli('none', save=True, tags=['w']) == 0
+    assert json.loads(base.read_text())['keyless']['rates'] == {'w': 1.0}
 
 
 async def test_cli_matrix_warns_and_prints_table(cli_env, capsys):
@@ -376,7 +385,8 @@ async def test_cli_matrix_warns_and_prints_table(cli_env, capsys):
     got = capsys.readouterr()
     assert 'spends your subscription or API quota' in got.err and '--matrix runs 1 engines (none)' in got.err
     table = got.out.split('\n\n')[-1].splitlines()
-    assert table[0].split() == ['none'] and table[1].split() == ['passed', '2/2'] and table[2].split() == ['accuracy', '100%']
-    assert ['tag', 'h', '1/1'] in [line.split() for line in table] and ['tag', 'w', '1/1'] in [line.split() for line in table]
+    # h has a rubric and no judge ran, so it is unjudged: left out of passed and total, and of its tag
+    assert table[0].split() == ['none'] and table[1].split() == ['passed', '1/1'] and table[2].split() == ['accuracy', '100%']
+    assert ['tag', 'w', '1/1'] in [line.split() for line in table] and not any('h' in line.split() for line in table)
     assert await evals.cli(None, save=False, matrix=True, as_json=True) == 0
     assert [r['engine'] for r in json.loads(capsys.readouterr().out)] == ['none']

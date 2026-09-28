@@ -107,8 +107,14 @@ async def client_with_runs():
     ('time in Tokyo and 15% of 380', False), ('weather in Paris and convert 100 EUR to INR', False),
     ('Convert 50 EUR to INR and then what time is it there', True),  # dependent step
     ('weather in Paris and convert 100 EUR to INR, then which is better value', True),
-    ('convert 100 USD to INR and double it', True), ('Who was Marks and Spencer\'s founder?', True),  # can't split
-    ('Paris weather, Tokyo time', True),
+    ('convert 100 USD to INR and double it', True),
+    # one question needs no LLM plan (docs/PLAN-accuracy-v2.md A7), even when "and" is part of a name
+    ('Who was Marks and Spencer\'s founder?', False),
+    ('Paris weather, Tokyo time', False),  # a comma list of requests: the text splitter splits it
+    ('Paris weather, the height of the Eiffel Tower', True),  # a comma between clauses the text splitter left joined
+    ('What time is it in New York?', False), ('Will it rain in Mumbai tomorrow?', False),
+    ('Is it safe to eat raw eggs?', False), ('Is Pluto a planet? Why not?', True),
+    ('Research the history of the Eiffel Tower in depth, 5 pages as a PDF', True),  # a file request with other content
     (' and '.join(['weather in Paris'] * 7), True),  # long
 ])
 def test_needs_llm_plan(query, llm):
@@ -218,10 +224,10 @@ async def test_single_exact_answer_takes_the_style_the_template_can_apply():
 
 
 async def test_speculative_route_is_reused_for_an_unchanged_single_step():
-    engine = ScriptEngine(plan={'subtasks': [{'text': 'hey, what time is it in Tokyo', 'depends_on': []}]})
+    engine = ScriptEngine(plan={'subtasks': [{'text': 'the time in Tokyo, please', 'depends_on': []}]})
     jev = FakeJev(route_for=lambda t: ('time', 0.9))
     router = Router(jev, engine=engine, registry={'time': fake_agent('Tokyo: 9:00')})
-    events = await run(router, 'hey, what time is it in Tokyo')
+    events = await run(router, 'the time in Tokyo, please')  # the comma: an LLM plan, and the route alongside it
     routes = [c for c in jev.calls if 'route' in c[1]]
     assert len(routes) == 1 and len(llm_calls(engine, 'plan')) == 1  # routed once, alongside the planner
     assert [e['type'] for e in events].count('routed') == 1 and events[-2]['answer'] == 'Tokyo: 9:00'
@@ -232,17 +238,17 @@ async def test_speculative_route_is_dropped_when_the_plan_splits():
     engine = ScriptEngine(plan={'subtasks': [{'text': 'hey', 'depends_on': []}, {'text': 'hello again', 'depends_on': []}]})
     jev = FakeJev(route_for=lambda t: ('chat', 0.9))
     router = Router(jev, engine=engine, registry={'chat': fake_agent('hi')})
-    await run(router, 'hey and hello again')
+    await run(router, 'good morning, and hello again')
     routed_texts = [c[0] for c in jev.calls if 'route' in c[1]]
-    assert routed_texts == ['hey and hello again', 'hey', 'hello again']  # the speculative route, then one per step
+    assert routed_texts == ['good morning, and hello again', 'hey', 'hello again']  # the speculative route, then one per step
 
 
 async def test_speculative_route_is_not_reused_for_a_rewritten_step():
     engine = ScriptEngine(plan={'subtasks': [{'text': 'convert 100 USD to GBP', 'depends_on': []}]})
     jev = FakeJev(route_for=lambda t: ('currency', 0.9))
     router = Router(jev, engine=engine, registry={'currency': fake_agent('100 USD = 79 GBP')})
-    await run(router, 'and 100 dollars in pounds too?')
-    assert [c[0] for c in jev.calls if 'route' in c[1]] == ['and 100 dollars in pounds too?', 'convert 100 USD to GBP']
+    await run(router, 'and 100 dollars, in pounds too?')
+    assert [c[0] for c in jev.calls if 'route' in c[1]] == ['and 100 dollars, in pounds too?', 'convert 100 USD to GBP']
 
 
 def fake_agent(answer):

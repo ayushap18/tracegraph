@@ -1,4 +1,5 @@
 """Eval cases file, scoring, summaries and regressions."""
+import json
 import re
 
 from jevrouter import evals
@@ -69,7 +70,17 @@ async def test_cli_exit_codes(tmp_path, monkeypatch):
     import typesafe_sdk
     monkeypatch.setattr(typesafe_sdk, 'AsyncTypeSafeClient', lambda: None)
     assert await evals.cli('none', save=True) == 0
-    assert (tmp_path / 'baseline.json').read_text().count('true') == 1
-    (tmp_path / 'baseline.json').write_text('{"none": {"w": true, "h": true}}')
+    saved = json.loads((tmp_path / 'baseline.json').read_text())
+    assert saved['keyless']['rates'] == {} and saved['keyless']['suite_sha'] == evals.suite_sha()  # the cases have no tags
+    (tmp_path / 'baseline.json').write_text('{"none": {"w": true, "h": true}}')  # an older per-case baseline still gates
     assert await evals.cli('none', save=False) == 1
     assert await evals.cli('gpt-9', save=False) == 2
+    # per-tag baselines: a tag more than 10 points below its baseline rate is a regression
+    cases.write_text('{"id": "w", "query": "weather in Paris", "must_match": "Paris", "tags": ["a"]}\n'
+                     '{"id": "h", "query": "hmm", "expect_outcome": "answer", "tags": ["a"]}\n')
+    base = {'keyless': {'suite_sha': evals.suite_sha(), 'rates': {'a': 1.0}}}
+    (tmp_path / 'baseline.json').write_text(json.dumps(base))
+    assert await evals.cli('none', save=False) == 1
+    base['keyless']['rates']['a'] = 0.55
+    (tmp_path / 'baseline.json').write_text(json.dumps(base))
+    assert await evals.cli('none', save=False) == 0

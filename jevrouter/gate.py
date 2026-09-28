@@ -11,10 +11,13 @@
 - clarify_text: every clarify message is plain English with concrete options; it never names internal agents.
 """
 import re
+from dataclasses import dataclass
+from datetime import date
 from urllib.parse import quote, unquote
 
-from .agents.tools import (CURRENCY_PLACE, ECB_CODES, currency_question, find_place, get_json, parse_currency, parse_zone,
-                           place_in, solve_math)
+from .agents.tools import (AMOUNT, CAPITAL_OF, COUNTRY_NAME, CURRENCY_OF, CURRENCY_PLACE, ECB_CODES, currencies_in,
+                           currency_question, currency_words, date_maths, dates_in, find_place, get_json, math_spans,
+                           math_text, parse_currency, parse_units, parse_zone, place_in, solve_math)
 
 # ---------- actions we can't perform ----------
 
@@ -101,29 +104,428 @@ WEATHER_WORDS = re.compile(r'\b(?:weather|forecast|rain|raining|snow|snowing|sun
 
 
 def confirmed(agent: str, text: str) -> bool:
-    """True when the keyless agent's own parser finds every detail it needs in the text."""
+    """True when the keyless agent's own parser finds every detail it needs in the text, and uses every constraint and
+    number the text gives (parse_for(...).full): "weather in Madrid next year" names a place but asks for a date the
+    forecast can't reach, so it is not confirmed."""
     try:
+        p = parse_for(agent, text)
+        if p is None or not p.slots or not p.full:
+            return False
         if agent == 'time':
             return bool(TIME_WORDS.search(text) and (parse_zone(text) or place_in(text)))
         if agent == 'weather':
             return bool(WEATHER_WORDS.search(text) and place_in(text))
-        if agent == 'currency':
-            return not isinstance(parse_currency(text, ECB_CODES), str)
         if agent == 'math':
-            solved = solve_math(text)
-            return bool(solved and re.search(r'[-+*/%]|sqrt|log|ln|sin|cos|tan', solved[0]))
+            return bool(re.search(r'[-+*/%]|sqrt|log|ln|sin|cos|tan', p.slots['expr']))
+        return agent in ('currency', 'units', 'dates')
+    except Exception:
+        return False
+
+
+def declines(agent: str, text: str) -> bool:
+    """True when the keyless agent's own parser recognises the request as one it must turn down honestly, so its answer
+    beats a clarify: a currency that isn't real ("100 USD to Wakandan dollars", "100 USD in WKD")."""
+    try:
+        if agent == 'currency':
+            from .agents.tools import unknown_currency
+            return bool(unknown_currency(text))
     except Exception:
         return False
     return False
 
 
 def question(agent: str, text: str) -> str | None:
-    """A follow-up question when the agent can't act without a detail the text lacks, else None."""
+    """A follow-up question when the agent can't act without a detail the text lacks, else None. A detail given by
+    description ("the currency of Brazil") is not missing: it is looked up (A5), never asked for."""
+    if described(text):
+        return None
     if agent == 'currency':
         return currency_question(text)
     if agent == 'weather' and not find_place(text):
         return 'Which city or place do you want the weather for?'
     return None
+
+
+# ---------- keyless parser contracts (docs/PLAN-accuracy-v2.md A5) ----------
+
+@dataclass
+class Parse:
+    slots: dict            # parsed values
+    unused: list[str]      # constraints in the text it could not use: 'future date', 'second place', 'source time', 'described currency'
+    numbers_used: int
+    numbers_seen: int
+
+    @property
+    def full(self) -> bool:
+        return not self.unused and self.numbers_used >= self.numbers_seen
+
+
+NUMBER = re.compile(r'\d+(?:\.\d+)?')
+FORECAST_DAYS = 16  # the weather API's forecast range
+# "at 3pm", "15:30": a clock time the user gives, to be converted from, which the time agent can't use
+CLOCK_TIME = re.compile(r'(?<![+\-\u2212\u2013\d:.])\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)(?!\w)'
+                        r'|(?<![+\-\u2212\u2013\d:.])\b\d{1,2}:\d{2}\b', re.I)
+# A place or currency named by what it is rather than by name
+DESCRIBED_PLACE = re.compile(
+    r"\b(?:the\s+)?capital(?:\s+city)?\s+of\b|\b(?:birth\s*place|home\s*town|hometown)\b|\bwhere\s+(?:\w+\s+){1,4}"
+    r"(?:was|were|is|are)\s+(?:born|from|based|headquartered)\b|\b(?:the\s+)?(?:city|town|country|place)\s+(?:where|that|which)\b"
+    r"|\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*'s\s+capital\b", re.I)
+DESCRIBED_CURRENCY = re.compile(r"\b(?:the\s+)?(?:local\s+)?(?:currency|money)\s+(?:of|used\s+in|in)\s+(?!\d)|"
+                                r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*'s\s+(?:currency|money)\b|\bthe\s+local\s+currency\b", re.I)
+COUNTRY_END = r"(?=\s*[?.!,;]|\s+(?:and|then|to|into|in|right|now|today|tomorrow|please|at|on)\b|\s*$)"
+CAPITAL_PHRASE = re.compile(rf"\b(?:the\s+)?capital(?:\s+city)?\s+of\s+(?:the\s+)?(?P<c>[A-Za-z .'-]+?){COUNTRY_END}"
+                            rf"|\b(?P<c2>(?-i:[A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*)*))'s\s+capital(?:\s+city)?\b", re.I)
+CURRENCY_PHRASE = re.compile(rf"\b(?:the\s+)?(?:local\s+)?(?:currency|money)\s+(?:of|used\s+in|in)\s+(?:the\s+)?"
+                             rf"(?P<c>[A-Za-z .'-]+?){COUNTRY_END}"
+                             rf"|\b(?P<c2>(?-i:[A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*)*))'s\s+(?:currency|money)\b", re.I)
+
+
+# "Convert 100 USD into it" after "What currency does Japan use?", "Convert 100 EUR into its currency": the target
+# currency is the one the text asks about, named only by what it refers back to.
+CURRENCY_REF = re.compile(r"\b(?P<prep>to|into|in|as)\s+(?:it|that(?:\s+currency)?|its\s+(?:currency|money)|their\s+"
+                          r"(?:currency|money))(?=\s*[?.!,;]|\s*$)", re.I)
+CURRENCY_CUE = re.compile(r'\b(?:currency|currencies|money)\b', re.I)
+
+
+def currency_ref(text: str) -> re.Match | None:
+    """The conversion target that points back at a currency the text asks about, or None."""
+    m = CURRENCY_REF.search(text)
+    return m if m and CURRENCY_CUE.search(text) and re.search(r'\d', text) else None
+
+
+def described(text: str) -> str | None:
+    """'described place' or 'described currency' when the text names one only by a description, else None."""
+    if DESCRIBED_CURRENCY.search(text) or currency_ref(text):
+        return 'described currency'
+    if DESCRIBED_PLACE.search(text):
+        return 'described place'
+    return None
+
+
+def country(name: str) -> str | None:
+    key = re.sub(r'\s+', ' ', name.strip(" .'")).lower()
+    key = re.sub(r'^the\s+', '', key) if key not in CAPITAL_OF else key
+    return key if key in CAPITAL_OF else None
+
+
+# A capital city -> its country ("the currency used in Bern" is Switzerland's)
+COUNTRY_OF_CAPITAL = {cap.lower(): c for c, cap in CAPITAL_OF.items()}
+
+
+def country_of_place(name: str) -> str | None:
+    """The country a currency phrase is about: a country, a capital city, or a capital named by description ("the
+    currency used in the capital of Switzerland")."""
+    if key := country(name):
+        return key
+    bare = re.sub(r'\s+', ' ', name.strip(" .'"))
+    if (m := CAPITAL_PHRASE.match(bare)) and m.end() == len(bare):
+        return country(m.group('c') or m.group('c2') or '')
+    return COUNTRY_OF_CAPITAL.get(re.sub(r'^the\s+', '', bare.lower()))
+
+
+# A keyless slot request: weather, a clock time, or a conversion. "What is the currency of Japan?" and "Is Sydney the
+# capital of Australia?" are questions about the description itself, never rewritten.
+SLOT_CUE = re.compile(r'\b(?:weather|forecast|rain(?:ing)?|snow(?:ing)?|sunny|temperature|humid|windy|time|clock|'
+                      r'convert|exchange)\b|\d', re.I)
+# the description is the place or currency the request is about: "weather in the capital of X", "100 USD to X's money"
+SLOT_OF = re.compile(r"\b(?:in|at|for|to|into|from|near|around)\s*$", re.I)
+
+
+def resolve_described(text: str) -> str | None:
+    """The text with each capital or currency named by description replaced from the static tables ("weather in the
+    capital of Switzerland" -> "weather in Bern"; "100 USD to the currency of Brazil" -> "100 USD to BRL"), or None when
+    there is nothing to replace or a country isn't in the tables. Only a keyless slot request (SLOT_CUE) is rewritten,
+    and only where the description is the object of in/at/to/into...: a question about the capital or the currency
+    itself is left as the user wrote it."""
+    if not SLOT_CUE.search(text):
+        return None
+    out, missing = text, False
+
+    def sub(table):
+        def repl(m):
+            nonlocal missing
+            if not SLOT_OF.search(m.string[:m.start()]):
+                return m.group(0)
+            key = (country_of_place if table is CURRENCY_OF else country)(m.group('c') or m.group('c2') or '')
+            if key is None:
+                missing = True
+                return m.group(0)
+            return table[key]
+        return repl
+    out = CURRENCY_PHRASE.sub(sub(CURRENCY_OF), out)
+    out = CAPITAL_PHRASE.sub(sub(CAPITAL_OF), out)
+    if ref := currency_ref(out):
+        # "What currency does Japan use? Convert 100 USD into it": the one country the text names
+        named = {country(c) for c in COUNTRY_MENTION.findall(out[:ref.start()] + out[ref.end():])} - {None}
+        if len(named) != 1:
+            return None
+        out = out[:ref.start()] + f"{ref.group('prep')} {CURRENCY_OF[named.pop()]}" + out[ref.end():]
+    return None if missing or out == text else out
+
+
+# A country named in the text, by its own name ("Japan", "South Korea"), for a currency the text refers back to.
+COUNTRY_MENTION = re.compile(r'\b(' + '|'.join(re.escape(c) for c in sorted((c for c in COUNTRY_NAME.values()),
+                                                                           key=len, reverse=True)) + r')\b')
+
+
+NOT_PLACE = {'what', 'the', 'current', 'local', 'today', 'whats', 'now', 'tomorrow', 'tonight', 'here', 'there', 'please',
+             'thanks', 'me', 'it', 'too', 'also', 'then', 'both'}
+
+
+AND_COUNTRIES = sorted((c for c in COUNTRY_NAME if ' and ' in c), key=len, reverse=True)
+# States, provinces and territories written after a city ("Portland, Oregon", "Sydney, Nova Scotia"): they qualify the
+# place before them, like a country does. Any two-letter capital code ("Cambridge, MA") counts too.
+REGIONS = {
+    'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado', 'connecticut', 'delaware', 'florida', 'georgia',
+    'hawaii', 'idaho', 'illinois', 'indiana', 'iowa', 'kansas', 'kentucky', 'louisiana', 'maine', 'maryland',
+    'massachusetts', 'michigan', 'minnesota', 'mississippi', 'missouri', 'montana', 'nebraska', 'nevada',
+    'new hampshire', 'new jersey', 'new mexico', 'new york', 'north carolina', 'north dakota', 'ohio', 'oklahoma',
+    'oregon', 'pennsylvania', 'rhode island', 'south carolina', 'south dakota', 'tennessee', 'texas', 'utah', 'vermont',
+    'virginia', 'washington', 'west virginia', 'wisconsin', 'wyoming', 'district of columbia', 'd.c.', 'dc',
+    'ontario', 'quebec', 'british columbia', 'alberta', 'manitoba', 'saskatchewan', 'nova scotia', 'new brunswick',
+    'newfoundland', 'newfoundland and labrador', 'prince edward island', 'yukon', 'nunavut', 'northwest territories',
+    'new south wales', 'victoria', 'queensland', 'south australia', 'western australia', 'tasmania',
+    'northern territory', 'australian capital territory', 'england', 'scotland', 'wales', 'northern ireland',
+    'bavaria', 'catalonia', 'tuscany', 'punjab', 'maharashtra', 'kerala', 'karnataka', 'tamil nadu', 'gujarat',
+    'rajasthan', 'uttar pradesh', 'west bengal', 'bihar', 'goa', 'haryana', 'telangana', 'andhra pradesh',
+}
+
+
+def region(part: str) -> bool:
+    """True when a comma-joined part is a state, province or region code qualifying the place before it."""
+    bare = part.strip(' ?.!')
+    return bare.lower() in REGIONS or bool(re.fullmatch(r'[A-Z]{2}|[A-Z]\.[A-Z]\.', bare))
+
+
+def places_in(text: str) -> list[str]:
+    """Every place a weather or time request names, in order: "Weather in Vienna and Prague", "vienna weather, prague
+    weather" -> two places."""
+    found = []
+    # a country whose name holds "and" ("Trinidad and Tobago") is one place, not two
+    for name in AND_COUNTRIES:
+        text = re.sub(rf'\b{re.escape(name)}\b', lambda m: m.group(0).replace(' and ', ' \x00 '), text, flags=re.I)
+    pieces = re.split(r'\s*([,;&]|\band\b|\bor\b|\bvs\.?|\bversus\b)\s*', text)
+    for n, part in enumerate(pieces[::2]):
+        part = part.replace('\x00', 'and')
+        if not part.strip():
+            continue
+        if found and n and pieces[2 * n - 1] == ',' and region(part):
+            continue  # "Portland, Oregon": the state of the place before it
+        place = part.strip(' ?.!') if part.strip(' ?.!').lower() in AND_COUNTRIES else find_place(part)
+        if not place:
+            m = re.match(r"\s*([a-z][a-z'-]+(?:\s+[a-z][a-z'-]+)?)\s+(?:weather|forecast|temperature|time)\b", part, re.I)
+            place = m.group(1) if m and m.group(1).lower() not in NOT_PLACE else None
+        # "... in Vienna and Prague": a bare name after a place is another place
+        bare = part.strip(' ?.!')
+        if not place and found and bare.lower() in COUNTRY_NAME:
+            continue  # "New Delhi, India": the country of the place before it
+        if (not place and found and re.fullmatch(r"[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,2}", bare)
+                and not WEATHER_WORDS.search(bare) and not TIME_WORDS.search(bare) and bare.lower() not in NOT_PLACE):
+            place = bare
+        if place and place.lower() not in (p.lower() for p in found):
+            found.append(place)
+    return found
+
+
+def future_days(text: str, today: date | None = None) -> int | None:
+    """How many days ahead the text asks about, when it names a future date or period, else None."""
+    today = today or date.today()
+    t = text.lower()
+    days = []
+    if m := re.search(r'\bin\s+(\d+)\s*(day|week|month|year)s?\b', t):
+        days.append(int(m.group(1)) * {'day': 1, 'week': 7, 'month': 30, 'year': 365}[m.group(2)])
+    if re.search(r'\bnext\s+year\b', t):
+        days.append(max(1, (date(today.year + 1, 1, 1) - today).days))
+    if re.search(r'\bnext\s+month\b', t):
+        days.append(30)
+    for y in re.findall(r'\b(2\d{3})\b', t):
+        if int(y) > today.year:
+            days.append((date(int(y), 1, 1) - today).days)
+    try:
+        days += [(d - today).days for _, d, _ in dates_in(text, today) if d > today]
+    except Exception:
+        pass
+    return max(days) if days else None
+
+
+def future_year(text: str, today: date | None = None) -> int | None:
+    """A year after this one that the text asks about ("in 2090", "next year"), else None."""
+    this = (today or date.today()).year
+    years = [int(y) for y in re.findall(r'\b(2\d{3})\b', text) if int(y) > this]
+    if re.search(r'\bnext\s+year\b', text, re.I):
+        years.append(this + 1)
+    return max(years) if years else None
+
+
+def parse_for(agent: str, text: str) -> Parse | None:
+    """What the keyless agent's parser reads from the text, and what in the text it can't use. None for agents that
+    don't parse (every LLM agent)."""
+    unused: list[str] = []
+    if agent in ('weather', 'time', 'currency') and (kind := described(text)) and not resolve_described(text):
+        unused.append(kind)
+    if agent == 'math':
+        s = math_text(text)
+        seen = sum(len(NUMBER.findall(x)) for x in math_spans(s))
+        try:
+            solved = solve_math(text)
+        except Exception:
+            solved = None
+        if not solved:
+            return Parse({}, unused, 0, seen)
+        return Parse({'expr': solved[0], 'value': solved[1]}, unused, seen, seen)
+    if agent == 'currency':
+        words = currency_words(text)
+        seen = sum(1 for w in words if AMOUNT.fullmatch(w))
+        parsed = parse_currency(text, ECB_CODES)
+        if len({c for _, c in currencies_in(words, ECB_CODES)}) > 2:
+            unused.append('second currency')
+        if (days := future_days(text)) and days > 0:
+            unused.append('future date')
+        if isinstance(parsed, str):
+            return Parse({}, unused, 0, seen)
+        amount, src, dst = parsed
+        return Parse({'amount': amount, 'from': src, 'to': dst}, unused, min(seen, 1), seen)
+    if agent == 'weather':
+        places = places_in(text)
+        if len(places) > 1:
+            unused.append('second place')
+        if (days := future_days(text)) and days > FORECAST_DAYS:
+            unused.append('future date')
+        place = find_place(text)
+        return Parse({'city': place} if place else {}, unused, 0, 0)
+    if agent == 'time':
+        if CLOCK_TIME.search(text):
+            unused.append('source time')
+        if len(places_in(text)) > 1:
+            unused.append('second place')
+        zone, place = parse_zone(text), find_place(text)
+        slots = {'zone': zone[0]} if zone else {'city': place} if place else {}
+        return Parse(slots, unused, 0, 0)
+    if agent == 'units':
+        parsed = parse_units(text)
+        if isinstance(parsed, tuple):
+            return Parse({'amount': parsed[0], 'from': parsed[1][1], 'to': parsed[2][1]}, unused, 1, 1)
+        return Parse({}, unused, 0, 0)
+    if agent == 'dates':
+        try:
+            answer, ok = date_maths(text)
+        except Exception:
+            answer, ok = '', False
+        return Parse({'date': answer} if ok else {}, unused, 0, 0)
+    return None
+
+
+def partial_frame(pick: str | None, text: str) -> dict | None:
+    """The frame of a step that asked a question instead of answering, when what it did parse is worth keeping: "My
+    budget for the trip is 2,000 euros" (a currency pick with no target) leaves the amount and its currency, so "How
+    much is that in US dollars?" can convert them. None otherwise."""
+    if pick != 'currency':
+        return None
+    words = currency_words(text)
+    amounts = [w for w in words if AMOUNT.fullmatch(w)]
+    found = {c for _, c in currencies_in(words, ECB_CODES)}
+    if len(amounts) != 1 or len(found) != 1:
+        return None
+    return {'agent': 'currency', 'slots': {'amount': float(amounts[0]), 'from': found.pop()}}
+
+
+def frame_slots(agent: str, text: str) -> dict:
+    """The slots a finished step carries to the next turn (A4): the keyless parser's, or the topic for an LLM agent."""
+    p = parse_for(agent, text)
+    if p is not None:
+        return {k: v for k, v in p.slots.items() if isinstance(v, (str, int, float))}
+    topic = topic_of(text)
+    return {'topic': topic} if topic else {}
+
+
+TOPIC_LEAD = re.compile(r"^(?:(?:please|hey|hi|ok|so)\s+)*(?:what(?:'s| is| are| was| were)?|who(?:'s| is| was| were)?|"
+                        r"tell me (?:about|more about)?|explain|describe|how (?:do|does|did|to|can) (?:i|you|we)?|"
+                        r"why (?:is|are|do|does)|write (?:about|a \w+ (?:on|about))?)\s+", re.I)
+
+
+def topic_of(text: str) -> str:
+    """The first noun phrase of a request: "Who was Ada Lovelace?" -> "Ada Lovelace"."""
+    t = re.sub(r'\s+', ' ', text).strip().rstrip('?!. ')
+    for _ in range(2):
+        t = TOPIC_LEAD.sub('', t).strip()
+    t = re.sub(r'^(?:the|a|an)\s+', '', t, flags=re.I)
+    return ' '.join(t.split()[:6])
+
+
+# ---------- honest outcomes (A3, B6) ----------
+
+def unsupported_text(kind: str, text: str) -> str:
+    """The answer for a request this app can't do: 'action', 'personal', 'live' or 'described'."""
+    if kind == 'action':
+        what = cant_do(text)
+        if what:
+            return what[1]
+        return ("Sorry, I can't do that for you: I'm not able to take actions in the world, like booking, buying, sending "
+                f"or scheduling things. {CAPABILITIES}.")
+    if kind == 'personal':
+        return ("I can't see your private information, such as your location, account, calendar, contacts or files you "
+                "haven't attached, or anyone else's personal details. If you tell me what you know, I can help with that.")
+    if kind == 'live':
+        return ("I don't have live data here, so I can't give you that as it is right now. An engine that can search "
+                "the web can look it up, or check a live source such as the official site.")
+    if kind == 'described':
+        return ("I can't look that up here: the place or currency is named only by a description, and finding out what "
+                "it is needs an LLM engine. Name it directly (for example \"weather in Bern\") or choose an engine in "
+                "Settings.")
+    return "Sorry, I can't do that here."
+
+
+def future_note(text: str) -> str | None:
+    """The answer for a request about a date no source here can know yet, else None: weather beyond the forecast's
+    range, or anything in a year after this one."""
+    days = future_days(text)
+    if days is None:
+        return None
+    if WEATHER_WORDS.search(text) and days > FORECAST_DAYS:
+        return (f"I can't tell you the weather that far ahead: forecasts only reach about {FORECAST_DAYS} days, and "
+                'no one can know the weather beyond that. Ask again closer to the day.')
+    if (year := future_year(text)) is not None:
+        return (f"I can't tell you that: {year} hasn't happened yet, so no one can know it now. I can help with what "
+                'is known today.')
+    return None
+
+
+# Predictions: "who will win", "what will ... be", "going to", "forecast for 2030".
+PREDICTION = re.compile(r"\b(?:will|going\s+to|gonna|predict(?:ion)?s?|forecast|wins?|winners?|next\s+week'?s?|tomorrow'?s?\s+"
+                        r"(?:winning|lottery|close|closing))\b", re.I)
+ADVICE = re.compile(r"\b(?:should\s+I|what\s+should\s+I\s+(?:learn|do|choose|pick)|is\s+it\s+worth|which\s+is\s+better\s+"
+                    r"for\s+me|\w+\s+or\s+\w+\s+for\s+(?:me|a|an|the|my|someone|beginners?)|either\b.+\bor\b|"
+                    r"for\s+the\s+\w+(?:\s+\w+)?\s+role)\b", re.I)
+CODE_ARTIFACT = re.compile(r'\b(?:write|fix|debug|example|snippet|function|error)\b', re.I)
+TIME_SENSITIVE = re.compile(r'\b(?:cut-?off|rank(?:ing)?s?|admissions?|fees?|top\s+college|this\s+year|latest|'
+                            r'current(?:ly)?|20\d\d)\b', re.I)
+# words that make rank, current or latest a figure rather than "the ranks of cards" or "electric current"
+FIGURE_FRAME = re.compile(r'\b(?:cut-?off|admissions?|fees?|tuition|top\s+college|this\s+year(?:\W?s)?|20\d\d|'
+                          r'(?:how\s+much|what|which|closing|opening|required|expected|minimum|air|all\s+india)\s+rank|'
+                          r'rank(?:ing)?s?\s+(?:of|for|in|needed|required|list)|placements?|seats?|packages?|salary|'
+                          r'acceptance\s+rate|eligibility|marks?|scores?|percentile)\b', re.I)
+# a named institution: an institution word, or an acronym such as IIT, JEE or NEET. A capitalised word alone is not one
+# ("Ohm's law", "the ranks of cards in Poker", "how Google ranks pages").
+INSTITUTION = re.compile(r'\b(?i:colleges?|universit(?:y|ies)|institutes?|iits?|nits?|schools?|boards?|exams?|entrance|'
+                         r'agenc(?:y|ies)|ministr(?:y|ies)|compan(?:y|ies)|clubs?|teams?)\b|\b[A-Z]{2,}[a-z]?\b')
+TIME_SENSITIVE_CAVEAT = 'Figures like these change every year; check the official source.'
+ADVICE_KEYLESS = 'This needs an engine to answer well: it is advice, not a lookup.'
+
+
+def advice(text: str) -> bool:
+    """A request for advice on a choice ("Should I learn Rust or Go first?"), not for code."""
+    return bool(ADVICE.search(text)) and not CODE_ARTIFACT.search(text)
+
+
+def time_sensitive(text: str, today: date | None = None) -> bool:
+    """A figure that changes from year to year about a named institution or thing: cut-off ranks, fees, rankings."""
+    this = (today or date.today()).year
+    hits = [m.group(0) for m in TIME_SENSITIVE.finditer(text)]
+    hits = [h for h in hits if not re.fullmatch(r'20\d\d', h) or int(h) >= this - 1]
+    if not hits or not INSTITUTION.search(text.strip()):
+        return False
+    # "current" or "latest" alone, or "ranks" as a verb, is not a yearly figure: one of the figure words must be there
+    return bool(FIGURE_FRAME.search(text))
 
 
 # ---------- lone ambiguous terms ----------
@@ -234,13 +636,17 @@ def option(agent: str, descriptions: dict | None = None) -> str:
     return (d[:1].lower() + d[1:]).rstrip('.') if isinstance(d, str) and d else 'something else'
 
 
-def clarify_text(probabilities: dict, text: str = '', descriptions: dict | None = None) -> str:
+def clarify_text(probabilities: dict, text: str = '', descriptions: dict | None = None, earlier: bool = True) -> str:
     """A plain-English follow-up question built from Jev's route probabilities: the favourite's missing detail when one
-    agent clearly leads, otherwise the two or three likeliest readings as options. Never names an agent."""
-    ranked = [a for a, p in sorted(probabilities.items(), key=lambda kv: -kv[1]) if a not in ('clarify', 'blocked')]
+    agent clearly leads, otherwise the two or three likeliest readings as options. Never names an agent. `earlier`:
+    whether the chat has anything before this request (an earlier turn or an attached file) that "that" could mean."""
+    ranked = [a for a, p in sorted(probabilities.items(), key=lambda kv: -kv[1]) if a not in ('clarify', 'blocked',
+                                                                                              'unsupported')]
     if not ranked:
         return 'Could you add a bit more detail about what you need?'
     top = ranked[0]
+    if top == 'create' and (ask := topic_question(text, earlier)):
+        return ask
     # The favourite's own missing detail ("a pound": money or weight?) beats a generic list of readings.
     p_top = probabilities.get(top, 0)
     ask = (question(top, text) if p_top >= 0.3 else None) or (NEEDS.get(top) if p_top >= 0.6 else None)
@@ -254,6 +660,24 @@ def clarify_text(probabilities: dict, text: str = '', descriptions: dict | None 
         picks = ranked[:2]
     opts = list(dict.fromkeys(option(a, descriptions) for a in picks))
     return f'Could you add a bit more detail? Do you mean {join_or(opts)}?'
+
+
+FORMAT_WORD = {'pdf': 'PDF', 'docx': 'document', 'pptx': 'presentation', 'xlsx': 'spreadsheet', 'md': 'document'}
+
+
+def topic_question(text: str, earlier: bool = True) -> str | None:
+    """'What should the presentation be about?' for a file request that names no topic and points at nothing earlier
+    ("Make me a presentation"), else None. A request that points back ("put that in a PDF") in a chat with nothing
+    earlier says so and asks for the topic."""
+    from . import create as cf
+    from .agents import create as create_agent
+    if not text or create_agent.has_topic(text):
+        return None
+    what = FORMAT_WORD.get(cf.detect_format(text), 'file')
+    if create_agent.refers_back(text):
+        return None if earlier else (f"There's nothing earlier in this chat to put in a {what}. "
+                                     f'What should the {what} be about?')
+    return f'What should the {what} be about?'
 
 
 AGENT_NAME = re.compile(r'\bagents?\b', re.I)
@@ -308,6 +732,26 @@ def resolve_there(text: str, earlier: list[str]) -> str | None:
         return None
     place = referent_place(earlier)
     return THERE.sub(f'in {place}', text, count=1) if place else None
+
+
+RESULT_WORDS = re.compile(r'\b(?:the|that|this)\s+(?:result|answer|total|sum|amount|number|figure|value)\b|'
+                          r'(?<=\bconvert )(?:it|that|this)\b', re.I)
+
+
+def resolve_result(text: str, earlier: list[tuple[str, str]]) -> str | None:
+    """Keyless: "convert the result to EUR" after "Add 120 and 380 dollars" (answered "(120+380) = 500") names the
+    number the earlier step worked out, with the currency that step was in: "convert 500 USD to EUR". None when there is
+    nothing to replace or no number to put in."""
+    if not earlier or not RESULT_WORDS.search(text) or NUMBER.search(text):
+        return None
+    if not isinstance(parse_currency(text, ECB_CODES), str):
+        return None  # "convert that amount from EUR to GBP" parses on its own: its own text stands
+    step, answer = earlier[-1]
+    m = re.search(r'=\s*([\d,]+(?:\.\d+)?)\s*([A-Z]{3})?', answer or '')
+    if not m:
+        return None
+    unit = m.group(2) or next((c for _, c in currencies_in(currency_words(step), ECB_CODES)), '')
+    return RESULT_WORDS.sub(f'{m.group(1).replace(",", "")} {unit}'.strip(), text, count=1)
 
 
 # ---------- asking for a file ----------

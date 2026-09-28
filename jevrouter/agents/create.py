@@ -5,6 +5,11 @@ slides"), an earlier step's answer or the previous answer in the chat parsed fro
 attached table ("turn this CSV into a spreadsheet"). Only when none of them fits is the engine asked, once, for a spec
 under DOCSPEC_SCHEMA with a trimmed context and a per-format token cap. Every spec passes Jev's safety check (X4), then
 normalize -> render -> verify (docs/RULES-files.md); a block rule means an honest answer and no file.
+
+docs/PLAN-accuracy-v2.md C1-C8: the request's brief (pages or slides, theme, font, images, diagrams) decides the path.
+A file an earlier step made is reused (converted at 0 tokens when it holds enough, else the seed of a longer one), an
+earlier step's answer is copied only when the brief asks for no more than that, and a long, illustrated or diagrammed
+file goes to the long-document writer (create/longdoc.py). What the file could not honour comes back as caveats.
 """
 import asyncio
 import csv
@@ -17,9 +22,14 @@ from dataclasses import dataclass, field
 from .. import create as cf
 from ..config import (BLOCK_AT, CREATE_CONTEXT_CHARS, CREATE_MAX_TOKENS, CREATE_SAFETY_CHARS, CREATE_SAFETY_CHUNKS,
                       CREATE_TABLE_ROWS)
+from ..create import brief as brief_mod
+from ..create.brief import Brief, asks_more, diagrams_min, parse_brief
 from ..engines import EngineError, EngineRefusal, parse_json
+from ..create import fonts
+from ..create.rules import span
 from ..jev import unsafe_score
 from ..planner import FILE_FORMATS, is_file_request
+from .llm import image_ideas
 
 LABELS = {'pdf': 'PDF', 'docx': 'Word', 'pptx': 'PowerPoint', 'xlsx': 'Excel', 'md': 'Markdown'}
 TURNS = 3  # earlier turns the spec call may see
@@ -43,8 +53,15 @@ REFERS = re.compile(r'\b(?:that|this|it|these|those|above|previous|last|earlier|
 GENERATIVE = re.compile(r'\b(?:summari[sz]e|summary|analy[sz]e|analysis|insights?|explain|write\s+(?:up|about)|'
                         r'research|recommend|interpret|findings|trends?)\b', re.I)
 DEEP = re.compile(r'\b(?:research|in[- ]depth|detailed|comprehensive|thorough|deep[- ]dive|long|full)\b', re.I)
-THEME = {'dark': re.compile(r'\bdark\s+(?:theme|mode|style|background|slides|colou?rs?)\b|\bin\s+dark\b', re.I),
-         'warm': re.compile(r'\bwarm\s+(?:theme|style|colou?rs?|tones?)\b', re.I)}
+THEME = brief_mod.THEMES  # mono (black and white), dark, warm: the same patterns the brief reads
+# B3: lines only the chat shows, never a file: "**weather**: ..." labels, a create step's "Created **x.pdf**, 4 pages"
+# reply and its "No format was named" note
+AGENT_LABEL = re.compile(r'^\*\*[a-z_]+\*\*:\s*', re.M)
+REPLY_LINE = re.compile(r'^(?:Created \*\*.+?\*\*, .*|No format was named.*)$', re.M)
+CREATED_ONLY = re.compile(r'^\s*Created \*\*.+?\*\*(?:, [^\n]*)?\s*$')
+# B2/C8: a spec note that admits something was left undone becomes a caveat
+UNDONE = re.compile(r"\b(not (fetched|included|checked|verified)|could not|couldn't|no (image|source)s?)\b", re.I)
+# B5: research notes for a file list image ideas as "IMAGE: <search query> | <caption>"
 FILLER = set("""a an the it that this these those me us my our your of in into as to on for from with and or please now can
 could would you i we want need make create put turn generate export save write build produce give prepare draft
 compile format send package file files document doc version copy nice short simple quick clean new proper full out
@@ -57,9 +74,12 @@ LEAD_ASK = re.compile(r"^(?:what(?:'s| is| are| was| were)?|who(?:'s| is| was| w
 
 SYSTEM = ('Do not use tools. You write the content of one downloadable file as JSON matching the schema: a title, a '
           'subtitle (may be empty) and sections, each with a heading, a level (1 to 3), blocks (paragraph, bullets, '
-          'table, chart, quote, code) and notes (may be empty). Write content only: no styling, fonts, colours, layout, '
-          'HTML or Markdown syntax. Use only facts from the request, the context and the attached data given here, and '
-          'never ask for anything to be fetched. Numbers in tables and charts are numbers. {shape}')
+          'table, chart, quote, code, and the diagrams timeline, tree and flow) and notes (may be empty). Write content '
+          'only: no styling, fonts, colours, layout, HTML or Markdown syntax. Draw a timeline, hierarchy or process as a '
+          'timeline, tree or flow block, never as text or code. Use only facts from the request, the context and the '
+          'attached data given here, and never ask for anything to be fetched; a figure block (a Wikimedia Commons '
+          'search query and a caption) is the only way to ask for a picture, and only when the request asks for images. '
+          'Numbers in tables and charts are numbers. {shape}')
 SHAPES = {
     'pptx': 'It becomes slides: 4 to 10 sections, one per slide, each a heading and at most 5 bullets of at most 12 '
             'words, or one small table or chart; put anything longer in notes.',
@@ -79,6 +99,12 @@ class Job:
     docs: list[tuple[dict, str]] = field(default_factory=list)      # other attached files: (meta, extracted text)
     last_file: tuple[dict, dict, bool] | None = None                # newest file made in this chat: (meta, spec, made
                                                                     # by its latest turn)
+    # docs/PLAN-accuracy-v2.md C1: what the request asks of the file, the files dependency steps made, and the aiohttp
+    # session for web images (C5; None disables images)
+    brief: Brief | None = None
+    dep_files: list[tuple[dict, dict]] = field(default_factory=list)   # (CreatedFile meta, stored spec) made by dependency steps
+    role: str = 'primary'                                             # 'primary' | 'working'
+    http: object | None = None                                        # aiohttp session for assets (C5); None disables images
 
 
 @dataclass
@@ -93,6 +119,8 @@ class Made:
     spec: dict | None = None   # the spec it was rendered from (stored, so a conversion costs no tokens)
     data: bytes | None = None
     effort: str | None = None
+    caveats: list[str] = field(default_factory=list)  # what the file could not honour, in plain words (C8)
+    phases: list[dict] = field(default_factory=list)   # [{phase, calls, llm_in, llm_out, ms}] (C3)
 
 
 # ---------- building a file (also used by POST /api/created/{id}/convert) ----------
@@ -107,12 +135,14 @@ def shape_of(meta: dict) -> str:
 
 
 def build(spec: dict, fmt: str, *, source: str, tokens: int = 0, qid: int | None = None, from_id: str | None = None,
-          extra: list | tuple = ()) -> tuple[dict, dict, bytes]:
+          extra: list | tuple = (), brief: Brief | None = None, credits: list | tuple = (),
+          role: str | None = None) -> tuple[dict, dict, bytes]:
     """(CreatedFile, the spec to store, the bytes). Blocking (rendering is CPU work), so callers use a thread. Raises
-    SpecError when a block rule fails."""
+    SpecError when a block rule fails. With a brief, the file is also checked against it (V5-V9) and the meta says
+    how it met it (docs/PLAN-accuracy-v2.md C8)."""
     norm, results = cf.normalize(spec, fmt)
     data = cf.render(spec, fmt)
-    checks = cf.verify(spec, fmt, data)
+    checks = cf.verify(spec, fmt, data, brief=brief)
     try:
         pv = cf.preview(fmt, data)
     except Exception:
@@ -122,16 +152,56 @@ def build(spec: dict, fmt: str, *, source: str, tokens: int = 0, qid: int | None
             'slides': pv.get('slides'), 'sheets': [s['name'] for s in pv['sheets']] if pv.get('kind') == 'sheets' else None,
             'tokens': int(tokens), 'source': source, 'from_id': from_id,
             'rules': [r.to_dict() for r in [*results, *extra, *checks]], 'sandbox': None}
+    blocks = [b for sec in norm['sections'] for b in sec['blocks']]
+    choice = fonts.resolve(norm.get('font'), fmt, theme=norm['theme'])
+    meta.update({'theme': norm['theme'], 'font_used': choice.used or None,
+                 'diagrams': sum(b['type'] in cf.DIAGRAMS for b in blocks),
+                 'images': sum(b['type'] == 'image' for b in blocks) if fmt in ('pdf', 'docx', 'pptx') else 0,
+                 'credits': [c.to_dict() if hasattr(c, 'to_dict') else dict(c) for c in credits]})
+    if brief is not None:
+        meta['brief'] = brief_mod.to_dict(brief)
+    if role:
+        meta['role'] = role
     return meta, spec, data
 
 
-def answer_for(meta: dict, notes: list[str]) -> str:
+def answer_for(meta: dict, notes: list[str], brief: Brief | None = None) -> str:
+    """The create step's answer: the headline ("Created **x.pdf**, 12 pages", with the target when the brief set
+    one), the notes, then the warn rules that failed."""
     warn = [r for r in meta['rules'] if r['severity'] == 'warn' and not r['ok']]
-    lines = [f'Created **{meta["name"]}**, {shape_of(meta)}']
+    head = f'Created **{meta["name"]}**, {shape_of(meta)}'
+    if brief is not None and brief.pages and meta.get('pages'):
+        head += f' (asked for {span(brief.pages)})'
+    elif brief is not None and brief.slides and meta.get('slides'):
+        head += f' (asked for {span(brief.slides)})'
+    lines = [head]
     if warn:
         lines.append(f'{len(warn)} check{"" if len(warn) == 1 else "s"} to look at: ' +
                      '; '.join(f'{r["id"]} ({r["note"]})' if r['note'] else r['id'] for r in warn) + '.')
     return '\n\n'.join([lines[0], *notes, *lines[1:]])
+
+
+def caveats_for(meta: dict, brief: Brief | None, spec: dict | None = None, extra: list[str] = ()) -> list[str]:
+    """What the file could not honour, in plain words (C8): failed brief checks, the font and asset notes passed in
+    `extra`, and notes the writer left in the spec that admit something was not done."""
+    out = [c for c in extra if c]
+    failed = {r['id']: r for r in meta.get('rules') or [] if not r['ok'] and r['id'] in ('V5', 'V6', 'V7', 'V8', 'V9')}
+    if 'V5' in failed:
+        out.append(failed['V5']['note'])
+    if 'V6' in failed and not any('image' in c.lower() for c in out):
+        out.append('no images were added to the file')
+    if 'V7' in failed:
+        out.append(failed['V7']['note'])
+    if 'V8' in failed:
+        out.append(f'the file is not fully in the theme asked for ({failed["V8"]["note"]})')
+    if 'V9' in failed:
+        out.append(failed['V9']['note'].replace(' drawn, asked for at least', ' drawn; asked for at least'))
+    for sec in (spec or {}).get('sections') or []:
+        note = str(sec.get('notes') or '') if isinstance(sec, dict) else ''
+        for sentence in re.split(r'(?<=[.!?])\s+|\n+', note):
+            if UNDONE.search(sentence) and len(out) < 12:
+                out.append(sentence.strip()[:200])
+    return list(dict.fromkeys(o.strip() for o in out if o and o.strip()))
 
 
 # ---------- reading the request ----------
@@ -263,10 +333,13 @@ def context_text(job: Job, budget: int = CREATE_CONTEXT_CHARS) -> str:
 
 
 async def make(job: Job, engine=None, jev=None, mode: str = 'balanced') -> Made:
-    """The file for one create step. engine None is keyless: only the zero-token paths can make a file."""
+    """The file for one create step. engine None is keyless: only the zero-token paths can make a file. The path order
+    is docs/PLAN-accuracy-v2.md C2: the chat's last file in another format, a file an earlier step made, an earlier
+    step's answer (copied only when the brief asks for no more), then the chat, tables, previous answer and engine."""
     req = job.request.strip()
-    fmt = cf.detect_format(req)
-    theme = theme_of(req)
+    brief = job.brief if job.brief is not None else parse_brief(req)
+    fmt = cf.detect_format(req) or brief.format
+    theme = theme_of(req) or brief.theme
     last = job.last_file
     last_turn_file = bool(last) and last[2]
     attached = bool(job.tables or job.docs)
@@ -277,14 +350,16 @@ async def make(job: Job, engine=None, jev=None, mode: str = 'balanced') -> Made:
     # material wins: an earlier step of this run (its answer is what the file is for) or an attached file.
     names_file = FILE_REF.search(req) and (CONVERT.search(req) or re.search(r'\b(?:into|to|as)\b', req, re.I))
     other_format = bool(last) and fmt is not None and fmt != last[0]['format'] and not has_topic(req)
-    wants_file = bool(last) and not job.deps and not attached and not conversation and (
+    wants_file = bool(last) and not job.deps and not job.dep_files and not attached and not conversation and (
         (last_turn_file and (LEAD_FORMAT.match(req) or CONVERT.search(req) or refers_back(req) or other_format))
         or names_file)
     if wants_file:
-        return await convert_last(last, fmt, theme)
+        return await convert_last(last, fmt, theme, brief=brief, role=job.role)
+    if job.dep_files:  # C2.1: a file an earlier step of this run made is the starting point, never its reply line
+        return await from_dep_files(job, engine, jev, fmt, theme, brief, mode)
     # the latest earlier turn that answered something (a turn that only made a file has no answer of its own here)
     prev = next((t for t in reversed(job.context) if (t.get('answer') or '').strip()), None)
-    notes, source, spec = [], None, None
+    notes, source, spec, short_from = [], None, None, None
     if job.deps and job.tables and fmt == 'xlsx':
         # "turn this data into an Excel sheet with a chart": the table is the content; an earlier analysis step's
         # answer rides along as notes rather than replacing the data
@@ -293,7 +368,14 @@ async def make(job: Job, engine=None, jev=None, mode: str = 'balanced') -> Made:
             spec['sections'] += extra['sections']
     elif job.deps:
         spec, source = from_answers(job.deps), 'answer'
-        if spec is None:
+        if asks_more(brief):
+            if engine is not None:  # C2.3: the earlier answers are notes for a longer file the engine writes
+                return await write_long(job, engine, jev, fmt, brief, mode)
+            if spec is None:  # C2.4, nothing to render: an honest failure, never a file of a status line
+                return Made(f'No file was made: {wanted(brief, fmt)} needs an LLM engine to write, and the step it '
+                            f'was to be made from has no answer to put in it. Choose an engine in Settings.', False)
+            short_from = 'the earlier answer'
+        elif spec is None:
             return Made('No file was made: the step it was to be made from has no answer to put in it.', False)
     elif conversation and not attached:
         spec, source = conversation_spec(job.context), 'answer'
@@ -306,24 +388,136 @@ async def make(job: Job, engine=None, jev=None, mode: str = 'balanced') -> Made:
     elif refers_back(req) and not attached and not has_topic(req):
         return Made('There is no earlier answer in this chat to put in a file. Ask the question first, or say what the '
                     'file should contain.', False)
+    elif engine is None and asks_more(brief):
+        return Made(f'No file was made: {wanted(brief, fmt)} needs an LLM engine to write, and there is no earlier '
+                    f'answer or attached table here to make it from. Choose an engine in Settings, or ask the question '
+                    f'first and then say "put that in a PDF".', False)
     elif engine is None:
         return Made('I can make a PDF, Word, PowerPoint, Excel or Markdown file from an earlier answer in this chat or '
                     'from an attached table with no model at all, but there is nothing like that to use here, and '
                     'writing new content needs an LLM engine. Ask a question first and then say "put that in a PDF", '
                     'attach a CSV or JSON table, or choose an engine.', False)
     if spec is None:
-        return await from_engine(job, engine, jev, fmt, theme, mode)
+        if asks_more(brief):  # C2.5: a long, illustrated or diagrammed file
+            return await write_long(job, engine, jev, fmt, brief, mode)
+        return await from_engine(job, engine, jev, fmt, theme, mode, brief=brief)
     if fmt is None:
         fmt = default_format(req, spec)
-        notes.append(f'No format was named, so this is {LABELS[fmt]}. Convert it to '
-                     f'{", ".join(LABELS[f] for f in cf.FORMATS if f != fmt)} from the file card at no cost.')
-    if theme:
-        spec['theme'] = theme
-    return await finish(spec, fmt, jev, source=source, notes=notes)
+        notes.append(no_format_note(fmt))
+    return await finish(spec, fmt, jev, source=source, notes=notes, brief=brief, theme=theme, role=job.role,
+                        short_from=short_from)
+
+
+def no_format_note(fmt: str) -> str:
+    return (f'No format was named, so this is {LABELS[fmt]}. Convert it to '
+            f'{", ".join(LABELS[f] for f in cf.FORMATS if f != fmt)} from the file card at no cost.')
+
+
+def wanted(brief: Brief, fmt: str | None) -> str:
+    """What the brief asks for, in words: "a 12-13 page PDF", "a 20 slide deck", "a file with diagrams"."""
+    label = LABELS.get(fmt or brief.format or '', 'file')
+    label = 'deck' if label == 'PowerPoint' else f'{label} file' if label in ('Word', 'Excel', 'Markdown') else label
+    if brief.pages:
+        return f'a {span(brief.pages)} page {label}'
+    if brief.slides:
+        return f'a {span(brief.slides)} slide {label}'
+    if brief.words:
+        return f'a {brief.words:,} word {label}'
+    extras = [w for w, on in (('images', brief.images), ('diagrams', brief.diagrams)) if on]
+    return f'a {label} with {" and ".join(extras)}' if extras else f'a {label}'
+
+
+def short_caveat(brief: Brief, meta: dict, source: str) -> str:
+    """C2.4: a keyless file made from what there was, when the brief asked for more."""
+    if brief.pages:
+        made = f'{meta["pages"]}' if meta.get('pages') else 'a shorter file'
+        return f'asked for {span(brief.pages)} pages; made {made} from {source}; writing more needs an engine.'
+    if brief.slides:
+        made = f'{meta["slides"]}' if meta.get('slides') else 'fewer'
+        return f'asked for {span(brief.slides)} slides; made {made} from {source}; writing more needs an engine.'
+    extras = [w for w, on in (('images', brief.images), ('diagrams', brief.diagrams),
+                              (f'{brief.words or 0:,} words', bool(brief.words))) if on]
+    return f'asked for {" and ".join(extras)}; made the file from {source}; adding them needs an engine.'
+
+
+def held(spec: dict, fmt: str, brief: Brief) -> dict:
+    """What a stored spec holds for this format: pages (PDF, rendered when the brief sets a page count), slides (PPTX),
+    words, diagrams and images. Blocking."""
+    norm, _ = cf.normalize(spec, fmt)
+    blocks = [b for s in norm['sections'] for b in s['blocks']]
+    text = spec_text(norm)
+    out = {'pages': None, 'slides': None, 'words': len(text.split()),
+           'diagrams': sum(b['type'] in cf.DIAGRAMS for b in blocks), 'images': sum(b['type'] == 'image' for b in blocks)}
+    if fmt == 'pdf' and brief.pages:
+        from pypdf import PdfReader
+        out['pages'] = len(PdfReader(io.BytesIO(cf.render(spec, fmt))).pages)
+    if fmt == 'pptx':
+        out['slides'] = 1 + len(norm['sections'])
+    return out
+
+
+def enough(have: dict, brief: Brief) -> bool:
+    """True when a stored spec already holds what the brief asks for (C2.1): no page or slide target above what it
+    makes + 1, and no images, diagrams or words it lacks."""
+    if brief.pages and have['pages'] is not None and brief.pages[0] > have['pages'] + 1:
+        return False
+    if brief.pages and have['pages'] is None and brief.pages[0] > have['words'] / brief_mod.WORDS_PER_PAGE + 1:
+        return False
+    if brief.slides and have['slides'] is not None and brief.slides[0] > have['slides'] + 1:
+        return False
+    if brief.images and not have['images']:
+        return False
+    if brief.diagrams and have['diagrams'] < diagrams_min(brief):
+        return False
+    return not (brief.words and have['words'] < 0.8 * brief.words)
+
+
+async def from_dep_files(job: Job, engine, jev, fmt: str | None, theme: str | None, brief: Brief, mode: str) -> Made:
+    """C2.1: the file a dependency step made. Converted or re-rendered at 0 tokens when it holds enough; otherwise it
+    seeds the long-document writer, or (keyless) is rendered as it is with a caveat."""
+    meta, stored = job.dep_files[-1]
+    fmt = fmt or meta['format']
+    try:
+        have = await asyncio.to_thread(held, stored, fmt, brief)
+    except cf.SpecError as e:
+        return Made(f'No file was made. Rule {e.rule_id} blocked it: {e.message}', False)
+    if not enough(have, brief) and engine is not None:
+        return await write_long(job, engine, jev, fmt, brief, mode, seed=stored)
+    note = (f'Made from **{meta["name"]}** with no model tokens.' if fmt != meta['format'] else
+            f'Re-rendered **{meta["name"]}** with no model tokens.')
+    return await finish(dict(stored), fmt, None, source='convert', from_id=meta.get('id'), extra=carried(meta),
+                        notes=[note], brief=brief, theme=theme, role=job.role,
+                        short_from=None if enough(have, brief) else 'the earlier file')
+
+
+def image_seeds(job: Job) -> list[tuple[str, str]]:
+    """B5: `IMAGE: <search query> | <caption>` lines in the earlier steps' notes, as figure ideas."""
+    out = []
+    for _, answer in job.deps:
+        out += image_ideas(answer or '')  # the notes' own format, backticked or not (agents/llm.py IMAGE_LINE)
+    return out[:8]
+
+
+async def with_images(spec: dict, job: Job, brief: Brief, theme: str | None) -> tuple[dict, list, list[str], dict]:
+    """C5: figure blocks (or the notes' image ideas) resolved to credited images; (spec, credits, caveats, phase)."""
+    from ..create import assets
+    t0 = time.perf_counter()
+    has_figures = any(isinstance(b, dict) and b.get('type') == 'figure' for sec in spec.get('sections') or []
+                      if isinstance(sec, dict) for b in sec.get('blocks') or [])
+    if not brief.images:  # figures nobody asked for are left out quietly
+        if has_figures:
+            spec, _, _ = await assets.resolve_figures(spec, None, mono=False)
+        return spec, [], [], {}
+    spec, credits, caveats = await assets.resolve_figures(spec, job.http, mono=(theme or spec.get('theme')) == 'mono',
+                                                          seeds=image_seeds(job))
+    phase = {'phase': 'assets', 'calls': 0, 'llm_in': 0, 'llm_out': 0, 'ms': round((time.perf_counter() - t0) * 1000)}
+    return spec, credits, caveats, phase
 
 
 def from_answers(deps: list[tuple[str, str]]) -> dict | None:
-    """The spec of the earlier steps' answers (zero tokens). With several, each answer is a section under its step."""
+    """The spec of the earlier steps' answers (zero tokens). With several, each answer is a section under its step. A
+    create step's reply ("Created **x.md**, 12 KB" and its notes) is no content: it counts as empty (B3)."""
+    deps = [(t, clean_answer(a)) for t, a in deps if a.strip() and not CREATED_ONLY.match(a.strip().split('\n', 1)[0])]
     deps = [(t, a) for t, a in deps if a.strip()]
     if not deps:
         return None
@@ -343,9 +537,18 @@ def conversation_spec(context: list[dict]) -> dict:
 H1 = re.compile(r'^\s{0,3}#\s+\S', re.M)
 
 
+def clean_answer(answer: str) -> str:
+    """B3: an answer without the chat's own lines: "**weather**: " labels at line starts, a create step's
+    "Created **x**, ..." reply and its "No format was named" note."""
+    text = AGENT_LABEL.sub('', str(answer or ''))
+    text = REPLY_LINE.sub('', text)
+    return re.sub(r'\n{3,}', '\n\n', text).strip()
+
+
 def answer_spec(answer: str, title: str) -> dict:
     """An answer's spec (zero tokens), titled by its one "# " heading when it has exactly one, else by `title` (from
     the question it answered), so a first "## Work" heading doesn't become the file's title."""
+    answer = clean_answer(answer)
     if len(H1.findall(answer)) == 1:
         spec = cf.from_markdown(answer)
     else:
@@ -365,17 +568,18 @@ def from_tables(tables: list[tuple[dict, list, list]]) -> dict:
     return spec
 
 
-async def convert_last(last, fmt: str | None, theme: str | None) -> Made:
+async def convert_last(last, fmt: str | None, theme: str | None, *, brief: Brief | None = None,
+                       role: str | None = None) -> Made:
     meta, spec, _ = last
     if fmt is None:
         return Made(f'Which format should **{meta["name"]}** become: PDF, Word, PowerPoint, Excel or Markdown?', False)
-    if fmt == meta['format'] and (not theme or theme == spec.get('theme')):
+    font = brief.font if brief is not None else None
+    if fmt == meta['format'] and (not theme or theme == spec.get('theme')) and (not font or font == spec.get('font')):
         return Made(f'**{meta["name"]}** is already a {LABELS[fmt]} file.', True, file=meta)
-    if theme:
-        spec = {**spec, 'theme': theme}
     # The stored spec passed the safety check when it was made; converting it asks no one (0 tokens, rule L5).
-    return await finish(spec, fmt, None, source='convert', from_id=meta['id'], extra=carried(meta),
-                        notes=[f'Converted from **{meta["name"]}** with no model tokens.'])
+    return await finish(dict(spec), fmt, None, source='convert', from_id=meta['id'], extra=carried(meta),
+                        notes=[f'Converted from **{meta["name"]}** with no model tokens.'], brief=brief, theme=theme,
+                        role=role)
 
 
 def carried(meta: dict) -> list:
@@ -384,13 +588,16 @@ def carried(meta: dict) -> list:
             if r.get('id') == 'X4']
 
 
-async def from_engine(job: Job, engine, jev, fmt: str | None, theme: str | None, mode: str) -> Made:
+async def from_engine(job: Job, engine, jev, fmt: str | None, theme: str | None, mode: str, *,
+                      brief: Brief | None = None) -> Made:
     """One engine call for the spec, with the trimmed context and the format's token cap."""
     req = job.request.strip()
+    brief = brief if brief is not None else parse_brief(req)
     shape = SHAPES.get(fmt, SHAPES['default'])
     effort = 'high' if DEEP.search(req) and mode != 'quick' else 'low'
     ctx = context_text(job)
     prompt = f'Request: {req}\nFormat: {LABELS.get(fmt, "not named")}' + (f'\n\nContext:\n{ctx}' if ctx else '')
+    t0 = time.perf_counter()
     try:
         reply = await engine.stream(system=SYSTEM.format(shape=shape), prompt=prompt, effort=effort,
                                     max_tokens=CREATE_MAX_TOKENS[fmt or 'md'], schema=cf.DOCSPEC_SCHEMA)
@@ -403,6 +610,7 @@ async def from_engine(job: Job, engine, jev, fmt: str | None, theme: str | None,
                     engine.name, effort=effort)
     used = reply.engine or engine.name
     tin, tout = reply.input_tokens, reply.output_tokens
+    spec_ms = round((time.perf_counter() - t0) * 1000)
     try:
         spec = parse_json(reply.text)
         if not isinstance(spec, dict):
@@ -410,22 +618,44 @@ async def from_engine(job: Job, engine, jev, fmt: str | None, theme: str | None,
     except ValueError:
         return Made('No file was made. Rule S1 blocked it: the model\'s reply was not a file spec.', False, used, tin,
                     tout, effort=effort)
+    spec = cf.strip_internal(spec)
     notes = []
     if fmt is None:
         fmt = default_format(req, spec)
-        notes.append(f'No format was named, so this is {LABELS[fmt]}. Convert it to '
-                     f'{", ".join(LABELS[f] for f in cf.FORMATS if f != fmt)} from the file card at no cost.')
-    if theme:
-        spec['theme'] = theme
-    out = await finish(spec, fmt, jev, source='llm', tokens=tin + tout, notes=notes)
+        notes.append(no_format_note(fmt))
+    spec, credits, caveats, phase = await with_images(spec, job, brief, theme)
+    out = await finish(spec, fmt, jev, source='llm', tokens=tin + tout, notes=notes, brief=brief, theme=theme,
+                       role=job.role, credits=credits, caveats=caveats)
     out.engine, out.llm_in, out.llm_out, out.effort = used, tin, tout, effort
+    out.phases = [{'phase': 'sections', 'calls': 1, 'llm_in': tin, 'llm_out': tout, 'ms': spec_ms}, *([phase] if phase else []),
+                  *out.phases]
+    if out.file is not None:
+        out.file['phases'] = out.phases
     return out
 
 
+async def write_long(job: Job, engine, jev, fmt: str | None, brief: Brief, mode: str, *,
+                     seed: dict | None = None) -> Made:
+    """C3: the long-document writer, with the format settled first (a page count means a PDF, a slide count a deck)."""
+    from ..create import longdoc
+    notes = []
+    if fmt is None:
+        fmt = 'pptx' if brief.slides else 'pdf'
+        notes.append(no_format_note(fmt))
+    return await longdoc.write_long(job, engine, jev, fmt, brief, mode, seed=seed, notes=notes)
+
+
 async def finish(spec: dict, fmt: str, jev, *, source: str, tokens: int = 0, from_id: str | None = None,
-                 notes: list[str] = (), extra: list = ()) -> Made:
-    """X4 (unless this is a conversion of a spec that passed it: jev None), then normalize -> render -> verify."""
-    extra, jev_tokens = list(extra), 0
+                 notes: list[str] = (), extra: list = (), brief: Brief | None = None, theme: str | None = None,
+                 role: str | None = None, credits: list = (), caveats: list[str] = (),
+                 short_from: str | None = None) -> Made:
+    """X4 (unless this is a conversion of a spec that passed it: jev None), then normalize -> render -> verify. The
+    brief's theme and font go into the spec, the brief checks run, and what could not be honoured becomes caveats."""
+    extra, jev_tokens, notes, caveats = list(extra), 0, list(notes), list(caveats)
+    if theme:
+        spec['theme'] = theme
+    if brief is not None and brief.font:
+        spec['font'] = brief.font
     if jev is not None:
         # X4 reads the text the file will hold: the normalized spec, where "&#115;..." is already "s...", all of it
         try:
@@ -452,9 +682,37 @@ async def finish(spec: dict, fmt: str, jev, *, source: str, tokens: int = 0, fro
                         jev_tokens=jev_tokens)
         extra.append(cf.RuleResult('X4', 'block', True, f'Jev unsafe score {score:.0%}' +
                                    (f' (highest of {len(pieces)} parts)' if len(pieces) > 1 else '')))
+    t0 = time.perf_counter()
     try:
         meta, spec, data = await asyncio.to_thread(build, spec, fmt, source=source, tokens=tokens, from_id=from_id,
-                                                   extra=extra)
+                                                   extra=extra, brief=brief, credits=credits, role=role)
     except cf.SpecError as e:
         return Made(f'No file was made. Rule {e.rule_id} blocked it: {e.message}', False, jev_tokens=jev_tokens)
-    return Made(answer_for(meta, list(notes)), True, jev_tokens=jev_tokens, file=meta, spec=spec, data=data)
+    render_ms = round((time.perf_counter() - t0) * 1000)
+    if short_from and brief is not None:
+        caveats.insert(0, short_caveat(brief, meta, short_from))
+    if credits:
+        n = len(credits)
+        notes.append(f'{n} image{"" if n == 1 else "s"} from Wikimedia Commons, each credited under it and under '
+                     f'"Image credits".' if fmt in ('pdf', 'docx', 'pptx') else
+                     f'{n} image{"" if n == 1 else "s"} found, but a {LABELS[fmt]} file can\'t embed pictures, so '
+                     f'only the captions and credits are in it.')
+        if fmt not in ('pdf', 'docx', 'pptx'):
+            caveats.append(f'images aren\'t embedded in a {LABELS[fmt]} file; convert it to PDF, Word or PowerPoint '
+                           f'to include them (0 tokens)')
+    if brief is not None and brief.font:
+        choice = fonts.resolve(brief.font, fmt, theme=meta.get('theme'))
+        if choice.note:
+            notes.append(choice.note)
+            if fmt in ('pdf', 'md'):
+                caveats.append(choice.note)
+    if short_from:  # the keyless caveat already says the file is shorter than asked
+        meta_rules = [r for r in meta['rules'] if r['id'] != 'V5']
+    else:
+        meta_rules = meta['rules']
+    found = caveats_for({**meta, 'rules': meta_rules}, brief, spec, caveats)
+    made = Made(answer_for(meta, notes, brief), True, jev_tokens=jev_tokens, file=meta, spec=spec, data=data,
+                caveats=found)
+    made.phases = [{'phase': 'render', 'calls': 0, 'llm_in': 0, 'llm_out': 0, 'ms': render_ms}]
+    meta['phases'] = made.phases
+    return made

@@ -27,8 +27,9 @@ RESEARCH = {'research': 'Recent news, current events, or anything that needs sea
 # Engine-only built-ins: `report` on any engine, `run` only on an engine that can execute code in a sandbox (Codex).
 REPORT = {'report': 'Long-form written reports, essays, comparisons or summaries, with sources'}
 RUN = {'run': 'Write and execute code to compute or produce something'}
-# Guard outcomes that are decided from Jev's other answers rather than picked by the route question.
-GUARDS = ['clarify', 'blocked']
+# Guard outcomes that are decided from Jev's other answers rather than picked by the route question. `unsupported` is
+# the honest "this can't be done here" (docs/PLAN-accuracy-v2.md A3).
+GUARDS = ['clarify', 'blocked', 'unsupported']
 # Exact agents that parse what they need from plain text: their answers need no LLM merger and they never see context.
 KEYLESS = {'math', 'weather', 'time', 'currency', 'units', 'dates'}
 # Offered to Jev next to the file agents when an attached file is a table (CSV, or a JSON list of objects).
@@ -41,6 +42,15 @@ MIN_CLEAR = 0.25
 CONFIRM_AT = 0.6
 BLOCK_AT = 0.7
 MULTI_AT = 0.5
+# Accuracy v2 (docs/PLAN-accuracy-v2.md). Jev's `action`, `personal` or `live` signal at or above UNSUPPORTED_AT makes a
+# step unsupported (A3); `described` at or above DESCRIBED_AT means a slot is named only by a description (A5). A forced
+# @agent whose best step has less than FORCED_MIN of its probability binds step 1 with a trace note (A1).
+UNSUPPORTED_AT = 0.7
+DESCRIBED_AT = 0.6
+FORCED_MIN = 0.05
+# The context an LLM step gets from its dependencies, shared across them (B1), and the longest query accepted (B4).
+DEP_CONTEXT_CHARS = 6000
+MAX_QUERY_CHARS = 4000
 MAX_SUBTASKS = 4
 HISTORY = 60
 RUN_TIMEOUT = 300.0  # seconds; TG_RUN_TIMEOUT overrides

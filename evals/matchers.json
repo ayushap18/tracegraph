@@ -1,0 +1,10 @@
+{
+ "cant": "can(no|')t|unable|not able|(don'?t|do not) have (access|the ability|real-?time|live|a way)|not (possible|supported|available)|no (way|ability|access)|isn'?t (possible|supported|available)|(no|without|lack|don'?t have) (access to )?(real-?time|live) (data|prices?|information|access|feeds?)",
+ "unknowable": "can(no|')t|cannot|unable|no one (can|knows)|impossible|unpredictable|not (yet )?known|hasn'?t happened|(don'?t|do not) know|no way to (know|tell)",
+ "dead_end": "No summary found|Not sure what you need|Tell me two",
+ "needs_engine": "needs an? (LLM )?engine",
+ "font_note": "isn't available to embed|embedded",
+ "images_note": "Image credits|images weren't added|no suitably licensed image",
+ "agent_label": "\\*\\*(weather|currency|math|time|units|dates|knowledge|code|chat|url|create|research|report|run|document|data|sql|clarify|blocked|unsupported)\\*\\*:",
+ "sourced": "https?://|\\bofficial\\b|\\bsources?:"
+}

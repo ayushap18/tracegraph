@@ -110,6 +110,11 @@ def answered(run: dict) -> list[dict]:
     return [e for e in run['events'] if e['type'] == 'answered']
 
 
+def same_meta(got: dict, want: dict) -> bool:
+    """The stored CreatedFile equals the one made, docs/PLAN-accuracy-v2.md C8 keys included."""
+    return want == got
+
+
 def spec_calls(engine) -> list:
     return engine.spec_calls if engine is not None else []
 
@@ -218,13 +223,14 @@ async def test_turns_that_did_not_answer_are_skipped():
     await ask(r, 'Who was Ada Lovelace')
     pdf = made(await ask(r, 'put that in a PDF'))[0]
     r.jev.clear = 0.1
-    assert (await ask(r, 'hmm'))['rec']['tasks'][0]['agent'] == 'clarify'
+    # a knowledge pick Jev finds unclear (a chat pick is exempt from the clarity veto, docs/PLAN-accuracy-v2.md A6)
+    assert (await ask(r, 'research hmm'))['rec']['tasks'][0]['agent'] == 'clarify'
     r.jev.clear = 0.9
     f = made(await ask(r, 'now as slides'))[0]
     assert f['format'] == 'pptx' and f['from_id'] == pdf['id']
     r2 = router()
     r2.jev.clear = 0.1
-    await ask(r2, 'hmm')
+    await ask(r2, 'research hmm')
     r2.jev.clear = 0.9
     run = await ask(r2, 'put that in a PDF')
     assert not made(run) and 'no earlier answer' in answered(run)[-1]['answer']
@@ -348,7 +354,8 @@ async def test_llm_merge_keeps_the_created_file_named():
     r.fixed_registry['knowledge'] = knowledge
     run = await ask(r, 'research solid-state batteries and make slides about it', session=None)
     f = made(run)[0]
-    assert run['rec']['merged']['answer'] == f'Here is what I found.\n\nCreated **{f["name"]}**'
+    # however the answer is merged (docs/PLAN-accuracy-v2.md B2 leads with the file), it names the file exactly once
+    assert run['rec']['merged']['answer'].count(f'**{f["name"]}**') == 1
 
 
 # ---------- HTTP ----------
@@ -407,7 +414,7 @@ async def test_created_endpoints(client):
     assert [f['id'] for f in (await json_of(await client.get(f'/api/created?limit=1&before={b["created"]}')))['files']] == [a['id']]
     assert (await client.get('/api/created?limit=x')).status == 400
     assert (await client.get('/api/created?before=soon')).status == 400
-    assert (await json_of(await client.get(f'/api/created/{a["id"]}'))) == a
+    assert same_meta(await json_of(await client.get(f'/api/created/{a["id"]}')), a)
     for bad in ('0123456789ab', 'nope', 'ABCDEF123456'):
         assert (await client.get(f'/api/created/{bad}')).status == 404
         assert (await client.get(f'/api/created/{bad}/download')).status == 404
@@ -544,8 +551,9 @@ def test_store_migrates_an_older_database(tmp_path):
     db.close()
     s = Store(path)
     assert s.created_dir == tmp_path / 'data' / 'created' and s.created_dir.is_dir()
-    meta = stored(s, fmt='md', qid=1)
-    assert s.get_created(meta['id']) == meta and s.max_qid() == 1
+    meta = stored(s, fmt='md', qid=1, role='primary')
+    assert same_meta(s.get_created(meta['id']), meta) and s.max_qid() == 1
+    assert {'role', 'theme', 'diagrams', 'images', 'credits'} <= set(s.get_created(meta['id']))
     assert [r['qid'] for r in s.session_records('s', 2, 5)] == [1] and s.session_records('s', 1, 5) == []
     s.close()
 

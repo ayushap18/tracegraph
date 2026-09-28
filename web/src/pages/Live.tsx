@@ -123,7 +123,7 @@ export default function Live() {
       </TopActions>
       <PageBody width="wide">
         <Kpis store={store} />
-        <AskBox samples={store.samples} state={state} inputRef={askRef} />
+        <AskBox samples={store.samples} state={state} inputRef={askRef} maxChars={store.limits.query_chars} />
         <section ref={graphPanel} aria-label="Trace graph"
           className={cn('relative min-w-0 overflow-hidden rounded-lg border border-border bg-surface [&:fullscreen]:overflow-auto [&:fullscreen]:rounded-none',
             full && 'fixed inset-0 z-50 overflow-auto rounded-none')}>

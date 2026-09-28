@@ -1,5 +1,6 @@
-"""The three file themes (F6, A4): one font pair and one palette per file, every text colour at least 4.5:1 against
-the background it sits on. `dark` has a light `paper` variant for DOCX and XLSX, which are read on white pages."""
+"""The file themes (F6, A4): one font pair and one palette per file, every text colour at least 4.5:1 against the
+background it sits on. `dark` has a light `paper` variant for DOCX and XLSX, which are read on white pages. `mono` is
+black on white with greys only (docs/PLAN-accuracy-v2.md C6): its charts use hatch patterns and dashes, never colour."""
 
 THEMES = {
     'clean': {
@@ -25,6 +26,13 @@ THEMES = {
         'palette': ['C2410C', '0F766E', 'CA8A04', '7C3AED', 'BE123C', '2563EB'],
         'pdf_font': ('Times-Roman', 'Times-Bold', 'Times-Italic', 'Times-BoldItalic'),
         'font': 'Georgia', 'heading_font': 'Georgia', 'mono': 'Courier New',
+    },
+    'mono': {
+        'bg': 'FFFFFF', 'text': '000000', 'muted': '4D4D4D', 'heading': '000000', 'accent': '1A1A1A',
+        'header_bg': '000000', 'header_text': 'FFFFFF', 'stripe': 'F2F2F2', 'code_bg': 'F2F2F2', 'border': '8C8C8C',
+        'palette': ['1A1A1A', '595959', '8C8C8C', 'BFBFBF', '404040', 'A6A6A6'],
+        'pdf_font': ('Helvetica', 'Helvetica-Bold', 'Helvetica-Oblique', 'Helvetica-BoldOblique'),
+        'font': 'Calibri', 'heading_font': 'Calibri', 'mono': 'Courier New', 'patterns': True,
     },
 }
 

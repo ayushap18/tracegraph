@@ -16,7 +16,7 @@ import time as clock
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from html.parser import HTMLParser
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -59,10 +59,24 @@ async def cached_json(http, ttl: float, url: str, **params):
 
 # ---------- math ----------
 
+NUM = r'(\d+(?:\.\d+)?)'
+# Operations written as words, rewritten to an expression before it is read. Verb forms come first ("divide 240 by 8",
+# "subtract 5 from 20"), since their operands are in a different order from the symbol forms.
 MATH_WORDS = [
-    (r'\bsquare root of\s*([\d.]+)', r'sqrt(\1)'), (r'([\d.]+)\s*%\s*of\s*([\d.]+)', r'(\1/100*\2)'),
+    (rf'\b(?:the\s+)?square\s+root\s+(?:of\s+)?{NUM}|\bsqrt\s*(?:of\s+)?{NUM}', lambda m: f'sqrt({m.group(1) or m.group(2)})'),
+    # "what number multiplied by itself gives 2025" (and "squared makes 2025") asks for the square root.
+    (rf'\b(?:what|which)\s+(?:positive\s+)?(?:number|integer)\s+(?:multiplied\s+by\s+itself|times\s+itself|squared)\s+'
+     rf'(?:gives|is|equals|makes|comes to|=)\s+{NUM}', r'sqrt(\1)'),
+    (rf'{NUM}\s+(?:multiplied\s+by|times)\s+itself\b', r'(\1*\1)'),
+    (rf'\bdivide\s+{NUM}\s+by\s+{NUM}', r'(\1/\2)'), (rf'\bmultiply\s+{NUM}\s+(?:by|and|with)\s+{NUM}', r'(\1*\2)'),
+    (rf'\b(?:add|sum)\s+(?:up\s+)?{NUM}\s+(?:and|to|plus)\s+{NUM}', r'(\1+\2)'),
+    (rf'\b(?:the\s+)?sum\s+of\s+{NUM}\s+and\s+{NUM}', r'(\1+\2)'),
+    (rf'\b(?:the\s+)?product\s+of\s+{NUM}\s+and\s+{NUM}', r'(\1*\2)'),
+    (rf'\bsubtract\s+{NUM}\s+from\s+{NUM}', r'(\2-\1)'), (rf'\btake\s+{NUM}\s+(?:away\s+)?from\s+{NUM}', r'(\2-\1)'),
+    (rf'{NUM}\s*(?:%|\bper\s*cent\b|\bpercent\b)\s*of\s*{NUM}', r'(\1/100*\2)'),
     (r'\bmultiplied by\b|\btimes\b|(?<=\d)\s*x\s*(?=\d)', '*'), (r'\bdivided by\b|\bover\b', '/'),
-    (r'\bplus\b', '+'), (r'\bminus\b', '-'), (r'\bto the power of\b|\^', '**'),
+    (r'\bplus\b', '+'), (r'\bminus\b', '-'), (r'\bto the power of\b|\braised to(?: the power of)?\b|\^', '**'),
+    (r'\bsquared\b', '**2'), (r'\bcubed\b', '**3'),
 ]
 MATH_FUNCS = {'sqrt': math.sqrt, 'log': math.log10, 'ln': math.log, 'sin': math.sin, 'cos': math.cos, 'tan': math.tan, 'abs': abs}
 MATH_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv,
@@ -151,24 +165,62 @@ def normalize_numbers(text: str, money: bool = False) -> str:
     return WORD_RUN.sub(lambda m: str(words_value(m.group(0))), text)
 
 
-def solve_math(q: str) -> tuple[str, float | int] | None:
-    """Returns (expression, value) or None when there's no numeric expression."""
+def math_text(q: str) -> str:
+    """The text with numbers as digits and operation words as symbols, as solve_math reads it."""
     s = normalize_numbers(q.replace(',', '')).lower()
     for pat, rep in MATH_WORDS:
         s = re.sub(pat, rep, s)
-    spans = re.findall(r'(?:sqrt|log|ln|sin|cos|tan|abs|[\d.()+\-*/%\s])+', s)
-    expr = max((x.strip() for x in spans), key=len, default='')
+    return s
+
+
+def math_spans(s: str) -> list[str]:
+    return [x.strip() for x in re.findall(r'(?:sqrt|log|ln|sin|cos|tan|abs|[\d.()+\-*/%\s])+', s)]
+
+
+# Operation words solve_math can't turn into symbols: left in the text after MATH_WORDS, the calculation would drop them
+# ("double 30" is not 30, "a third of 90" is not 90, "7 factorial" is not 7).
+UNUSED_OPERATION = re.compile(r'\b(?:double[ds]?|doubling|triple[ds]?|tripling|half|halve[ds]?|halving|thirds?|quarters?|'
+                              r'twice|thrice|dozens?|factorial|square|cube|root|subtract|add|divide|multiply|average|mean|'
+                              r'product|sum|modulo|percent(?:age)?|increase[ds]?|decrease[ds]?|reduce[ds]?)\b|\d\s*!', re.I)
+
+
+def solve_math(q: str) -> tuple[str, float | int] | None:
+    """Returns (expression, value) or None when there's no numeric expression, when the expression found leaves out a
+    number the text gives ("Divide 240 by 8 and add the tip of 5" is not 240/8), or when an operation word goes unused
+    ("double 30", "square root of -9"): a partial answer would be confidently wrong, so the math agent asks instead."""
+    s = math_text(q)
+    if UNUSED_OPERATION.search(s):
+        return None
+    spans = math_spans(s)
+    expr = max(spans, key=len, default='')
     if not re.search(r'\d', expr):
         return None
     if not re.search(r'\d', q) and not re.search(r'[-+*/%]|[a-z]', expr):
         return None  # a number word on its own ("which one is it") is not a calculation
+    if any(re.search(r'\d', x) for x in spans if x is not expr and x != expr):
+        return None  # another number in the text is left out of the expression
+    if any(re.search(r'[*+]', x) for x in spans if x is not expr and x != expr):
+        # an operation word is left out ("what number multiplied by itself gives 2025" is not 2025). Only * and + count:
+        # a stray - or / comes from ordinary words ("T-shirt", "and/or", "over 25 euros").
+        return None
     value = round(safe_eval(ast.parse(expr, mode='eval')), 10)
     return expr, int(value) if isinstance(value, int) or value.is_integer() else value
+
+
+def math_question(q: str) -> str:
+    """The follow-up question when the text has numbers but no calculation that uses all of them."""
+    nums = re.findall(r'\d+(?:\.\d+)?', normalize_numbers(q.replace(',', '')))
+    if len(nums) >= 2:
+        return (f'What should I do with {", ".join(nums[:-1])} and {nums[-1]}? Write it as a calculation, for example '
+                f'"{nums[0]} * {nums[1]}" or "divide {nums[0]} by {nums[1]}".')
+    return "I couldn't find a calculation in that. Write it as numbers and an operation, for example \"18% of 2450\"."
 
 
 async def agent_math(q: str, http=None) -> AgentResult:
     solved = solve_math(q)
     if not solved:
+        if re.search(r'\d', normalize_numbers(q)):
+            return AgentResult(math_question(q), False)
         return AgentResult("I couldn't find a numeric expression in that.", False)
     expr, v = solved
     return AgentResult(f'{expr} = {v:,}' if isinstance(v, int) else f'{expr} = {v}', True)
@@ -185,9 +237,20 @@ def place_in(q: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
+# "vienna weather", "weather prague": the whole text is a place and the weather, typed in lower case. Only weather words:
+# "screen time" or "free time" is not a place.
+TERSE_WEATHER = re.compile(r"^\s*(?:([a-z][a-z.'-]*(?:\s[a-z][a-z.'-]*){0,2})\s+(?:weather|forecast|temperature)|"
+                           r"(?:weather|forecast|temperature)\s+([a-z][a-z.'-]*(?:\s[a-z][a-z.'-]*){0,2}))\s*[?.!]*\s*$", re.I)
+NOT_PLACE = {'the', 'today', 'todays', "today's", 'tomorrow', 'tonight', 'now', 'current', 'local', 'good', 'bad', 'nice',
+             'great', 'lovely', 'hot', 'cold', 'what', 'whats', "what's", 'how', 'hows', "how's", 'my', 'your', 'our',
+             'any', 'some', 'this', 'next', 'same', 'weekend', 'forecast', 'weather', 'report', 'update', 'please'}
+
+
 def find_place(q: str) -> str | None:
     if place := place_in(q):
         return place
+    if (m := TERSE_WEATHER.match(q)) and not set((m.group(1) or m.group(2)).lower().split()) & NOT_PLACE:
+        return m.group(1) or m.group(2)
     caps = re.findall(r"(?<!^)(?<![.?!]\s)\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)*)", q)
     # "Berlin weather", "New York weather": a leading name right before the thing asked about. It wins unless another
     # name comes later ("Paris weather please, tell me London"); "York" alone is only part of "New York".
@@ -198,9 +261,57 @@ def find_place(q: str) -> str | None:
     return caps[-1] if caps else None
 
 
-async def geocode(http, place: str) -> dict | None:
-    data = await cached_json(http, cache.LOOKUP_TTL, 'https://geocoding-api.open-meteo.com/v1/search', name=place, count=1)
-    return (data.get('results') or [None])[0]
+def place_candidates(place: str | None) -> list[str]:
+    """Names to look a place up by, best first: as written, the part before a comma, then shorter leading runs of its
+    words ("sydney australia" -> "sydney"). At most four, so a place that isn't found costs few lookups."""
+    if not place:
+        return []
+    words = place.replace(',', ' ').split()
+    names = [place, place.split(',')[0].strip(), *(' '.join(words[:k]) for k in range(len(words) - 1, 0, -1))]
+    return [n for n in dict.fromkeys(names) if n][:4]
+
+
+async def geocode(http, place: str, region: str | None = None) -> dict | None:
+    """The place's best match; with a region ("Texas", "France"), the best match inside it, if there is one."""
+    if not region:
+        data = await cached_json(http, cache.LOOKUP_TTL, 'https://geocoding-api.open-meteo.com/v1/search', name=place,
+                                 count=1)
+        return (data.get('results') or [None])[0]
+    data = await cached_json(http, cache.LOOKUP_TTL, 'https://geocoding-api.open-meteo.com/v1/search', name=place,
+                             count=10)
+    results = data.get('results') or []
+    want = region.lower()
+    inside = next((r for r in results if want in (str(r.get('admin1', '')).lower(), str(r.get('country', '')).lower(),
+                                                  str(r.get('country_code', '')).lower())), None)
+    return inside or (results[0] if results else None)
+
+
+_QUALIFIED = None
+
+
+def qualified_place(q: str) -> tuple[str, str] | None:
+    """(place, region) when a place is qualified by the state, province or country it is in: "Paris, Texas", "Paris in
+    Texas", "London, Ontario". None otherwise."""
+    global _QUALIFIED
+    if _QUALIFIED is None:
+        from ..gate import REGIONS
+        names = sorted({*REGIONS, *COUNTRY_NAME} - {'us', 'u.s.', 'dc', 'd.c.'}, key=len, reverse=True)
+        _QUALIFIED = re.compile(r"(?P<place>(?-i:[A-Z][A-Za-z.'-]*(?:\s+[A-Z][A-Za-z.'-]*){0,2}))(?:\s*,\s*|\s+in\s+)"
+                                r"(?P<region>" + '|'.join(re.escape(n) for n in names) + r")\b", re.I)
+    from ..gate import NOT_PLACE, TIME_WORDS, WEATHER_WORDS
+    pos = 0
+    while m := _QUALIFIED.search(q, pos):
+        place = m.group('place')
+        first = place.split()[0].lower().replace("'", '')
+        if first in NOT_PLACE or first in QUESTION_WORDS or WEATHER_WORDS.search(place) or TIME_WORDS.search(place):
+            pos = m.start('place') + len(place.split()[0])  # "Weather in New York": the request word is no place
+            continue
+        return (place, m.group('region')) if place.lower() != m.group('region').lower() else None
+    return None
+
+
+QUESTION_WORDS = {'what', 'whats', 'how', 'is', 'will', 'was', 'does', 'did', 'can', 'could', 'tell', 'show', 'give',
+                  'check', 'sorry', 'i', 'and', 'or', 'but', 'please', 'hi', 'hey'}
 
 
 WMO = {0: 'clear sky', 1: 'mostly clear', 2: 'partly cloudy', 3: 'overcast', 45: 'fog', 48: 'freezing fog', 51: 'light drizzle',
@@ -209,8 +320,9 @@ WMO = {0: 'clear sky', 1: 'mostly clear', 2: 'partly cloudy', 3: 'overcast', 45:
 
 
 async def agent_weather(q: str, http) -> AgentResult:
-    place = find_place(q)
-    loc = place and await geocode(http, place)
+    qualified = qualified_place(q)
+    place, region = qualified or (find_place(q), None)
+    loc = place and await geocode(http, place, region)
     if not loc:
         return AgentResult('Which city? I need a place to look up the weather.', False)
     d = await cached_json(http, cache.WEATHER_TTL, 'https://api.open-meteo.com/v1/forecast',
@@ -219,7 +331,8 @@ async def agent_weather(q: str, http) -> AgentResult:
                           daily='temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code',
                           timezone='auto', forecast_days=2)
     cur, day = d['current'], d['daily']
-    where = f"{loc['name']}, {loc.get('country', '')}".strip(', ')
+    parts = [loc['name'], loc.get('admin1') if region and loc.get('admin1') != loc['name'] else None, loc.get('country')]
+    where = ', '.join(p for p in parts if p)
     tomorrow = 'tomorrow' in q.lower()
     i = 1 if tomorrow else 0
     lines = [
@@ -284,7 +397,10 @@ async def agent_time(q: str, http) -> AgentResult:
     if zone := parse_zone(q, abbreviations=False):
         return zone_answer(zone)
     place = find_place(ABBR_WORD.sub('', q))
-    loc = place and await geocode(http, place)
+    loc = None
+    for name in place_candidates(place):  # "local time in sydney australia": the whole name, then its parts
+        if loc := await geocode(http, name):
+            break
     if loc and not loc.get('timezone'):  # a country spanning several zones ("United States") has no single one
         return AgentResult(f"{loc['name']} spans more than one time zone. Which city there do you mean?", False)
     if loc:
@@ -293,6 +409,8 @@ async def agent_time(q: str, http) -> AgentResult:
         return AgentResult(f"{where}: {stamp(now)} ({now.tzname() or loc['timezone']})", True)
     if zone := parse_zone(q):
         return zone_answer(zone)
+    if place:  # a place was named: never answer with this machine's own time instead
+        return AgentResult(f"I couldn't find a place called \"{place}\". Which city or time zone do you mean?", False)
     now = datetime.now().astimezone()  # aware, so the local zone has a name
     return AgentResult(f"Your local time: {stamp(now)} ({now.tzname() or 'local time'})", True)
 
@@ -352,11 +470,84 @@ SIGNS = [(r'(?i)\bUS\$', ' USD '), (r'(?i)\bA\$', ' AUD '), (r'(?i)\bC\$', ' CAD
          ('¥', ' JPY '), ('₹', ' INR '), ('₩', ' KRW '), ('₺', ' TRY '), ('₽', ' RUB '), ('₱', ' PHP '), ('฿', ' THB ')]
 
 
-def currency_words(q: str) -> list[str]:
-    # Keep decimal points in amounts but drop sentence dots: an LLM planner writes "Convert 20 USD to JPY."
+# "20% of 1500 USD": a share of an amount is the amount converted (300 USD), not the percentage.
+PERCENT_OF = re.compile(r'(\d+(?:\.\d+)?)\s*(?:%|percent\b|per\s+cent\b)\s*of\s+(?:(USD|EUR|GBP|JPY|INR|KRW|TRY|RUB|PHP|'
+                        r'THB|AUD|CAD|NZD|HKD|SGD)\s*)?(\d+(?:\.\d+)?)', re.I)
+
+
+def share_amount(m: re.Match) -> str:
+    """A PERCENT_OF match as the amount it stands for, with its currency code when one was written before it."""
+    value = plain(round(float(m.group(1)) * float(m.group(3)) / 100, 6))
+    return f'{m.group(2)} {value}' if m.group(2) else value
+
+
+# The currency a nationality names ("Canadian dollars" is CAD, never USD; "Egyptian pounds" is EGP, never GBP).
+DEMONYM_CURRENCY = {
+    'us': 'USD', 'u.s.': 'USD', 'american': 'USD', 'canadian': 'CAD', 'australian': 'AUD', 'new zealand': 'NZD',
+    'hong kong': 'HKD', 'singapore': 'SGD', 'singaporean': 'SGD', 'taiwanese': 'TWD', 'taiwan': 'TWD',
+    'jamaican': 'JMD', 'british': 'GBP', 'egyptian': 'EGP', 'swiss': 'CHF', 'japanese': 'JPY', 'chinese': 'CNY',
+    'indian': 'INR', 'pakistani': 'PKR', 'sri lankan': 'LKR', 'nepalese': 'NPR', 'mexican': 'MXN', 'philippine': 'PHP',
+    'filipino': 'PHP', 'argentine': 'ARS', 'argentinian': 'ARS', 'chilean': 'CLP', 'colombian': 'COP',
+    'south african': 'ZAR', 'brazilian': 'BRL', 'turkish': 'TRY', 'israeli': 'ILS', 'swedish': 'SEK',
+    'norwegian': 'NOK', 'danish': 'DKK', 'icelandic': 'ISK', 'czech': 'CZK', 'polish': 'PLN', 'hungarian': 'HUF',
+    'romanian': 'RON', 'bulgarian': 'BGN', 'south korean': 'KRW', 'korean': 'KRW', 'thai': 'THB', 'malaysian': 'MYR',
+    'indonesian': 'IDR', 'russian': 'RUB', 'nigerian': 'NGN', 'kenyan': 'KES', 'ukrainian': 'UAH', 'vietnamese': 'VND'}
+CURRENCY_NOUN = (r'(?:dollars?|pounds?|francs?|pesos?|rupees?|yen|yuan|won|rand|kron(?:a|or|e|er)|korun(?:a|y)|lira|'
+                 r'shekels?|ringgit|baht|reais|real|rupiah|forint|zloty|leu|lei|lev|naira|shillings?|rubles?|roubles?|'
+                 r'hryvnia|dong|currency|money)')
+DEMONYM_NAMED = re.compile(r'\b(' + '|'.join(re.escape(d) for d in sorted(DEMONYM_CURRENCY, key=len, reverse=True))
+                           + r')\s+' + CURRENCY_NOUN + r'\b', re.I)
+# "Wakandan dollars": a nationality before a currency word that names no currency this table knows.
+UNKNOWN_NAMED = re.compile(r"(?<=\s)((?-i:[A-Z][a-z]+(?:an|ian|ese|ish|ic|i)))\s+(" + CURRENCY_NOUN + r")\b", re.I)
+
+
+def money_text(q: str) -> str:
+    """The text with currency signs and named nationalities' currencies as codes and numbers as digits, as the
+    currency parser reads it."""
     for sign, code in SIGNS:
         q = re.sub(sign, code, q)
-    text = normalize_numbers(q.replace(',', ''), money=True)
+    q = DEMONYM_NAMED.sub(lambda m: f' {DEMONYM_CURRENCY[m.group(1).lower()]} ', q)
+    return normalize_numbers(q.replace(',', ''), money=True)
+
+
+def unknown_currency(q: str) -> str | None:
+    """A currency the text names that is no real currency this knows: "Wakandan dollars", or a three-letter code in
+    capitals after an amount or to/into/in that no ISO 4217 code matches ("100 USD in WKD")."""
+    for m in UNKNOWN_NAMED.finditer(q):
+        if m.group(1).lower() not in DEMONYM_CURRENCY and not nationality(m.group(1)):
+            return f'{m.group(1)} {m.group(2)}'
+    words = re.sub(r'[^\w.\s]', ' ', q.replace(',', '')).split()
+    for i, w in enumerate(words[1:], 1):
+        prev = words[i - 1].lower()
+        if (re.fullmatch(r'[A-Z]{3}', w) and w not in ISO_CODES and w.lower() not in COUNTRY_ALIASES
+                and w not in NOT_CURRENCY_CODES and (AMOUNT.fullmatch(prev) or prev in ('to', 'into', 'in', 'from'))):
+            return w
+    return None
+
+
+def nationality(word: str) -> bool:
+    """True when the word reads as a real country's nationality ("Peruvian", "Fijian"): it starts like a country."""
+    stem = word.lower()[:4]
+    return len(stem) == 4 and any(c.startswith(stem) for c in COUNTRY_NAME)
+
+
+def unlisted_currency(q: str) -> str | None:
+    """"Fijian dollars": a real nationality's currency that isn't in DEMONYM_CURRENCY, which the parser would
+    otherwise read as the plain word ("dollars" as USD)."""
+    for m in UNKNOWN_NAMED.finditer(q):
+        if m.group(1).lower() not in DEMONYM_CURRENCY and nationality(m.group(1)):
+            return f'{m.group(1)} {m.group(2)}'
+    return None
+
+
+# Capitalised three-letter words that follow "in" or an amount without being currencies.
+NOT_CURRENCY_CODES = {'UTC', 'GMT', 'CET', 'EST', 'PST', 'CST', 'MST', 'EDT', 'PDT', 'CDT', 'MDT', 'BST', 'IST', 'JST',
+                      'KST', 'HKT', 'SGT', 'PDF', 'CSV', 'KMS', 'MPH', 'KPH', 'AND', 'THE', 'NYC', 'USA', 'UAE'}
+
+
+def currency_words(q: str) -> list[str]:
+    # Keep decimal points in amounts but drop sentence dots: an LLM planner writes "Convert 20 USD to JPY."
+    text = PERCENT_OF.sub(share_amount, money_text(q))
     return [w for w in (w.strip('.') for w in re.sub(r'[^\w.\s]', ' ', text).split()) if w]
 
 
@@ -374,6 +565,8 @@ def singular(word: str) -> str:
 def unsupported_currency(q: str, known) -> str | None:
     """The currency the text asks about that no rate source here covers: a cryptocurrency, a currency named in words
     ("50 dirhams"), or an ISO code in any case right after an amount or after to/into/from/in ("100 aed to usd")."""
+    if what := unknown_currency(q) or unlisted_currency(q):
+        return what
     words = currency_words(q)
     for w in words:
         if w.lower() in CRYPTO:
@@ -408,6 +601,11 @@ def unsupported_answer(what: str, known) -> str:
             f'European Central Bank reference rates for {len(known)} national currencies (such as {sample}).')
 
 
+def target_word(words: list[str], i: int) -> bool:
+    """True when the currency at words[i] follows to/in/into/as: it is where the money goes, not where it comes from."""
+    return i > 0 and words[i - 1].lower() in ('to', 'in', 'into', 'as')
+
+
 def parse_currency(q: str, known) -> tuple[float, str, str] | str:
     """Returns (amount, src, dst), or an error message. `known` is the set of supported codes."""
     words = currency_words(q)
@@ -420,8 +618,17 @@ def parse_currency(q: str, known) -> tuple[float, str, str] | str:
         amt = 1.0
     else:
         amt = float(words[num])
-    # The currency right after the amount is the source ("how many euros is 100 pounds" → GBP to EUR).
-    src_i = next((k for k, (i, _) in enumerate(found) if num is not None and i == num + 1), 0)
+    # The amount's own currency is the source: the one written right before it ("€75", "USD 20") or after it ("how
+    # many euros is 100 pounds" → GBP to EUR), also with a word between ("how many yen is 200 British pounds" → GBP to
+    # JPY), but never past "to" or "in" ("75 in GBP"). A currency before the amount that is itself the target of a pair
+    # ("GBP to USD 100") keeps the pair's order.
+    src_i = 0
+    if num is not None:
+        at = dict((i, k) for k, (i, _) in enumerate(found))
+        after = next((num + j for j in range(1, 4) if num + j < len(words) and
+                      (num + j in at or words[num + j].lower() in ('to', 'in', 'into', 'for', 'as', 'from'))), None)
+        before = num - 1 if num - 1 in at and not target_word(words, num - 1) else None
+        src_i = at[before] if before is not None else at.get(after, 0) if after is not None else 0
     src = found[src_i][1]
     dst = next((c for k, (_, c) in enumerate(found) if k != src_i and c != src), None)
     if not dst:
@@ -458,6 +665,10 @@ async def agent_currency(q: str, http) -> AgentResult:
         known = set(await cached_json(http, cache.LOOKUP_TTL, 'https://api.frankfurter.app/currencies')) or ECB_CODES
     except Exception:
         known = ECB_CODES
+    if what := unknown_currency(q):
+        return AgentResult(f"I don't recognise {what} as a real currency, so I can't convert it. I can convert national "
+                           f"currencies such as {', '.join(c for c in ('USD', 'EUR', 'GBP', 'INR', 'JPY') if c in known)}.",
+                           False)
     if what := unsupported_currency(q, known):
         return AgentResult(unsupported_answer(what, known), False)
     parsed = parse_currency(q, known)
@@ -465,11 +676,82 @@ async def agent_currency(q: str, http) -> AgentResult:
         return AgentResult(ambiguous_currency(q, known) or parsed, False)
     amt, src, dst = parsed
     d = await cached_json(http, cache.RATES_TTL, 'https://api.frankfurter.app/latest', amount=amt, **{'from': src, 'to': dst})
-    return AgentResult(f"{amt:,.2f} {src} = {d['rates'][dst]:,.2f} {dst}  (rate from {d['date']})", True, 'frankfurter.app')
+    share = PERCENT_OF.search(money_text(q))
+    lead = f"{share.group(1)}% of {float(share.group(3)):,.2f} {src} is {amt:,.2f} {src}.\n" if share else ''
+    return AgentResult(f"{lead}{amt:,.2f} {src} = {d['rates'][dst]:,.2f} {dst}  (rate from {d['date']})", True,
+                       'frankfurter.app')
+
+
+# ---------- countries: capitals and currencies (A5) ----------
+
+# Country, capital, ISO 4217 currency. A place or currency named only by description ("the capital of Switzerland",
+# "the currency of Brazil") is looked up here keyless; one that isn't here needs an engine to look up.
+COUNTRIES = """Afghanistan|Kabul|AFN; Albania|Tirana|ALL; Algeria|Algiers|DZD; Andorra|Andorra la Vella|EUR; Angola|Luanda|AOA;
+Antigua and Barbuda|St. John's|XCD; Argentina|Buenos Aires|ARS; Armenia|Yerevan|AMD; Australia|Canberra|AUD;
+Austria|Vienna|EUR; Azerbaijan|Baku|AZN; Bahamas|Nassau|BSD; Bahrain|Manama|BHD; Bangladesh|Dhaka|BDT;
+Barbados|Bridgetown|BBD; Belarus|Minsk|BYN; Belgium|Brussels|EUR; Belize|Belmopan|BZD; Benin|Porto-Novo|XOF;
+Bhutan|Thimphu|BTN; Bolivia|Sucre|BOB; Bosnia and Herzegovina|Sarajevo|BAM; Botswana|Gaborone|BWP; Brazil|Brasilia|BRL;
+Brunei|Bandar Seri Begawan|BND; Bulgaria|Sofia|BGN; Burkina Faso|Ouagadougou|XOF; Burundi|Gitega|BIF;
+Cabo Verde|Praia|CVE; Cambodia|Phnom Penh|KHR; Cameroon|Yaounde|XAF; Canada|Ottawa|CAD;
+Central African Republic|Bangui|XAF; Chad|N'Djamena|XAF; Chile|Santiago|CLP; China|Beijing|CNY; Colombia|Bogota|COP;
+Comoros|Moroni|KMF; Congo|Brazzaville|XAF; Democratic Republic of the Congo|Kinshasa|CDF; Costa Rica|San Jose|CRC;
+Cote d'Ivoire|Yamoussoukro|XOF; Croatia|Zagreb|EUR; Cuba|Havana|CUP; Cyprus|Nicosia|EUR; Czechia|Prague|CZK;
+Denmark|Copenhagen|DKK; Djibouti|Djibouti|DJF; Dominica|Roseau|XCD; Dominican Republic|Santo Domingo|DOP;
+Ecuador|Quito|USD; Egypt|Cairo|EGP; El Salvador|San Salvador|USD; Equatorial Guinea|Malabo|XAF; Eritrea|Asmara|ERN;
+Estonia|Tallinn|EUR; Eswatini|Mbabane|SZL; Ethiopia|Addis Ababa|ETB; Fiji|Suva|FJD; Finland|Helsinki|EUR;
+France|Paris|EUR; Gabon|Libreville|XAF; Gambia|Banjul|GMD; Georgia|Tbilisi|GEL; Germany|Berlin|EUR; Ghana|Accra|GHS;
+Greece|Athens|EUR; Grenada|St. George's|XCD; Guatemala|Guatemala City|GTQ; Guinea|Conakry|GNF;
+Guinea-Bissau|Bissau|XOF; Guyana|Georgetown|GYD; Haiti|Port-au-Prince|HTG; Honduras|Tegucigalpa|HNL;
+Hungary|Budapest|HUF; Iceland|Reykjavik|ISK; India|New Delhi|INR; Indonesia|Jakarta|IDR; Iran|Tehran|IRR;
+Iraq|Baghdad|IQD; Ireland|Dublin|EUR; Israel|Jerusalem|ILS; Italy|Rome|EUR; Jamaica|Kingston|JMD; Japan|Tokyo|JPY;
+Jordan|Amman|JOD; Kazakhstan|Astana|KZT; Kenya|Nairobi|KES; Kiribati|Tarawa|AUD; North Korea|Pyongyang|KPW;
+South Korea|Seoul|KRW; Kosovo|Pristina|EUR; Kuwait|Kuwait City|KWD; Kyrgyzstan|Bishkek|KGS; Laos|Vientiane|LAK;
+Latvia|Riga|EUR; Lebanon|Beirut|LBP; Lesotho|Maseru|LSL; Liberia|Monrovia|LRD; Libya|Tripoli|LYD;
+Liechtenstein|Vaduz|CHF; Lithuania|Vilnius|EUR; Luxembourg|Luxembourg|EUR; Madagascar|Antananarivo|MGA;
+Malawi|Lilongwe|MWK; Malaysia|Kuala Lumpur|MYR; Maldives|Male|MVR; Mali|Bamako|XOF; Malta|Valletta|EUR;
+Marshall Islands|Majuro|USD; Mauritania|Nouakchott|MRU; Mauritius|Port Louis|MUR; Mexico|Mexico City|MXN;
+Micronesia|Palikir|USD; Moldova|Chisinau|MDL; Monaco|Monaco|EUR; Mongolia|Ulaanbaatar|MNT; Montenegro|Podgorica|EUR;
+Morocco|Rabat|MAD; Mozambique|Maputo|MZN; Myanmar|Naypyidaw|MMK; Namibia|Windhoek|NAD; Nauru|Yaren|AUD;
+Nepal|Kathmandu|NPR; Netherlands|Amsterdam|EUR; New Zealand|Wellington|NZD; Nicaragua|Managua|NIO; Niger|Niamey|XOF;
+Nigeria|Abuja|NGN; North Macedonia|Skopje|MKD; Norway|Oslo|NOK; Oman|Muscat|OMR; Pakistan|Islamabad|PKR;
+Palau|Ngerulmud|USD; Panama|Panama City|PAB; Papua New Guinea|Port Moresby|PGK; Paraguay|Asuncion|PYG; Peru|Lima|PEN;
+Philippines|Manila|PHP; Poland|Warsaw|PLN; Portugal|Lisbon|EUR; Qatar|Doha|QAR; Romania|Bucharest|RON;
+Russia|Moscow|RUB; Rwanda|Kigali|RWF; Saint Kitts and Nevis|Basseterre|XCD; Saint Lucia|Castries|XCD;
+Saint Vincent and the Grenadines|Kingstown|XCD; Samoa|Apia|WST; San Marino|San Marino|EUR;
+Sao Tome and Principe|Sao Tome|STN; Saudi Arabia|Riyadh|SAR; Senegal|Dakar|XOF; Serbia|Belgrade|RSD;
+Seychelles|Victoria|SCR; Sierra Leone|Freetown|SLE; Singapore|Singapore|SGD; Slovakia|Bratislava|EUR;
+Slovenia|Ljubljana|EUR; Solomon Islands|Honiara|SBD; Somalia|Mogadishu|SOS; South Africa|Pretoria|ZAR;
+South Sudan|Juba|SSP; Spain|Madrid|EUR; Sri Lanka|Sri Jayawardenepura Kotte|LKR; Sudan|Khartoum|SDG;
+Suriname|Paramaribo|SRD; Sweden|Stockholm|SEK; Switzerland|Bern|CHF; Syria|Damascus|SYP; Taiwan|Taipei|TWD;
+Tajikistan|Dushanbe|TJS; Tanzania|Dodoma|TZS; Thailand|Bangkok|THB; Timor-Leste|Dili|USD; Togo|Lome|XOF;
+Tonga|Nuku'alofa|TOP; Trinidad and Tobago|Port of Spain|TTD; Tunisia|Tunis|TND; Turkey|Ankara|TRY;
+Turkmenistan|Ashgabat|TMT; Tuvalu|Funafuti|AUD; Uganda|Kampala|UGX; Ukraine|Kyiv|UAH;
+United Arab Emirates|Abu Dhabi|AED; United Kingdom|London|GBP; United States|Washington, D.C.|USD;
+Uruguay|Montevideo|UYU; Uzbekistan|Tashkent|UZS; Vanuatu|Port Vila|VUV; Vatican City|Vatican City|EUR;
+Venezuela|Caracas|VES; Vietnam|Hanoi|VND; Yemen|Sanaa|YER; Zambia|Lusaka|ZMW; Zimbabwe|Harare|ZWL"""
+COUNTRY_ROWS = [tuple(x.strip() for x in row.split('|')) for row in COUNTRIES.replace('\n', ' ').split(';')]
+# Other names people use for a country, lowercased.
+COUNTRY_ALIASES = {'usa': 'United States', 'us': 'United States', 'u.s.': 'United States', 'america': 'United States',
+                   'united states of america': 'United States', 'the united states': 'United States',
+                   'uk': 'United Kingdom', 'britain': 'United Kingdom', 'great britain': 'United Kingdom',
+                   'england': 'United Kingdom', 'scotland': 'United Kingdom', 'wales': 'United Kingdom',
+                   'czech republic': 'Czechia', 'holland': 'Netherlands', 'the netherlands': 'Netherlands',
+                   'korea': 'South Korea', 'ivory coast': "Cote d'Ivoire", 'burma': 'Myanmar', 'uae': 'United Arab Emirates',
+                   'turkiye': 'Turkey', 'swaziland': 'Eswatini', 'east timor': 'Timor-Leste', 'cape verde': 'Cabo Verde',
+                   'dr congo': 'Democratic Republic of the Congo', 'drc': 'Democratic Republic of the Congo',
+                   'the philippines': 'Philippines', 'the bahamas': 'Bahamas', 'the gambia': 'Gambia'}
+CAPITAL_OF = {c.lower(): cap for c, cap, _ in COUNTRY_ROWS}
+CURRENCY_OF = {c.lower(): cur for c, _, cur in COUNTRY_ROWS}
+for _alias, _name in COUNTRY_ALIASES.items():
+    CAPITAL_OF[_alias], CURRENCY_OF[_alias] = CAPITAL_OF[_name.lower()], CURRENCY_OF[_name.lower()]
+COUNTRY_NAME = {c.lower(): c for c, _, _ in COUNTRY_ROWS} | {a: n for a, n in COUNTRY_ALIASES.items()}
 
 
 # ---------- knowledge, code, chat ----------
 
+# A keyless knowledge or code lookup that found nothing (B7): an honest dead end that says what would answer it.
+NO_REFERENCE = ("I couldn't find a reference answer for that. A question like this needs an LLM engine; choose one in "
+                'Settings.')
 FILLER = r"^(?:who|what|when|where|why|how)\s+(?:is|was|are|were|did|does|do)\s+(?:(?:a|an|the)\s+)?|^tell me about\s+(?:the\s+)?|^explain\s+|\?$"
 
 
@@ -477,15 +759,26 @@ def knowledge_term(q: str) -> str:
     return re.sub(FILLER, '', q.strip(), flags=re.I).strip(' ?') or q
 
 
+DDG_TIMEOUT = 2.5    # seconds DuckDuckGo gets before Wikipedia answers instead
+DDG_COOLDOWN = 300   # after a failure, DuckDuckGo is skipped this long: when it throttles a network it does so for hours
+_ddg_down_until = 0.0
+
+
 async def ddg_abstract(http, q: str) -> tuple[str, str, str | None]:
     """(term, abstract, url). DuckDuckGo instant answers serve Wikipedia abstracts without Wikipedia's strict bot rate
-    limits; when DuckDuckGo fails or has no abstract (it throttles some networks for hours), Wikipedia's own search."""
+    limits; when DuckDuckGo fails or has no abstract (it throttles some networks for hours), Wikipedia's own search. A
+    DuckDuckGo that hangs or fails is given up on quickly and skipped for a while, so a keyless answer never waits on it."""
+    global _ddg_down_until
     term = knowledge_term(q)
-    try:
-        d = await cached_json(http, cache.LOOKUP_TTL, 'https://api.duckduckgo.com/', q=term, format='json', no_html=1,
-                              skip_disambig=1)
-    except Exception:
-        d = None
+    d = None
+    if clock.monotonic() >= _ddg_down_until:
+        try:
+            d = await asyncio.wait_for(cached_json(http, cache.LOOKUP_TTL, 'https://api.duckduckgo.com/', q=term,
+                                                   format='json', no_html=1, skip_disambig=1), DDG_TIMEOUT)
+        except (asyncio.TimeoutError, aiohttp.ClientError):  # unreachable or throttled: skip it for a while
+            _ddg_down_until = clock.monotonic() + DDG_COOLDOWN
+        except Exception:
+            pass
     if isinstance(d, dict) and d.get('AbstractText'):
         return term, d['AbstractText'], d.get('AbstractURL') or None
     try:
@@ -495,14 +788,29 @@ async def ddg_abstract(http, q: str) -> tuple[str, str, str | None]:
     return term, text, url
 
 
+SEARCH_HITS = 5  # Wikipedia search hits looked at for one the question names
+
+
+def named_hit(titles: list[str], term: str) -> str:
+    """The first search hit the question names in full ('How tall is Mount Everest' names Mount Everest, not the top hit
+    'Mount Everest in 2018'), else the top hit. A qualified title names a narrower sense than the words alone: 'Hiroshima
+    (book)' is not named by 'dropped on Hiroshima'."""
+    said = ' ' + ' '.join(re.findall(r'[a-z0-9]+', term.lower())) + ' '
+    for t in titles:
+        name = ' '.join(re.findall(r'[a-z0-9]+', t.lower()))
+        if name and f' {name} ' in said:
+            return t
+    return titles[0]
+
+
 async def wiki_abstract(http, term: str) -> tuple[str, str | None]:
     """The lead of the best-matching Wikipedia article: search, then the page summary. Disambiguation pages don't count."""
     found = await cached_json(http, cache.LOOKUP_TTL, 'https://en.wikipedia.org/w/api.php', action='query', list='search',
-                              srsearch=term, srlimit=1, format='json')
+                              srsearch=term, srlimit=SEARCH_HITS, format='json')
     hits = ((found or {}).get('query') or {}).get('search') or []
     if not hits:
         return '', None
-    title = hits[0]['title']
+    title = named_hit([h['title'] for h in hits], term)
     page = await cached_json(http, cache.LOOKUP_TTL,
                              'https://en.wikipedia.org/api/rest_v1/page/summary/' + quote(title.replace(' ', '_'), safe=''))
     if not isinstance(page, dict) or page.get('type') == 'disambiguation' or not page.get('extract'):
@@ -510,11 +818,85 @@ async def wiki_abstract(http, term: str) -> tuple[str, str | None]:
     return page['extract'], ((page.get('content_urls') or {}).get('desktop') or {}).get('page')
 
 
+# Words that say how a question is asked, not what it is about: they never pick a sentence from an article.
+ASKING_WORDS = set("""what what's whats who who's whom whose which when where why how is are was were did does do done the
+a an of for to in on at by with from and or about tell me explain describe can could would should will you your my i it
+its it's this that these those there their they them be been being has have had get give please much many some any into
+than then also just really know want need like does don't doesn't mean meaning define definition""".split())
+ARTICLE_TIMEOUT = 2.5   # seconds the full Wikipedia article gets before the lead answers alone
+ARTICLE_END = re.compile(r'^==\s*(?:See also|References|Notes|Citations|Sources|Bibliography|Further reading|External links)'
+                         r'\s*==', re.I | re.M)
+FOCUS_SENTENCES = 2
+
+
+def content_words(text: str) -> list[str]:
+    """The words of a question that name something, lowercased: 'wi-fi' reads as 'wifi'."""
+    words = re.findall(r"[a-z0-9]+(?:'[a-z]+)?", text.lower().replace('-', ''))
+    return [w for w in dict.fromkeys(words) if w not in ASKING_WORDS and (len(w) >= 3 or w.isdigit())]
+
+
+def same_word(a: str, b: str) -> bool:
+    """One word, give or take an ending: dose/doses, adult/adults, bomb/bombings. Short words must match exactly."""
+    n = min(len(a), len(b))
+    return a == b or n >= 4 and a[:n] == b[:n] and abs(len(a) - len(b)) <= 4
+
+
+def mentions(words: list[str], text: str) -> set[str]:
+    have = set(re.findall(r'[a-z0-9]+', text.lower().replace('-', '')))
+    return {w for w in words if any(same_word(w, h) for h in have)}
+
+
+def article_title(url: str | None) -> str | None:
+    m = re.match(r'https?://en\.wikipedia\.org/wiki/([^?#]+)', url or '')
+    return unquote(m.group(1)).replace('_', ' ') if m else None
+
+
+def focus_words(q: str, title: str, lead: str) -> list[str]:
+    """What the question asks about the subject beyond the subject itself, when the article's lead doesn't say it:
+    'the maximum daily dose' of paracetamol, when Paracetamol's lead only says what the drug is. One word alone ('born',
+    'dropped') is too weak a cue to pick a sentence by, so it takes at least two."""
+    words = [w for w in content_words(q) if not mentions([w], title)]
+    return words if len(words) >= 2 and len(mentions(words, lead)) < len(words) else []
+
+
+async def article_text(http, title: str) -> str:
+    """The plain text of a Wikipedia article, up to its reference sections."""
+    d = await cached_json(http, cache.LOOKUP_TTL, 'https://en.wikipedia.org/w/api.php', action='query', prop='extracts',
+                          explaintext=1, redirects=1, titles=title, format='json')
+    pages = list((((d or {}).get('query') or {}).get('pages') or {}).values())
+    text = (pages[0].get('extract') or '') if pages and isinstance(pages[0], dict) else ''
+    end = ARTICLE_END.search(text)
+    return text[:end.start()] if end else text
+
+
+def best_sentences(text: str, words: list[str], skip: str = '', limit: int = FOCUS_SENTENCES) -> list[str]:
+    """The article's sentences that say the most about the question's words, most first, then in article order. A
+    sentence must name two of them, and two thirds when there are more, so a passing mention is not quoted."""
+    need = max(2, -(-2 * len(words) // 3))
+    found = []
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith('=')]
+    sentences = [s.strip() for ln in lines for s in re.split(r'(?<=[.!?])\s+', ln)]
+    for i, s in enumerate(sentences):
+        if 20 <= len(s) <= 500 and s[-1] in '.!?' and s not in skip and (hit := len(mentions(words, s))) >= need:
+            found.append((-hit, i, s))
+    return [s for _, _, s in sorted(found)[:limit]]
+
+
 async def agent_knowledge(q: str, http) -> AgentResult:
     term, text, url = await ddg_abstract(http, q)
     if not text:
-        return AgentResult(f'No summary found for "{term}".', False)
-    return AgentResult(' '.join(re.split(r'(?<=[.!?])\s+', text)[:3]), True, url or 'duckduckgo.com')
+        return AgentResult(NO_REFERENCE, False)
+    lead = ' '.join(re.split(r'(?<=[.!?])\s+', text)[:3])
+    title = article_title(url)
+    words = focus_words(q, title, text) if title else []
+    if words:  # the lead says what the thing is, not what was asked about it: quote the article's lines on that first
+        try:
+            body = await asyncio.wait_for(article_text(http, title), ARTICLE_TIMEOUT)
+        except Exception:  # unreachable or slow: the lead answers alone
+            body = ''
+        if focused := best_sentences(body, words, skip=lead):
+            return AgentResult(' '.join(focused) + '\n\n' + lead, True, url)
+    return AgentResult(lead, True, url or 'duckduckgo.com')
 
 
 async def agent_code(q: str, http) -> AgentResult:
@@ -523,7 +905,7 @@ async def agent_code(q: str, http) -> AgentResult:
                        sort='relevance', order='desc', pagesize=3)
     items = d.get('items') or []
     if not items:
-        return AgentResult('No accepted Stack Overflow answers matched that.', False)
+        return AgentResult(NO_REFERENCE, False)
     lines = [f"• {html.unescape(i['title'])} ({i['score']} votes)" for i in items]
     return AgentResult('Top answered threads on Stack Overflow:\n' + '\n'.join(lines), True, items[0]['link'])
 

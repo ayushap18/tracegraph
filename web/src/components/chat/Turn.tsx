@@ -10,6 +10,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { cn } from '@/lib/utils'
 import { AnswerBadges, TimingLine, secs } from './AnswerBadges'
 import type { RunExtras } from './options'
+import { Assumptions, CaveatsBox, withoutAssumptions, withoutCaveats } from './Caveats'
 
 // One chat turn: the question and its answer. Chat renders these (and, for answer groups, several answers under
 // one question); the Sandbox page reuses Turn through the re-export in pages/Chat.tsx.
@@ -20,6 +21,24 @@ export const answerOf = (run: Run) => {
   const ts = run.order.map(t => run.tasks[t]).filter(Boolean)
   return ts.length === 1 ? ts[0].answered?.answer ?? ts[0].stream : ''
 }
+
+// Caveats that qualify an answer rather than report a miss (merger.HEDGES): the merger writes them into the answer and
+// never lists them as caveats, so they never belong in the "couldn't do" box.
+const HEDGES = ['Figures like these change every year; check the official source.']
+
+/** What the run could not do: the merged answer's caveats once there is a merged answer (none when it lists none),
+ *  else each step's own, without the hedges (a run still merging, or one that ended before its merge). */
+export function caveatsOf(run: Run): string[] {
+  if (run.merged) return run.merged.caveats ?? []
+  const out: string[] = []
+  for (const t of run.order)
+    for (const c of run.tasks[t]?.answered?.caveats ?? []) if (!out.includes(c) && !HEDGES.includes(c)) out.push(c)
+  return out
+}
+
+/** Stated assumptions (answered instead of asking a clarifying question), in step order. */
+export const assumptionsOf = (run: Run) =>
+  run.order.map(t => run.tasks[t]?.routed?.assumption).filter((a): a is string => !!a)
 
 export function BotHead({ run, label }: { run?: Run; label?: string }) {
   return (
@@ -79,6 +98,10 @@ export function Answer({ run, selected, onShowTrace, extras, actions, engineLabe
   const toast = useToast()
   const tasks = run.order.map(t => run.tasks[t]).filter(Boolean)
   const answer = answerOf(run)
+  const caveats = caveatsOf(run)
+  const assumptions = assumptionsOf(run)
+  // The caveats box and the assumption lines show these, so the answer text does not repeat them.
+  const shown = withoutAssumptions(withoutCaveats(answer, caveats), assumptions)
   const streaming = !run.done && !run.merged
   const multi = tasks.length > 1
   const finalFail = run.done && run.status !== 'done' && run.status !== 'running'
@@ -110,7 +133,10 @@ export function Answer({ run, selected, onShowTrace, extras, actions, engineLabe
                     <span className={cn('min-w-0 flex-1 [overflow-wrap:anywhere]', st === 'wait' ? 'text-muted-foreground' : 'text-foreground')}>
                       {t.text}{t.depends_on.length > 0 && <span className="text-xs text-muted-foreground"> (after {t.depends_on.join(', ')})</span>}
                     </span>
-                    {t.routed && <span className="max-sm:ml-6"><Chip agent={t.routed.agent} /></span>}
+                    {t.routed && <span className="flex items-center gap-1 max-sm:ml-6">
+                      {t.routed.bound && <Badge tone="accent" icon="agent" title="You picked this agent with @. It took this step; the other steps were routed as usual.">@{t.routed.agent}</Badge>}
+                      <Chip agent={t.routed.agent} />
+                    </span>}
                   </li>
                 )
               })}
@@ -118,8 +144,9 @@ export function Answer({ run, selected, onShowTrace, extras, actions, engineLabe
           </CollapsibleContent>
         </Collapsible>
       )}
+      <Assumptions items={assumptions} className="mt-3" />
       {answer ? (
-        <div className={cn('mt-3 text-[15px] leading-relaxed text-foreground [overflow-wrap:anywhere]', streaming && STREAM_CURSOR)}><Markdown text={answer} /></div>
+        <div className={cn('mt-3 text-[15px] leading-relaxed text-foreground [overflow-wrap:anywhere]', streaming && STREAM_CURSOR)}><Markdown text={shown} /></div>
       ) : !run.done ? (
         <div className="mt-3 flex items-start gap-2.5 py-1 text-sm text-foreground" role="status">
           <Spinner size={14} className="mt-0.5 shrink-0 text-muted-foreground" />
@@ -131,6 +158,7 @@ export function Answer({ run, selected, onShowTrace, extras, actions, engineLabe
       {finalFail && !run.error && <p className={cn('mt-3 flex items-start gap-2 rounded-md border p-3 text-sm text-foreground', quiet ? 'border-warn/25 bg-warn/10' : 'border-destructive/25 bg-destructive/10')}>
         <Icon name={run.status === 'cancelled' ? 'cancelled' : 'timeout'} size={15} className={cn('mt-0.5 shrink-0', quiet ? 'text-warn' : 'text-destructive')} />
         {run.status === 'cancelled' ? 'Stopped before it finished.' : run.status === 'timeout' ? 'Timed out.' : 'Something went wrong.'}</p>}
+      {run.done && <CaveatsBox caveats={caveats} className="mt-3" />}
       <AnswerBadges run={run} extras={extras} />
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <span className="flex min-w-0 flex-wrap gap-1.5">

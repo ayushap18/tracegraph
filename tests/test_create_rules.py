@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from jevrouter.create import FORMATS, RULES, RuleResult, SpecError, render, verify
+from jevrouter.create import FORMATS, RULES, RuleResult, SpecError, preview, render, verify
 from jevrouter.create.themes import THEMES, contrast, get, worst_contrast
 
 SPEC = {'title': 'Quarterly report', 'subtitle': 'Q3', 'sections': [
@@ -201,3 +201,59 @@ def test_a4_theme_contrast():
         assert ratio >= 4.5, (name, pair, ratio)
     assert get('nope') is THEMES['clean'] and get('dark', paper=True)['bg'] == 'FFFFFF'
     assert get('clean', paper=True) is THEMES['clean']
+
+
+# ---------- the brief rules (docs/PLAN-accuracy-v2.md C6, C7) ----------
+
+def test_brief_rules_are_listed_and_only_run_with_a_brief():
+    from jevrouter.create.brief import parse_brief
+    ids = [r['id'] for r in RULES]
+    assert ids.index('V5') == ids.index('V4') + 1 and ids[ids.index('V5'):ids.index('V9') + 1] == \
+        ['V5', 'V6', 'V7', 'V8', 'V9']
+    assert ids.index('X6') == ids.index('X5') + 1 and by_id([RuleResult(**{k: r[k] for k in ('id', 'severity')},
+                                                                        ok=True, note='') for r in RULES])['X6']
+    assert next(r for r in RULES if r['id'] == 'X3')['text'].startswith('No remote references; images only as '
+                                                                        'embedded bytes from the asset cache.')
+    data = render(SPEC, 'pdf')
+    assert not {'V5', 'V6', 'V7', 'V8', 'V9', 'X6'} & set(by_id(verify(SPEC, 'pdf', data)))
+    res = by_id(verify(SPEC, 'pdf', data, brief=parse_brief('a 12-13 page PDF')))
+    assert {'V5', 'X6'} <= set(res) and not {'V6', 'V7', 'V8', 'V9'} & set(res)
+
+
+def test_v5_pages_and_slides():
+    from jevrouter.create.brief import parse_brief
+    res = by_id(verify(SPEC, 'pdf', render(SPEC, 'pdf'), brief=parse_brief('12-13 pages')))
+    assert not res['V5'].ok and res['V5'].note == 'asked for 12-13 pages, made 1'
+    assert by_id(verify(SPEC, 'pdf', render(SPEC, 'pdf'), brief=parse_brief('a one page pdf')))['V5'].note == \
+        '1 pages, asked for 1'
+    n = preview('pptx', render(SPEC, 'pptx'))['slides']
+    res = by_id(verify(SPEC, 'pptx', render(SPEC, 'pptx'), brief=parse_brief(f'a {n} slide deck')))
+    assert res['V5'].ok and res['V5'].note == f'{n} slides, asked for {n}'
+    res = by_id(verify(SPEC, 'pptx', render(SPEC, 'pptx'), brief=parse_brief('a 10-12 slide deck')))
+    assert not res['V5'].ok and res['V5'].note == f'asked for 10-12 slides, made {n}'
+    res = by_id(verify(SPEC, 'docx', render(SPEC, 'docx'), brief=parse_brief('10 pages')))
+    assert not res['V5'].ok and res['V5'].note.startswith('asked for 10 pages, made about 1 (')
+
+
+def test_v8_theme_and_the_grey_scan():
+    from jevrouter.create.brief import parse_brief
+    from jevrouter.create.rules import grey_scan
+    assert worst_contrast('mono')[0] >= 7
+    mono = {**SPEC, 'theme': 'mono'}
+    ok, note = grey_scan(render(mono, 'pdf'))
+    assert ok and note.startswith('only greys drawn')
+    ok, note = grey_scan(render(SPEC, 'pdf'))
+    assert not ok and 'coloured fills or strokes' in note
+    bw = parse_brief('in black and white')
+    assert by_id(verify(mono, 'pdf', render(mono, 'pdf'), brief=bw))['V8'].ok
+    res = by_id(verify(SPEC, 'pdf', render(SPEC, 'pdf'), brief=bw))['V8']
+    assert not res.ok and res.note == 'theme clean, asked for mono'
+    assert by_id(verify(mono, 'docx', render(mono, 'docx'), brief=bw))['V8'].ok
+
+
+def test_v6_images_asked_for_but_none():
+    from jevrouter.create.brief import parse_brief
+    res = by_id(verify(SPEC, 'pdf', render(SPEC, 'pdf'), brief=parse_brief('with pictures')))
+    assert not res['V6'].ok and res['V6'].note == 'no images embedded (asked for images)'
+    res = by_id(verify(SPEC, 'md', render(SPEC, 'md'), brief=parse_brief('with pictures')))
+    assert res['V6'].note == "no images embedded; a MD file can't hold them"

@@ -1,0 +1,1164 @@
+{
+ "about": "Run 2741 (docs/PLAN-accuracy-v2.md 1.1), exported read-only from data/tracegraph.db: the stored run record and both created files as CreatedFile meta plus the stored spec.",
+ "qid": 2741,
+ "record": {
+  "qid": 2741,
+  "text": "pdf on the ai what is ai how ai begins using the multiple diagrams also add the images from the ebsources build 12-13 page of pdf properly using the black white text also anthropic sans font also keep the sizing properly and all images are to be sourced from the best sources",
+  "source": "chat",
+  "at": 1790536483.490345,
+  "plan": {
+   "planner": "auto",
+   "subtasks": [
+    {
+     "tid": "2741.1",
+     "text": "Research AI in depth: what AI is, how AI began (history and origins, key milestones), and core concepts. Include content suitable for multiple diagrams (timeline, AI subfields hierarchy, how machine learning works) and find relevant high-quality images from the best reputable web sources, with their URLs and attributions.",
+     "depends_on": []
+    },
+    {
+     "tid": "2741.2",
+     "text": "Create a properly formatted 12-13 page PDF on AI (what is AI, how AI began) from the research, with multiple diagrams, the sourced images from the web, black and white text, Anthropic Sans font, and proper consistent sizing of text and images.",
+     "depends_on": [
+      "2741.1"
+     ]
+    }
+   ]
+  },
+  "tasks": [
+   {
+    "tid": "2741.1",
+    "text": "Research AI in depth: what AI is, how AI began (history and origins, key milestones), and core concepts. Include content suitable for multiple diagrams (timeline, AI subfields hierarchy, how machine learning works) and find relevant high-quality images from the best reputable web sources, with their URLs and attributions.",
+    "depends_on": [],
+    "agent": "create",
+    "pick": "create",
+    "reason": "you picked @create",
+    "probabilities": {
+     "create": 1.0
+    },
+    "confidence": 1.0,
+    "urgency": 0.0,
+    "unsafe": 0.01,
+    "clear": 1.0,
+    "jev_ms": 482,
+    "model": "",
+    "examples": false,
+    "forced": true,
+    "agent_ms": 68230,
+    "answer": "Created **artificial-intelligence-what-it-is-how-it-began-and-how-it-works.md**, 12 KB\n\nNo format was named, so this is Markdown. Convert it to PDF, Word, PowerPoint, Excel from the file card at no cost.",
+    "ok": true,
+    "source": null,
+    "engine": "claude-code",
+    "created_files": [
+     {
+      "id": "e34bda15f529",
+      "name": "artificial-intelligence-what-it-is-how-it-began-and-how-it-works.md",
+      "format": "md",
+      "size": 12776,
+      "created": 1790536558.081153,
+      "qid": 2741,
+      "title": "Artificial Intelligence: What It Is, How It Began and How It Works",
+      "pages": null,
+      "slides": null,
+      "sheets": null,
+      "tokens": 9410,
+      "source": "llm",
+      "from_id": null,
+      "rules": [
+       {
+        "id": "S1",
+        "severity": "block",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "S2",
+        "severity": "block",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "S3",
+        "severity": "fix",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "S4",
+        "severity": "fix",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "S5",
+        "severity": "fix",
+        "ok": false,
+        "note": "numbers written as text in tables stored as numbers"
+       },
+       {
+        "id": "S6",
+        "severity": "fix",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "S7",
+        "severity": "block",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "L1",
+        "severity": "block",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "L2",
+        "severity": "fix",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "L3",
+        "severity": "fix",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "X4",
+        "severity": "block",
+        "ok": true,
+        "note": "Jev unsafe score 2% (highest of 3 parts)"
+       },
+       {
+        "id": "V1",
+        "severity": "block",
+        "ok": true,
+        "note": "reopened with a UTF-8 Markdown read"
+       },
+       {
+        "id": "L4",
+        "severity": "block",
+        "ok": true,
+        "note": "12,776 bytes"
+       },
+       {
+        "id": "V2",
+        "severity": "warn",
+        "ok": true,
+        "note": "title and headings found"
+       },
+       {
+        "id": "V3",
+        "severity": "warn",
+        "ok": true,
+        "note": "8 headings for 8"
+       },
+       {
+        "id": "V4",
+        "severity": "warn",
+        "ok": true,
+        "note": "0 charts as tables"
+       },
+       {
+        "id": "F5",
+        "severity": "fix",
+        "ok": true,
+        "note": "one # title, no skipped heading levels"
+       },
+       {
+        "id": "X1",
+        "severity": "block",
+        "ok": true,
+        "note": "no raw HTML"
+       },
+       {
+        "id": "X3",
+        "severity": "fix",
+        "ok": true,
+        "note": "no remote images or raw HTML"
+       },
+       {
+        "id": "A1",
+        "severity": "fix",
+        "ok": true,
+        "note": "headings are Markdown headings"
+       },
+       {
+        "id": "A4",
+        "severity": "fix",
+        "ok": true,
+        "note": "lowest text contrast 6.4:1 (muted on bg)"
+       }
+      ],
+      "sandbox": null
+     }
+    ],
+    "checks": {
+     "effort": "high"
+    }
+   },
+   {
+    "tid": "2741.2",
+    "text": "Create a properly formatted 12-13 page PDF on AI (what is AI, how AI began) from the research, with multiple diagrams, the sourced images from the web, black and white text, Anthropic Sans font, and proper consistent sizing of text and images.",
+    "depends_on": [
+     "2741.1"
+    ],
+    "agent": "create",
+    "pick": "create",
+    "reason": "you picked @create",
+    "probabilities": {
+     "create": 1.0
+    },
+    "confidence": 1.0,
+    "urgency": 0.0,
+    "unsafe": 0.01,
+    "clear": 1.0,
+    "jev_ms": 351,
+    "model": "",
+    "examples": false,
+    "forced": true,
+    "agent_ms": 414,
+    "answer": "Created **ai-in-depth-what-ai-is-how-ai-began-history-and-origins-key-milestones-and.pdf**, 1 page",
+    "ok": true,
+    "source": null,
+    "engine": "keyless",
+    "created_files": [
+     {
+      "id": "1254d406bdd0",
+      "name": "ai-in-depth-what-ai-is-how-ai-began-history-and-origins-key-milestones-and.pdf",
+      "format": "pdf",
+      "size": 2372,
+      "created": 1790536558.849041,
+      "qid": 2741,
+      "title": "AI in depth: what AI is, how AI began (history and origins, key milestones), and core concepts.",
+      "pages": 1,
+      "slides": null,
+      "sheets": null,
+      "tokens": 0,
+      "source": "answer",
+      "from_id": null,
+      "rules": [
+       {
+        "id": "S1",
+        "severity": "block",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "S2",
+        "severity": "block",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "S3",
+        "severity": "fix",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "S4",
+        "severity": "fix",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "S5",
+        "severity": "fix",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "S6",
+        "severity": "fix",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "S7",
+        "severity": "block",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "L1",
+        "severity": "block",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "L2",
+        "severity": "fix",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "L3",
+        "severity": "fix",
+        "ok": true,
+        "note": ""
+       },
+       {
+        "id": "X4",
+        "severity": "block",
+        "ok": true,
+        "note": "Jev unsafe score 1%"
+       },
+       {
+        "id": "V1",
+        "severity": "block",
+        "ok": true,
+        "note": "reopened with pypdf"
+       },
+       {
+        "id": "L4",
+        "severity": "block",
+        "ok": true,
+        "note": "2,372 bytes"
+       },
+       {
+        "id": "V2",
+        "severity": "warn",
+        "ok": true,
+        "note": "title and headings found"
+       },
+       {
+        "id": "V3",
+        "severity": "warn",
+        "ok": true,
+        "note": "1 pages, 1 outline entries for 1 headings"
+       },
+       {
+        "id": "V4",
+        "severity": "warn",
+        "ok": true,
+        "note": "0 charts drawn"
+       },
+       {
+        "id": "F1",
+        "severity": "fix",
+        "ok": true,
+        "note": "A4, page numbers, outline, title set"
+       },
+       {
+        "id": "F6",
+        "severity": "fix",
+        "ok": true,
+        "note": "one theme; body text 10.5 pt"
+       },
+       {
+        "id": "X1",
+        "severity": "block",
+        "ok": true,
+        "note": "no scripts or embedded files"
+       },
+       {
+        "id": "X3",
+        "severity": "fix",
+        "ok": true,
+        "note": "no links or remote actions"
+       },
+       {
+        "id": "A1",
+        "severity": "fix",
+        "ok": true,
+        "note": "headings are outline entries"
+       },
+       {
+        "id": "A2",
+        "severity": "fix",
+        "ok": true,
+        "note": "table header rows repeat on every page"
+       },
+       {
+        "id": "A4",
+        "severity": "fix",
+        "ok": true,
+        "note": "lowest text contrast 6.4:1 (muted on bg)"
+       }
+      ],
+      "sandbox": null
+     }
+    ]
+   }
+  ],
+  "merged": {
+   "answer": "**create**: Created **artificial-intelligence-what-it-is-how-it-began-and-how-it-works.md**, 12 KB\n\nNo format was named, so this is Markdown. Convert it to PDF, Word, PowerPoint, Excel from the file card at no cost.\n\n**create**: Created **ai-in-depth-what-ai-is-how-ai-began-history-and-origins-key-milestones-and.pdf**, 1 page",
+   "engine": "concat"
+  },
+  "total_ms": 75361,
+  "error": null,
+  "status": "done",
+  "engine": "auto",
+  "session_id": "98bd261dc4ea",
+  "compare_id": null,
+  "files": [],
+  "tokens": {
+   "jev_in": 4972,
+   "llm_in": 3723,
+   "llm_out": 7458
+  },
+  "mode": "research",
+  "style": "default",
+  "agent": "create",
+  "group_id": null,
+  "chosen": true,
+  "timings": {
+   "plan_ms": 5880,
+   "route_ms": 834,
+   "agents_ms": 68644,
+   "merge_ms": null,
+   "first_token_ms": 74594,
+   "planner": "llm",
+   "merger": "template",
+   "cache_hits": 0
+  }
+ },
+ "created": [
+  {
+   "meta": {
+    "id": "e34bda15f529",
+    "name": "artificial-intelligence-what-it-is-how-it-began-and-how-it-works.md",
+    "format": "md",
+    "size": 12776,
+    "created": 1790536558.081153,
+    "qid": 2741,
+    "title": "Artificial Intelligence: What It Is, How It Began and How It Works",
+    "pages": null,
+    "slides": null,
+    "sheets": null,
+    "tokens": 9410,
+    "source": "llm",
+    "from_id": null,
+    "rules": [
+     {
+      "id": "S1",
+      "severity": "block",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "S2",
+      "severity": "block",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "S3",
+      "severity": "fix",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "S4",
+      "severity": "fix",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "S5",
+      "severity": "fix",
+      "ok": false,
+      "note": "numbers written as text in tables stored as numbers"
+     },
+     {
+      "id": "S6",
+      "severity": "fix",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "S7",
+      "severity": "block",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "L1",
+      "severity": "block",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "L2",
+      "severity": "fix",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "L3",
+      "severity": "fix",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "X4",
+      "severity": "block",
+      "ok": true,
+      "note": "Jev unsafe score 2% (highest of 3 parts)"
+     },
+     {
+      "id": "V1",
+      "severity": "block",
+      "ok": true,
+      "note": "reopened with a UTF-8 Markdown read"
+     },
+     {
+      "id": "L4",
+      "severity": "block",
+      "ok": true,
+      "note": "12,776 bytes"
+     },
+     {
+      "id": "V2",
+      "severity": "warn",
+      "ok": true,
+      "note": "title and headings found"
+     },
+     {
+      "id": "V3",
+      "severity": "warn",
+      "ok": true,
+      "note": "8 headings for 8"
+     },
+     {
+      "id": "V4",
+      "severity": "warn",
+      "ok": true,
+      "note": "0 charts as tables"
+     },
+     {
+      "id": "F5",
+      "severity": "fix",
+      "ok": true,
+      "note": "one # title, no skipped heading levels"
+     },
+     {
+      "id": "X1",
+      "severity": "block",
+      "ok": true,
+      "note": "no raw HTML"
+     },
+     {
+      "id": "X3",
+      "severity": "fix",
+      "ok": true,
+      "note": "no remote images or raw HTML"
+     },
+     {
+      "id": "A1",
+      "severity": "fix",
+      "ok": true,
+      "note": "headings are Markdown headings"
+     },
+     {
+      "id": "A4",
+      "severity": "fix",
+      "ok": true,
+      "note": "lowest text contrast 6.4:1 (muted on bg)"
+     }
+    ],
+    "sandbox": null
+   },
+   "spec": {
+    "title": "Artificial Intelligence: What It Is, How It Began and How It Works",
+    "subtitle": "A research brief with material for a timeline, a subfield hierarchy, a machine learning diagram and an image sourcing guide",
+    "sections": [
+     {
+      "heading": "What Is Artificial Intelligence?",
+      "level": 1,
+      "notes": "This brief draws on well-established history and definitions. It does not cite live web sources, and none were fetched to write it.",
+      "blocks": [
+       {
+        "type": "paragraph",
+        "text": "Artificial intelligence (AI) is the field of computer science that builds systems able to do tasks that normally need human intelligence. These tasks include perceiving the world, understanding language, reasoning, learning from experience, planning and making decisions. John McCarthy, who coined the term, defined it as \"the science and engineering of making intelligent machines.\""
+       },
+       {
+        "type": "paragraph",
+        "text": "There are two broad ways to define AI. One focuses on behaviour: does the system act intelligently? The other focuses on process: does it reason the way a mind does? Most modern AI is engineering-driven. It aims to perform useful tasks well, not to copy human thought exactly."
+       },
+       {
+        "type": "bullets",
+        "ordered": false,
+        "items": [
+         "Narrow (weak) AI: systems built for a specific task, such as translation, image recognition or playing chess. All AI deployed today is narrow in this sense, although modern large models cover a very wide range of tasks.",
+         "Artificial general intelligence (AGI): a hypothetical system that could match human ability across almost any intellectual task. Its definition and timeline are still debated.",
+         "Superintelligence: a speculative system that would exceed human ability in nearly every domain.",
+         "Symbolic AI: intelligence built from explicit rules, logic and symbols written by people.",
+         "Connectionist (statistical) AI: intelligence that emerges from networks and models learning patterns from data. This is the approach behind today's machine learning."
+        ]
+       }
+      ]
+     },
+     {
+      "heading": "Origins and History",
+      "level": 1,
+      "notes": "",
+      "blocks": [
+       {
+        "type": "paragraph",
+        "text": "The idea of artificial minds is much older than computers. Greek myth described Talos, a bronze automaton. Medieval and early modern thinkers such as Ramon Llull and Gottfried Leibniz imagined mechanical reasoning. In 1843, Ada Lovelace wrote about Charles Babbage's Analytical Engine and considered whether machines could go beyond calculating. AI as a scientific field only became possible once programmable electronic computers existed in the 1940s."
+       },
+       {
+        "type": "paragraph",
+        "text": "The field's history has swung between optimism and disappointment. There were bursts of progress and funding, followed by \"AI winters\" when results fell short of promises. Three things drove the modern boom from the 2010s onward: large datasets, powerful GPUs and better neural network methods."
+       }
+      ]
+     },
+     {
+      "heading": "Key Milestones Timeline",
+      "level": 2,
+      "notes": "Suggested timeline diagram: plot each row as a node on a horizontal axis and colour-code the eras (Foundations, Early Enthusiasm, First Winter, Expert Systems, Second Winter, Statistical ML, Deep Learning, Generative AI). The table stops at 2024. Check later developments against current sources before publishing.",
+      "blocks": [
+       {
+        "type": "table",
+        "columns": [
+         "Year",
+         "Milestone",
+         "Why it matters"
+        ],
+        "rows": [
+         [
+          "1943",
+          "McCulloch and Pitts publish a mathematical model of the neuron",
+          "The first formal model of an artificial neural network"
+         ],
+         [
+          "1950",
+          "Alan Turing publishes \"Computing Machinery and Intelligence\"",
+          "Proposed the imitation game (Turing Test) as a test of machine intelligence"
+         ],
+         [
+          "1951",
+          "Minsky's SNARC and Strachey's checkers program",
+          "Among the earliest neural network machines and game-playing programs"
+         ],
+         [
+          "1956",
+          "Dartmouth Summer Research Project on AI",
+          "The founding event of AI as a field. The term \"artificial intelligence\" comes from the 1955 proposal by McCarthy, Minsky, Rochester and Shannon"
+         ],
+         [
+          "1956",
+          "Logic Theorist (Newell, Simon and Shaw)",
+          "Often called the first AI program. It proved mathematical theorems"
+         ],
+         [
+          "1958",
+          "Rosenblatt's Perceptron; McCarthy creates LISP",
+          "The first trainable neural network, plus a dominant AI programming language"
+         ],
+         [
+          "1959",
+          "Arthur Samuel popularises the term \"machine learning\"",
+          "His checkers program improved by playing against itself"
+         ],
+         [
+          "1966",
+          "ELIZA chatbot (Joseph Weizenbaum)",
+          "An early natural-language program that simulated conversation"
+         ],
+         [
+          "1969",
+          "Minsky and Papert publish \"Perceptrons\"",
+          "Showed the limits of single-layer networks and helped slow neural network research"
+         ],
+         [
+          "1973–1980",
+          "Lighthill Report and the first AI winter",
+          "Funding cuts after progress fell short of expectations"
+         ],
+         [
+          "1980s",
+          "Expert systems boom (for example, XCON); Japan's Fifth Generation project",
+          "Rule-based AI saw commercial use"
+         ],
+         [
+          "1986",
+          "Rumelhart, Hinton and Williams popularise backpropagation",
+          "Made it practical to train multi-layer neural networks"
+         ],
+         [
+          "1987–1993",
+          "Second AI winter",
+          "The Lisp machine market collapsed and interest in expert systems faded"
+         ],
+         [
+          "1997",
+          "IBM Deep Blue defeats Garry Kasparov at chess",
+          "A landmark public demonstration of machine performance"
+         ],
+         [
+          "1998",
+          "LeNet-5 convolutional network (Yann LeCun)",
+          "Practical handwritten-digit recognition and a template for computer vision"
+         ],
+         [
+          "2009",
+          "ImageNet dataset released",
+          "A large labelled dataset that drove progress in vision"
+         ],
+         [
+          "2011",
+          "IBM Watson wins Jeopardy!; Apple launches Siri",
+          "AI in question answering and consumer products"
+         ],
+         [
+          "2012",
+          "AlexNet wins the ImageNet competition",
+          "Started the deep learning revolution using GPUs"
+         ],
+         [
+          "2014",
+          "Generative adversarial networks (Ian Goodfellow)",
+          "A major step for generative models"
+         ],
+         [
+          "2016",
+          "DeepMind's AlphaGo defeats Lee Sedol 4–1 at Go",
+          "Deep learning combined with reinforcement learning mastered a very complex game"
+         ],
+         [
+          "2017",
+          "\"Attention Is All You Need\" introduces the Transformer",
+          "The architecture behind modern large language models"
+         ],
+         [
+          "2018",
+          "BERT and GPT-1; Hinton, LeCun and Bengio receive the Turing Award",
+          "Pre-trained language models took off, and deep learning received formal recognition"
+         ],
+         [
+          "2020",
+          "GPT-3; AlphaFold 2 at CASP14",
+          "Large-scale language models and a breakthrough in predicting protein structure"
+         ],
+         [
+          "2022",
+          "Image diffusion models (DALL-E 2, Stable Diffusion); ChatGPT released",
+          "Generative AI reached mass public use"
+         ],
+         [
+          "2023",
+          "GPT-4 and other multimodal models",
+          "Models handling text and images with stronger reasoning"
+         ],
+         [
+          "2024",
+          "EU AI Act enters into force; Nobel Prizes to Hopfield and Hinton (Physics) and to Hassabis and Jumper, shared with Baker (Chemistry)",
+          "The first comprehensive AI law, and Nobel-level recognition for AI research"
+         ]
+        ]
+       }
+      ]
+     },
+     {
+      "heading": "AI Subfields Hierarchy",
+      "level": 1,
+      "notes": "Suggested hierarchy diagram: use nested circles (AI, then Machine Learning, then Neural Networks, then Deep Learning, then Generative AI and LLMs), with the other branches drawn as siblings beside Machine Learning.",
+      "blocks": [
+       {
+        "type": "paragraph",
+        "text": "AI is best pictured as nested fields with branches off to the side. Machine learning is a subset of AI. Deep learning is a subset of machine learning. Generative AI and large language models (LLMs) are one application of deep learning. Some areas are methods (such as search or learning). Others are application domains (such as vision or language) that use several methods."
+       },
+       {
+        "type": "code",
+        "lang": "text",
+        "text": "Artificial Intelligence\n├── Symbolic AI (Good Old-Fashioned AI)\n│   ├── Knowledge representation and reasoning\n│   ├── Logic and automated theorem proving\n│   └── Expert systems\n├── Search and Planning\n│   ├── Heuristic search (e.g., A*)\n│   ├── Game playing (e.g., minimax)\n│   └── Automated planning and scheduling\n├── Machine Learning\n│   ├── Supervised learning\n│   ├── Unsupervised learning\n│   ├── Reinforcement learning\n│   └── Neural Networks\n│       └── Deep Learning\n│           ├── Convolutional networks (vision)\n│           ├── Recurrent networks (sequences)\n│           ├── Transformers\n│           └── Generative AI\n│               ├── Large language models\n│               └── Diffusion and image generation models\n├── Application Domains\n│   ├── Natural language processing\n│   ├── Computer vision\n│   ├── Speech recognition and synthesis\n│   └── Robotics\n└── Cross-cutting Concerns\n    ├── AI safety and alignment\n    └── Ethics, fairness and governance"
+       }
+      ]
+     },
+     {
+      "heading": "How Machine Learning Works",
+      "level": 1,
+      "notes": "Suggested flow diagram: show the numbered steps as boxes in a loop. Draw an arrow from 'Evaluate' back to 'Train' for iteration, and one from 'Monitor' back to 'Collect data' for retraining.",
+      "blocks": [
+       {
+        "type": "paragraph",
+        "text": "Traditional programming starts with rules and data and produces answers. Machine learning turns this around. It starts with data and example answers, and the algorithm learns the rules, in the form of a model with adjustable parameters. Training means repeatedly adjusting those parameters to reduce the gap between the model's predictions and the correct answers."
+       },
+       {
+        "type": "bullets",
+        "ordered": true,
+        "items": [
+         "Define the problem: what should be predicted or decided (for example, spam or not spam).",
+         "Collect data: gather examples relevant to the task.",
+         "Prepare data: clean it, label it and turn it into features, then split it into training, validation and test sets.",
+         "Choose a model: for example linear regression, decision trees or neural networks.",
+         "Train: the model makes predictions, a loss function measures the error, and an optimiser (usually gradient descent, with backpropagation for neural networks) adjusts the parameters to reduce that error.",
+         "Evaluate: measure performance on held-out data to check that the model generalises and has not just memorised the training set.",
+         "Tune: adjust hyperparameters, features or architecture and retrain.",
+         "Deploy: use the model to make predictions on new, real-world data (inference).",
+         "Monitor: track performance over time and retrain when the data drifts."
+        ]
+       },
+       {
+        "type": "table",
+        "columns": [
+         "Learning type",
+         "Data used",
+         "Goal",
+         "Examples"
+        ],
+        "rows": [
+         [
+          "Supervised",
+          "Labelled input–output pairs",
+          "Learn to map inputs to known outputs",
+          "Spam filtering, image classification, price prediction"
+         ],
+         [
+          "Unsupervised",
+          "Unlabelled data",
+          "Find structure or patterns",
+          "Customer segmentation, anomaly detection"
+         ],
+         [
+          "Self-supervised",
+          "Unlabelled data that creates its own targets",
+          "Learn general representations",
+          "Next-word prediction for pre-training LLMs"
+         ],
+         [
+          "Reinforcement",
+          "Rewards from interacting with an environment",
+          "Learn actions that maximise long-term reward",
+          "AlphaGo, robot control, game agents"
+         ]
+        ]
+       }
+      ]
+     },
+     {
+      "heading": "Core Concepts Glossary",
+      "level": 1,
+      "notes": "",
+      "blocks": [
+       {
+        "type": "table",
+        "columns": [
+         "Concept",
+         "Meaning"
+        ],
+        "rows": [
+         [
+          "Algorithm",
+          "A step-by-step procedure for solving a problem or learning from data"
+         ],
+         [
+          "Model",
+          "The learned mathematical function that makes predictions"
+         ],
+         [
+          "Parameters (weights)",
+          "Internal values the model adjusts during training"
+         ],
+         [
+          "Training data",
+          "Examples the model learns from"
+         ],
+         [
+          "Feature",
+          "A measurable input property used by a model"
+         ],
+         [
+          "Loss function",
+          "A measure of how wrong the model's predictions are"
+         ],
+         [
+          "Gradient descent",
+          "An optimisation method that lowers the loss step by step"
+         ],
+         [
+          "Backpropagation",
+          "The method for computing the gradients that update each weight in a neural network"
+         ],
+         [
+          "Neural network",
+          "Layers of connected artificial neurons that transform inputs into outputs"
+         ],
+         [
+          "Deep learning",
+          "Neural networks with many layers that learn layered representations"
+         ],
+         [
+          "Overfitting",
+          "Memorising the training data instead of learning patterns that generalise"
+         ],
+         [
+          "Inference",
+          "Using a trained model to make predictions on new data"
+         ],
+         [
+          "Transformer",
+          "A neural architecture based on attention, used in modern LLMs"
+         ],
+         [
+          "Large language model",
+          "A transformer trained on huge amounts of text to predict and generate language"
+         ],
+         [
+          "Bias (in AI)",
+          "Systematic unfair outcomes, often inherited from training data"
+         ],
+         [
+          "Alignment",
+          "Making sure AI systems act in line with human intentions and values"
+         ]
+        ]
+       }
+      ]
+     },
+     {
+      "heading": "Image Sourcing Guide",
+      "level": 1,
+      "notes": "No image files were fetched or checked in preparing this brief, so it gives no specific image URLs. The sites below are real, reputable repositories. Before publishing, confirm each image's exact URL, licence and credit line on its source page.",
+      "blocks": [
+       {
+        "type": "paragraph",
+        "text": "The table suggests images for each diagram and topic, with trustworthy places to search. Images from Wikimedia Commons usually come with a clear licence (public domain or Creative Commons) and a ready-made attribution line. Museum and corporate archives often limit reuse, so check their terms."
+       },
+       {
+        "type": "table",
+        "columns": [
+         "Suggested image",
+         "Where to search",
+         "Attribution and licensing note"
+        ],
+        "rows": [
+         [
+          "Portrait of Alan Turing",
+          "Wikimedia Commons (https://commons.wikimedia.org); National Portrait Gallery, London (https://www.npg.org.uk)",
+          "Copy the author, licence and source from the Commons file page"
+         ],
+         [
+          "Dartmouth 1956 participants or plaque",
+          "Wikimedia Commons; Dartmouth College (https://home.dartmouth.edu)",
+          "Check the rights holder; some photos are family-owned"
+         ],
+         [
+          "Mark I Perceptron (Rosenblatt)",
+          "Smithsonian National Museum of American History (https://americanhistory.si.edu); Wikimedia Commons",
+          "Credit the institution; confirm reuse terms"
+         ],
+         [
+          "Early computers and Deep Blue",
+          "Computer History Museum (https://www.computerhistory.org); IBM Heritage (https://www.ibm.com/history)",
+          "Usually limited to editorial use; request permission for commercial use"
+         ],
+         [
+          "ELIZA conversation screenshot",
+          "Wikimedia Commons",
+          "Often public domain; confirm on the file page"
+         ],
+         [
+          "AlphaGo and AlphaFold visuals",
+          "Google DeepMind (https://deepmind.google)",
+          "Corporate media; follow its press or media usage terms"
+         ],
+         [
+          "Neural network and Transformer diagrams",
+          "Wikimedia Commons; the original paper on arXiv (https://arxiv.org)",
+          "Cite the paper's authors; Commons redrawings usually use CC BY-SA"
+         ],
+         [
+          "2024 Nobel laureates in AI",
+          "Nobel Prize outreach site (https://www.nobelprize.org)",
+          "Credit as shown on the site; check usage restrictions"
+         ]
+        ]
+       },
+       {
+        "type": "bullets",
+        "ordered": false,
+        "items": [
+         "Attribution format: Title, Author or Creator, Source (with URL), Licence (for example, CC BY-SA 4.0).",
+         "Prefer public domain or CC BY images for easy reuse.",
+         "For diagrams, consider drawing your own from the timeline, hierarchy and ML flow content above to avoid licensing issues altogether."
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "meta": {
+    "id": "1254d406bdd0",
+    "name": "ai-in-depth-what-ai-is-how-ai-began-history-and-origins-key-milestones-and.pdf",
+    "format": "pdf",
+    "size": 2372,
+    "created": 1790536558.849041,
+    "qid": 2741,
+    "title": "AI in depth: what AI is, how AI began (history and origins, key milestones), and core concepts.",
+    "pages": 1,
+    "slides": null,
+    "sheets": null,
+    "tokens": 0,
+    "source": "answer",
+    "from_id": null,
+    "rules": [
+     {
+      "id": "S1",
+      "severity": "block",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "S2",
+      "severity": "block",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "S3",
+      "severity": "fix",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "S4",
+      "severity": "fix",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "S5",
+      "severity": "fix",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "S6",
+      "severity": "fix",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "S7",
+      "severity": "block",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "L1",
+      "severity": "block",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "L2",
+      "severity": "fix",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "L3",
+      "severity": "fix",
+      "ok": true,
+      "note": ""
+     },
+     {
+      "id": "X4",
+      "severity": "block",
+      "ok": true,
+      "note": "Jev unsafe score 1%"
+     },
+     {
+      "id": "V1",
+      "severity": "block",
+      "ok": true,
+      "note": "reopened with pypdf"
+     },
+     {
+      "id": "L4",
+      "severity": "block",
+      "ok": true,
+      "note": "2,372 bytes"
+     },
+     {
+      "id": "V2",
+      "severity": "warn",
+      "ok": true,
+      "note": "title and headings found"
+     },
+     {
+      "id": "V3",
+      "severity": "warn",
+      "ok": true,
+      "note": "1 pages, 1 outline entries for 1 headings"
+     },
+     {
+      "id": "V4",
+      "severity": "warn",
+      "ok": true,
+      "note": "0 charts drawn"
+     },
+     {
+      "id": "F1",
+      "severity": "fix",
+      "ok": true,
+      "note": "A4, page numbers, outline, title set"
+     },
+     {
+      "id": "F6",
+      "severity": "fix",
+      "ok": true,
+      "note": "one theme; body text 10.5 pt"
+     },
+     {
+      "id": "X1",
+      "severity": "block",
+      "ok": true,
+      "note": "no scripts or embedded files"
+     },
+     {
+      "id": "X3",
+      "severity": "fix",
+      "ok": true,
+      "note": "no links or remote actions"
+     },
+     {
+      "id": "A1",
+      "severity": "fix",
+      "ok": true,
+      "note": "headings are outline entries"
+     },
+     {
+      "id": "A2",
+      "severity": "fix",
+      "ok": true,
+      "note": "table header rows repeat on every page"
+     },
+     {
+      "id": "A4",
+      "severity": "fix",
+      "ok": true,
+      "note": "lowest text contrast 6.4:1 (muted on bg)"
+     }
+    ],
+    "sandbox": null
+   },
+   "spec": {
+    "title": "AI in depth: what AI is, how AI began (history and origins, key milestones), and core concepts.",
+    "subtitle": "",
+    "sections": [
+     {
+      "heading": "",
+      "level": 1,
+      "blocks": [
+       {
+        "type": "paragraph",
+        "text": "Created **artificial-intelligence-what-it-is-how-it-began-and-how-it-works.md**, 12 KB"
+       },
+       {
+        "type": "paragraph",
+        "text": "No format was named, so this is Markdown. Convert it to PDF, Word, PowerPoint, Excel from the file card at no cost."
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

@@ -9,12 +9,19 @@ import { modeInfo, styleInfo, type RunExtras } from './options'
 
 export const secs = (v: number | null | undefined) => (v == null ? '' : v >= 1000 ? (v / 1000).toFixed(1) + ' s' : Math.round(v) + ' ms')
 
-interface Flags { forced: string | null; cached: boolean; checks: Array<AnswerChecks & { text: string }> }
+interface Flags {
+  forced: string | null; cached: boolean; checks: Array<AnswerChecks & { text: string }>
+  bound: { step: number; of: number } | null // the step the @agent took, in a plan of several steps
+}
 
 function flagsOf(run: Run, x: RunExtras | undefined): Flags {
   let forced: string | null = x?.agent ?? null
   let cached = (x?.timings?.cache_hits ?? 0) > 0
   const checks: Flags['checks'] = []
+  let bound: Flags['bound'] = null
+  run.order.forEach((tid, i) => {
+    if (run.tasks[tid]?.routed?.bound && run.order.length > 1) bound = { step: i + 1, of: run.order.length }
+  })
   for (const tid of run.order) {
     const t = run.tasks[tid]
     if (!t) continue
@@ -24,7 +31,7 @@ function flagsOf(run: Run, x: RunExtras | undefined): Flags {
     if (t.routed?.cached || saved?.cached || c?.cached) cached = true
     if (c) checks.push({ ...c, text: t.text })
   }
-  return { forced, cached, checks }
+  return { forced, cached, checks, bound }
 }
 
 export function AnswerBadges({ run, extras }: { run: Run; extras?: RunExtras }) {
@@ -40,7 +47,9 @@ export function AnswerBadges({ run, extras }: { run: Run; extras?: RunExtras }) 
       <div className="flex flex-wrap items-center gap-1.5">
         {mode && <Badge tone="accent" icon={mode.icon} title={mode.help}>{mode.label}</Badge>}
         {style && <Badge tone="neutral" title={style.help}>{style.label}</Badge>}
-        {f.forced && <Badge tone="neutral" icon="agent" title="You picked this agent with @, so routing was skipped">@{f.forced}</Badge>}
+        {f.forced && (f.bound
+          ? <Badge tone="neutral" icon="agent" title={`You picked @${f.forced}. It took step ${f.bound.step}; the other steps were routed as usual.`}>@{f.forced} on step {f.bound.step} of {f.bound.of}</Badge>
+          : <Badge tone="neutral" icon="agent" title="You picked this agent with @, so routing was skipped">@{f.forced}</Badge>)}
         {f.cached && <Badge tone="neutral" icon="database" title="Part of this answer came from a recent cached result">Cached</Badge>}
         {verified && !mismatch.length && <Badge tone="ok" icon="check" title={effort ? `Checked by a second pass (${effort} effort)` : 'Checked by a second pass'}>Checked</Badge>}
         {mismatch.length > 0 && <Badge tone="warn" icon="warning" title="A second check disagreed with this answer">Check failed</Badge>}

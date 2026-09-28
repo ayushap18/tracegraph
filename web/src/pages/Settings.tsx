@@ -79,10 +79,11 @@ export default function Settings() {
             <DefList>
               <DefRow label="Run timeout">300 s <span className="text-xs text-muted-foreground">(TG_RUN_TIMEOUT)</span></DefRow>
               <DefRow label="Engine test timeout">60 s</DefRow>
-              <DefRow label="Query length">500 characters</DefRow>
+              <DefRow label="Query length">{store.limits.query_chars.toLocaleString()} characters</DefRow>
               <DefRow label="Subtasks per query">up to 4</DefRow>
               <DefRow label="File uploads">10 MB · .txt .md .csv .json .pdf</DefRow>
               <DefRow label="Custom agents">up to 12</DefRow>
+              <DocumentFonts body={store.fonts?.body} known={store.fonts != null} />
               <DefRow label="Autopilot interval">
                 <span className="inline-flex items-center gap-2">{store.state.interval} s {store.state.autopilot ? <Badge tone="warn">on</Badge> : <Badge>off</Badge>}</span>
               </DefRow>
@@ -351,5 +352,25 @@ function DataSection() {
         )}
       </div>
     </Section>
+  )
+}
+
+// TRACEGRAPH_BODY_FONT (docs/PLAN-accuracy-v2.md C6): the font created PDFs embed. Read-only; set on the server.
+function DocumentFonts({ body, known }: { body: string | null | undefined; known: boolean }) {
+  const env = <code className="rounded-sm bg-subtle px-1 font-mono text-[12px]">TRACEGRAPH_BODY_FONT</code>
+  return (
+    <div className="flex flex-col gap-1 px-4 py-2.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4 sm:px-5">
+      <dt className="shrink-0 text-[13px] text-muted-foreground">Document fonts</dt>
+      <dd className="m-0 flex min-w-0 flex-col gap-0.5 text-sm text-foreground sm:max-w-[65%] sm:items-end sm:text-right">
+        {!known ? <span className="text-muted-foreground">Not reported by this server</span>
+          : body ? <span className="inline-flex items-center gap-2">{body} <Badge tone="ok">embedded in PDFs</Badge></span>
+          : <span>Built-in fonts <span className="font-normal text-muted-foreground">(Helvetica in PDFs)</span></span>}
+        <span className="text-xs font-normal leading-snug text-muted-foreground">
+          {body
+            ? <>From {env}. Word and PowerPoint files name the font but don't embed it, so it shows only where the font is installed.</>
+            : <>To embed a font you're licensed for, set {env} to its .ttf file and restart the server. Word and PowerPoint files only name the font, so it shows only where it's installed.</>}
+        </span>
+      </dd>
+    </div>
   )
 }

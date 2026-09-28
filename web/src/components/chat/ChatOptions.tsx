@@ -156,3 +156,19 @@ export function PresetRow({ onPick, className }: { onPick: (p: Preset) => void; 
     </div>
   )
 }
+
+/** The composer counter shows from this many characters (docs/PLAN-accuracy-v2.md B4). */
+export const COUNT_FROM = 3500
+export const tooLong = (text: string, limit: number) => text.trim().length > limit
+
+/** "3,612 / 4,000" once a message gets long; over the limit it turns red and says so. Send is disabled by the caller. */
+export function LengthCounter({ id, length, limit, className }: { id?: string; length: number; limit: number; className?: string }) {
+  const over = length > limit
+  return (
+    <span id={id} aria-live="polite" className={cn('shrink-0 tabular-nums', over ? 'font-medium text-destructive' : 'text-muted-foreground', className)}>
+      {length >= Math.min(COUNT_FROM, limit) && <>
+        {length.toLocaleString()} / {limit.toLocaleString()}{over && ` · ${(length - limit).toLocaleString()} over the limit`}
+      </>}
+    </span>
+  )
+}

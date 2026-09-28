@@ -115,8 +115,10 @@ class RouteCache:
     def __init__(self, maxsize: int = ROUTE_MAX, ttl: float = ROUTE_TTL, clock=time.monotonic):
         self.cache = TTLCache(maxsize, ttl, clock)
 
-    def key(self, text: str, criteria: dict) -> tuple:
-        return normalize(text), fingerprint(criteria)
+    def key(self, text: str, criteria: dict, extra: str | None = None) -> tuple:
+        """extra: anything else Jev saw besides the text (a hash of the previous turn for a keyless follow-up, A4), so
+        "make it 500" after one question never reuses its decision after another."""
+        return (normalize(text), fingerprint(criteria)) if extra is None else (normalize(text), fingerprint(criteria), extra)
 
     def get(self, key) -> dict | None:
         d = self.cache.get(key)

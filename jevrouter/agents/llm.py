@@ -1,5 +1,7 @@
 """LLM agents (code, knowledge, chat, research). They run on whichever engine is active: an Anthropic API key or a
 subscription CLI (Claude Code, Codex, Antigravity). Every call streams so the browser can show text as it arrives."""
+import re
+
 from ..engines import Engine, Reply, parse_json
 from .tools import AgentResult, UrlBlocked, UrlError, ddg_abstract, read_page, url_failure
 
@@ -16,6 +18,36 @@ def result(engine: Engine, reply: Reply, source: str | None = None) -> AgentResu
 CODE = ABOUT + ' You are the code agent: a short explanation plus a minimal example in a fenced code block, under 200 words.'
 KNOWLEDGE = ABOUT + ' You are the knowledge agent: answer factually in 2-4 sentences, preferring the reference when given.'
 CHAT = ABOUT + ' You are the chat agent: reply warmly in 1-3 sentences.'
+# Notes for a document another step writes (docs/PLAN-accuracy-v2.md B5): used instead of the short answers above when
+# a create step builds a long file (3+ pages, 8+ slides, images or diagrams) from this step's answer.
+NOTES_SHAPE = ('write research notes for a document: 600-1,200 words of facts, dates, names and figures as terse bullets '
+               'under headings, {sources}; list up to 8 image ideas as `IMAGE: <search query> | <caption>`, one per line. '
+               'Notes only: no introduction, no conclusion, no file, format, font or layout advice.')
+NOTES_RESEARCH = (ABOUT.replace(' Do not use tools unless told to.', '') + ' You are the research agent: search the web, '
+                  'then ' + NOTES_SHAPE.format(sources='each claim with its source URL'))
+NOTES_KNOWLEDGE = (ABOUT.replace(' Do not use tools unless told to.', ' Do not use tools.') + ' From your own knowledge, ' + NOTES_SHAPE.format(sources='naming a source where you know one') +
+                   ' Say in the first line that the notes are from your own knowledge, not a web search.')
+NOTES_TOKENS = 4096
+IMAGE_LINE = re.compile(r'^\s*(?:[-*]\s*)?`?IMAGE:\s*([^|\n`]+?)\s*\|\s*([^\n`]*?)\s*`?\s*$', re.M)
+
+
+def feeds_file() -> bool:
+    from . import FEEDS_FILE  # defined in the package, which imports this module
+    return FEEDS_FILE.get()
+
+
+def image_ideas(notes: str) -> list[tuple[str, str]]:
+    """[(search query, caption)] from the `IMAGE: <query> | <caption>` lines of research notes, at most 8."""
+    return [(q.strip(), c.strip()) for q, c in IMAGE_LINE.findall(notes or '') if q.strip()][:8]
+
+
+async def notes(engine, http, q: str, emit_delta, reference: str = '', url: str | None = None) -> AgentResult:
+    prompt = q if not reference else f'{q}\n\nReference (Wikipedia abstract via DuckDuckGo):\n{reference}'
+    reply = await engine.stream(system=NOTES_KNOWLEDGE, prompt=prompt, effort='medium', emit_delta=emit_delta,
+                                max_tokens=NOTES_TOKENS)
+    return result(engine, reply, url)
+
+
 # (system, effort) of the calls most runs make, so a CLI engine can start their processes early.
 COMMON = [(CHAT, 'low'), (KNOWLEDGE, 'medium'), (CODE, 'medium')]
 
@@ -30,6 +62,8 @@ async def knowledge(engine, http, q: str, emit_delta) -> AgentResult:
         term, abstract, url = await ddg_abstract(http, q)
     except Exception:
         abstract, url = '', None
+    if feeds_file():
+        return await notes(engine, http, q, emit_delta, abstract, url)
     prompt = q if not abstract else f'{q}\n\nReference (Wikipedia abstract via DuckDuckGo):\n{abstract}'
     return result(engine, await engine.stream(system=KNOWLEDGE, prompt=prompt, effort='medium', emit_delta=emit_delta), url)
 
@@ -39,6 +73,9 @@ async def chat(engine, http, q: str, emit_delta) -> AgentResult:
 
 
 async def research(engine, http, q: str, emit_delta) -> AgentResult:
+    if feeds_file():
+        return result(engine, await engine.stream(system=NOTES_RESEARCH, prompt=q, effort='medium', emit_delta=emit_delta,
+                                                  max_tokens=NOTES_TOKENS, web=True))
     system = (ABOUT.replace(' Do not use tools unless told to.', '') +
               ' You are the research agent: search the web, then answer in under 150 words with the key facts and dates, '
               'ending with the most relevant source URL.')
@@ -47,6 +84,8 @@ async def research(engine, http, q: str, emit_delta) -> AgentResult:
 
 
 async def report(engine, http, q: str, emit_delta) -> AgentResult:
+    if feeds_file():
+        return await notes(engine, http, q, emit_delta)
     web = engine.supports_web
     system = (ABOUT.replace(' Do not use tools unless told to.', '' if web else ' Do not use tools.') +
               ' You are the report agent: ' + ('search the web, then ' if web else '') +

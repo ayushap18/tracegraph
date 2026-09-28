@@ -29,6 +29,7 @@ const COL = {
   status: 'hidden md:table-cell',
   engine: 'hidden lg:table-cell',
   agents: 'hidden xl:table-cell',
+  suspects: 'hidden lg:table-cell text-right',
   time: 'hidden md:table-cell text-right tabular-nums',
   when: 'hidden lg:table-cell pr-4 sm:pr-5 text-right tabular-nums',
 }
@@ -41,6 +42,7 @@ export default function Runs() {
   const [source, setSource] = useState('')
   const [status, setStatus] = useState('')
   const [engine, setEngine] = useState('')
+  const [suspect, setSuspect] = useState(false) // only runs the suspect checks flagged
   const [pages, setPages] = useState<Run[]>([])
   const [loading, setLoading] = useState(true)
   const [more, setMore] = useState(false)
@@ -53,7 +55,8 @@ export default function Runs() {
 
   useEffect(() => { const t = window.setTimeout(() => setDebounced(q.trim()), 250); return () => clearTimeout(t) }, [q])
 
-  const params = useMemo(() => ({ q: debounced || undefined, source: source || undefined, status: status || undefined, engine: engine || undefined }), [debounced, source, status, engine])
+  const params = useMemo(() => ({ q: debounced || undefined, source: source || undefined, status: status || undefined, engine: engine || undefined,
+    suspect: suspect || undefined }), [debounced, source, status, engine, suspect])
 
   const load = useCallback(async (before?: number) => {
     const res = await listRuns({ limit: PAGE, before, ...params })
@@ -92,9 +95,10 @@ export default function Runs() {
     if (source && r.source !== source) return false
     if (status && (r.done ? r.status : 'running') !== status) return false
     if (engine && (r.engine ?? 'none') !== engine) return false
+    if (suspect && !r.suspects?.length) return false
     if (debounced && !r.text.toLowerCase().includes(debounced.toLowerCase()) && String(r.qid) !== debounced.replace('#', '')) return false
     return true
-  }, [source, status, engine, debounced])
+  }, [source, status, engine, debounced, suspect])
 
   const rows = useMemo(() => {
     const byQid = new Map<number, Run>()
@@ -103,7 +107,9 @@ export default function Runs() {
     for (const r of store.runs) {
       if (!r.text) continue
       // Live copies replace fetched rows (fresher status) and newer live runs join the top of the first page.
-      if (byQid.has(r.qid) || r.qid > newest || fallback) byQid.set(r.qid, r)
+      // Suspects are computed when a run is saved, so a live copy keeps the fetched row's.
+      const prev = byQid.get(r.qid)
+      if (prev || r.qid > newest || fallback) byQid.set(r.qid, prev?.suspects && !r.suspects ? { ...r, suspects: prev.suspects } : r)
     }
     return [...byQid.values()].filter(matches).sort((a, b) => b.qid - a.qid)
   }, [pages, store.runs, matches, fallback])
@@ -114,15 +120,21 @@ export default function Runs() {
     return [...set]
   }, [store.engines, rows])
 
-  const filtered = !!(debounced || source || status || engine)
-  const activeSelects = [source, status, engine].filter(Boolean).length
-  const clear = () => { setQ(''); setSource(''); setStatus(''); setEngine(''); search.current?.focus() }
+  const filtered = !!(debounced || source || status || engine || suspect)
+  const activeSelects = [source, status, engine].filter(Boolean).length + (suspect ? 1 : 0)
+  const clear = () => { setQ(''); setSource(''); setStatus(''); setEngine(''); setSuspect(false); search.current?.focus() }
 
   const selects = (full?: boolean) => (
     <>
       <FilterSelect label="Source" value={source} onChange={setSource} options={SOURCES} full={full} />
       <FilterSelect label="Status" value={status} onChange={setStatus} options={STATUSES} full={full} />
       <FilterSelect label="Engine" value={engine} onChange={setEngine} options={[...new Set(['none', ...engines])]} full={full} />
+      <button type="button" data-slot="button" aria-pressed={suspect} onClick={() => setSuspect(v => !v)}
+        title="Only runs that the checks flagged as likely wrong"
+        className={cn(buttonClass('secondary', 'sm'), 'h-8 bg-surface text-[13px] font-normal shadow-none', full && 'w-full justify-start',
+          suspect && 'border-primary/40 bg-primary/5 text-foreground dark:bg-primary/10')}>
+        <Icon name="flag" size={14} className={suspect ? 'text-warn' : 'text-muted-foreground'} />Suspect
+      </button>
     </>
   )
 
@@ -198,6 +210,7 @@ export default function Runs() {
                         <StatusDot status={st} className="text-xs md:hidden" />
                         <span className="tabular-nums md:hidden">{r.done ? secs(r.total_ms) : '…'}</span>
                         <span className="tabular-nums" title={new Date(r.at * 1000).toLocaleString()}>{when}</span>
+                        {!!r.suspects?.length && <span className="inline-flex items-center gap-1 text-warn lg:hidden"><Icon name="flag" size={12} />{r.suspects.length} suspect</span>}
                       </div>
                     </TableCell>
                     <TableCell className={COL.source}><Badge tone="neutral">{r.source}</Badge></TableCell>
@@ -209,6 +222,11 @@ export default function Runs() {
                         {agents.length > 3 && <span className="text-xs tabular-nums text-muted-foreground">+{agents.length - 3}</span>}
                         {!agents.length && <span className="text-[13px] text-muted-foreground">-</span>}
                       </span>
+                    </TableCell>
+                    <TableCell className={COL.suspects}>
+                      {r.suspects?.length
+                        ? <Badge tone="warn" icon="flag" title={r.suspects.map(x => x.note || x.code).join('\n')}>{r.suspects.length}</Badge>
+                        : <span className="text-[13px] text-muted-foreground">-</span>}
                     </TableCell>
                     <TableCell className={cn(COL.time, 'text-[13px] text-muted-foreground')}>{r.done ? secs(r.total_ms) : '…'}</TableCell>
                     <TableCell className={cn(COL.when, 'text-[13px] text-muted-foreground')} title={new Date(r.at * 1000).toLocaleString()}>{when}</TableCell>
@@ -239,6 +257,7 @@ function RunsHead() {
         <TableHead className={cn(th, COL.status)}>Status</TableHead>
         <TableHead className={cn(th, COL.engine)}>Engine</TableHead>
         <TableHead className={cn(th, COL.agents)}>Agents</TableHead>
+        <TableHead className={cn(th, COL.suspects)}>Suspect</TableHead>
         <TableHead className={cn(th, COL.time)}>Time</TableHead>
         <TableHead className={cn(th, COL.when)}>When</TableHead>
       </TableRow>
@@ -263,6 +282,7 @@ function RunsSkeleton() {
               <TableCell className={COL.status}><Skeleton width={56} height={12} /></TableCell>
               <TableCell className={COL.engine}><Skeleton width={64} height={12} /></TableCell>
               <TableCell className={COL.agents}><Skeleton width={120} height={22} /></TableCell>
+              <TableCell className={COL.suspects}><Skeleton width={24} height={18} className="ml-auto" /></TableCell>
               <TableCell className={COL.time}><Skeleton width={40} height={12} className="ml-auto" /></TableCell>
               <TableCell className={COL.when}><Skeleton width={48} height={12} className="ml-auto" /></TableCell>
             </TableRow>

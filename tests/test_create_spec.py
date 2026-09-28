@@ -32,7 +32,8 @@ def result(results, rid):
 
 def test_schema_is_strict_small_and_ref_free():
     text = json.dumps(DOCSPEC_SCHEMA)
-    assert '$ref' not in text and '$defs' not in text and len(text) < 4000
+    # diagrams, figures and page breaks (docs/PLAN-accuracy-v2.md C4) made it a little longer than the first 4,000
+    assert '$ref' not in text and '$defs' not in text and len(text) < 5000
 
     def walk(node):
         if isinstance(node, dict):
@@ -47,7 +48,9 @@ def test_schema_is_strict_small_and_ref_free():
     walk(DOCSPEC_SCHEMA)
     kinds = [b['properties']['type']['enum'][0] for b in
              DOCSPEC_SCHEMA['properties']['sections']['items']['properties']['blocks']['items']['anyOf']]
-    assert kinds == ['paragraph', 'bullets', 'table', 'chart', 'quote', 'code']
+    # the model writes every block type but `image`, which only code makes from a resolved figure
+    assert kinds == ['paragraph', 'bullets', 'table', 'chart', 'quote', 'code', 'timeline', 'tree', 'flow', 'figure',
+                     'page_break']
 
 
 # ---------- block rules ----------
@@ -68,7 +71,7 @@ def test_schema_is_strict_small_and_ref_free():
     ({'title': 'x', 'sections': [{'heading': 'h', 'blocks': [para('x')], 'include': '/etc/passwd'}]}, 'S7'),
     ({'title': 'x', 'sections': [{'heading': f'h{i}', 'blocks': [para('x')]} for i in range(41)]}, 'L1'),
     (spec_with(*[para('x')] * 31), 'L1'),
-    (spec_with(para('word ' * 13000)), 'L1'),
+    (spec_with(para('word ' * 41000)), 'L1'),
 ])
 def test_block_rules_raise_with_their_id(spec, rid):
     assert blocked(spec) == rid
@@ -86,11 +89,11 @@ def test_spec_error_carries_rule_and_message():
 
 
 def test_l1_budget_leaves_table_rows_to_l2():
-    rows = [[f'row {i}', i, i * 2.5, 'some longer text here'] for i in range(2000)]
+    rows = [[f'row {i}', i, i * 2.5, 'some longer text here to make the rows take room'] for i in range(4000)]
     spec = spec_with({'type': 'table', 'columns': ['a', 'b', 'c', 'd'], 'rows': rows})
-    assert len(json.dumps(spec)) > 60_000
+    assert len(json.dumps(spec)) > 200_000
     out, res = normalize(spec, 'xlsx')
-    assert len(out['sections'][0]['blocks'][0]['rows']) == 2000 and result(res, 'L1').ok
+    assert len(out['sections'][0]['blocks'][0]['rows']) == 2000 and result(res, 'L1').ok  # L2 cut it, L1 passed
 
 
 # ---------- fix rules ----------

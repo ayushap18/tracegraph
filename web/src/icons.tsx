@@ -10,6 +10,7 @@ import {
   Shield, Sparkles, Box, Square, SquarePen, Table, Tag, Trash2, TriangleAlert, Trophy, TrendingUp, Upload, Gauge, Download,
   ListChecks, ThumbsDown, ThumbsUp, Undo2,
   ArrowLeftRight, FileCode, FileType, Files, Presentation, Scale,
+  CircleSlash2, Flag, Images, Palette, Route, Type,
 } from 'lucide-react'
 import { useId, type SVGProps } from 'react'
 import { colorOf } from './protocol'
@@ -20,7 +21,7 @@ import { colorOf } from './protocol'
 export const AGENT_ICONS: Record<string, LucideIcon> = {
   math: Calculator, weather: CloudSun, time: Clock, currency: Coins, knowledge: BookOpen,
   code: CodeXml, chat: MessageSquare, research: Globe, clarify: CircleHelp, blocked: ShieldBan,
-  document: FileText, data: Table, report: ScrollText, run: SquareTerminal,
+  document: FileText, data: Table, report: ScrollText, run: SquareTerminal, unsupported: CircleSlash2,
 }
 
 export const UI_ICONS = {
@@ -47,6 +48,8 @@ export const UI_ICONS = {
   // created files: the Files page, one glyph per format, converting and the ruleset
   files: Files, 'file-pdf': FileType, 'file-docx': FileText, 'file-pptx': Presentation, 'file-xlsx': FileSpreadsheet, 'file-md': FileCode,
   convert: ArrowLeftRight, rules: Scale,
+  // accuracy v2: policy trace, suspects, briefs, fonts and images in created files
+  route: Route, flag: Flag, images: Images, palette: Palette, font: Type,
 } satisfies Record<string, LucideIcon>
 
 export type UiIconName = keyof typeof UI_ICONS

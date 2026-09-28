@@ -143,7 +143,7 @@ function NewComparison({ onStarted, compact }: { onStarted: (h: HistoryEntry) =>
       )}
       <div className="flex flex-col gap-2 sm:flex-row">
         <label className="sr-only" htmlFor="cmp-q">Question</label>
-        <Input id="cmp-q" value={query} maxLength={500} placeholder="Ask something to compare…" autoComplete="off"
+        <Input id="cmp-q" value={query} maxLength={store.limits.query_chars} placeholder="Ask something to compare…" autoComplete="off"
           onChange={e => setQuery(e.target.value)} className="h-11 flex-1 bg-background text-[15px] md:text-[15px]" />
         <Button type="submit" icon="play" size="lg" disabled={!valid || busy} className="h-11 sm:px-5">{busy ? 'Starting…' : 'Run'}</Button>
       </div>

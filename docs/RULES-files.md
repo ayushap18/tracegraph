@@ -18,15 +18,15 @@ Severity:
 | S3 | A title of 1–120 characters. Missing: taken from the first heading or the request. | fix | yes |
 | S4 | Text is plain: no HTML, no raw Markdown syntax inside paragraphs (converted to plain text, with bold/italic kept as runs where the format supports them). | fix | yes |
 | S5 | Numbers in tables and charts are numbers, not strings ("1,200" → 1200; "$1,200.50" and "12%" become numbers that keep their money or percent format). Non-numeric chart values drop that point. | fix | yes |
-| S6 | Every table row has as many cells as there are columns (short rows padded, long rows trimmed). | fix | yes |
+| S6 | Every table row has as many cells as there are columns (short rows padded, long rows trimmed). Diagrams are well formed: one root, no loops or cycles, known node names. | fix | yes |
 | S7 | Facts in the file come from the conversation, attached files or the model's answer in this run; the spec never asks the renderer to fetch anything. | block | yes |
 
 ## 2. Size limits (token and file budgets)
 
 | ID | Rule | Severity | Enforced |
 |---|---|---|---|
-| L1 | Spec at most 60 KB of JSON; sections ≤ 40; blocks per section ≤ 30. | block | yes |
-| L2 | Tables ≤ 2,000 rows × 30 columns in XLSX; ≤ 200 rows in PDF/DOCX/MD (rest summarised with a note); ≤ 12 rows per slide (split across slides). | fix | yes |
+| L1 | Spec at most 200 KB of JSON (enough for a 40-page document); sections ≤ 40; blocks per section ≤ 30. | block | yes |
+| L2 | Tables ≤ 2,000 rows × 30 columns in XLSX; ≤ 200 rows in PDF/DOCX/MD (rest summarised with a note); ≤ 12 rows per slide (split across slides). Diagrams: at most 30 timeline events, 40 tree nodes in 4 levels, 12 flow steps. | fix | yes |
 | L3 | Slides: ≤ 6 bullets per slide and ≤ 18 words per bullet; longer content moves to the slide notes. | fix | yes |
 | L4 | Output file ≤ 15 MB. | block | yes |
 | L5 | The model is asked for the spec once per request; conversions to another format reuse the stored spec (0 LLM tokens). | — | yes |
@@ -49,9 +49,10 @@ Severity:
 |---|---|---|---|
 | X1 | No macros or active content: never `.docm`/`.xlsm`/`.pptm`, no embedded scripts, no OLE objects. | block | yes |
 | X2 | Spreadsheet formula injection: a cell whose text starts with `=`, `+`, `-`, `@`, tab or CR is stored as text with a leading apostrophe, unless it came from a formula the spec marked as one, built only from cell references and a short allow-list of functions (SUM, AVERAGE, MIN, MAX, COUNT, ROUND). | fix | yes |
-| X3 | No external references: no remote images, no external links in formulas, no linked (non-embedded) objects. Hyperlinks are allowed only as `http(s)` text links. | fix | yes |
+| X3 | No remote references; images only as embedded bytes from the asset cache. No external links in formulas, no linked (non-embedded) objects. Hyperlinks are allowed only as `http(s)` text links. | fix | yes |
 | X4 | Content Jev would block is not written to a file: the request goes through the same safety check as any question, and so does the spec text. | block | yes |
 | X5 | Created files are stored like uploads (by id, never by user path). Sandbox files stay in memory and disappear with the sandbox. | — | yes |
+| X6 | Every embedded image is a PNG or JPEG from the local asset cache, re-encoded, found under an allowed licence (public domain, CC0, CC BY, CC BY-SA), with a credit line naming its title, author, licence and source. A missing credit blocks the file. | block | yes |
 
 ## 5. Verification (after rendering)
 
@@ -60,7 +61,12 @@ Severity:
 | V1 | The file reopens with its own library (pypdf, python-docx, python-pptx, openpyxl) or parses as Markdown. | block | yes |
 | V2 | The title and every section heading appear in the reopened file's text. | warn | yes |
 | V3 | Page, slide or sheet counts match the spec (after the L2/L3 splits). | warn | yes |
-| V4 | Every chart in the spec exists in PPTX/XLSX, or is drawn in PDF, or appears as a table in DOCX/MD. | warn | yes |
+| V4 | Every chart and diagram in the spec exists in PPTX/XLSX, or is drawn in PDF, or appears as a table or picture in DOCX/MD. | warn | yes |
+| V5 | Pages (or slides) are within the count the request asked for ("asked for 12-13 pages, made 9"). | warn | yes |
+| V6 | When images were asked for, at least one licensed image is embedded. | warn | yes |
+| V7 | The requested font was used, or the answer names the font used instead. | warn | yes |
+| V8 | The file uses the theme the request asked for; a black and white PDF draws only greys (every `rg`/`RG` colour has r = g = b) and its images are DeviceGray. | warn | yes |
+| V9 | At least as many diagrams are drawn as the request asked for (2 for "multiple diagrams", 1 for "a diagram"). | warn | yes |
 
 ## 6. Accessibility
 

@@ -5,6 +5,7 @@ import { AgentBadge } from '../../components/app'
 import { cn } from '@/lib/utils'
 import { ms } from '../../lib'
 import { accTone, pctOf } from './shared'
+import { StepRoutes } from './RouteReport'
 
 // The harder suite's extras on one eval: the per-tag scorecard, and per case the repeat attempts, the judge's rubric
 // scores and multi-turn conversations turn by turn.
@@ -16,6 +17,7 @@ export function tagScores(byTag: Record<string, TagScore> | undefined, cases: Ev
   if (byTag && Object.keys(byTag).length) return byTag
   const out: Record<string, TagScore> = {}
   for (const c of cases) for (const t of c.tags ?? []) {
+    if (c.pass == null) continue // unjudged: neither passed nor failed
     const s = (out[t] ??= { passed: 0, total: 0 })
     s.total++
     if (c.pass) s.passed++
@@ -51,7 +53,7 @@ export function TagScorecard({ scores, active, onPick }: { scores: Record<string
   )
 }
 
-export const hasExtras = (c: EvalCase) => !!(c.turns?.length || c.judge || (c.attempts && c.attempts.length > 1))
+export const hasExtras = (c: EvalCase) => !!(c.turns?.length || c.judge || (c.attempts && c.attempts.length > 1) || c.steps?.some(s => s.trace?.length || s.expected))
 
 /** Badges next to pass/fail: flaky, over the latency budget, judge mean or a judge that failed. */
 export function CaseFlags({ c }: { c: EvalCase }) {
@@ -62,6 +64,8 @@ export function CaseFlags({ c }: { c: EvalCase }) {
       {c.judge && <Badge tone={c.judge.mean >= 3.5 ? 'neutral' : 'bad'} title={`Judged by ${c.judge.engine}`}>judge {c.judge.mean.toFixed(1)}</Badge>}
       {c.judge_error && <Badge tone="bad" title={`The judge failed: ${c.judge_error}`}>not judged</Badge>}
       {c.split === 'holdout' && <Badge tone="info" title="Holdout case: scored only, never tuned against">holdout</Badge>}
+      {c.pass === false && c.route_pass === false && <Badge tone="bad" icon="route" title="Agent, outcome, step or plan checks failed">route</Badge>}
+      {c.pass === false && c.answer_pass === false && <Badge tone="bad" icon="answer" title="Answer, mention, file or judge checks failed">answer</Badge>}
     </>
   )
 }
@@ -82,6 +86,7 @@ export function CaseTime({ c }: { c: EvalCase }) {
 export function extrasLabel(c: EvalCase) {
   if (c.turns?.length) return `${c.turns.length} turns`
   if (c.judge) return 'Judge scores'
+  if (c.steps?.length && !(c.attempts && c.attempts.length > 1)) return `${c.steps.length} step route${c.steps.length === 1 ? '' : 's'}`
   return `${c.attempts?.length ?? 0} attempts`
 }
 
@@ -91,6 +96,7 @@ export function CaseExtras({ c }: { c: EvalCase }) {
       {c.attempts && c.attempts.length > 1 && <Attempts attempts={c.attempts} flaky={!!c.flaky} />}
       {c.judge && <Judge j={c.judge} />}
       {!!c.turns?.length && <Turns turns={c.turns} />}
+      {!!c.steps?.length && <StepRoutes steps={c.steps} />}
     </div>
   )
 }

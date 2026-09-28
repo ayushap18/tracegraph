@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils'
 // Route feedback (docs/PLAN-learning.md): mark one routing decision right or wrong. Wrong opens a picker sorted by
 // Jev's own probabilities, so the likely right agent is one click. Shared by Run detail, the Chat trace and Review.
 
-const GUARDS = ['clarify', 'blocked']
+const GUARDS = ['clarify', 'blocked', 'unsupported']
 
 /** Only saved, routed subtasks can be labelled: not sandbox runs, not the merge step, not rows Jev never scored. */
 export function canLabel(source: string, task: Task | undefined): task is Task & { routed: NonNullable<Task['routed']> } {

@@ -8,7 +8,7 @@ from ..engines import EngineError, EngineRefusal
 from .llm import LLM_RUNNERS, custom, run_code
 from .tools import BLOCKED, KEYLESS_RUNNERS, AgentResult, clarify, plain
 
-__all__ = ['build', 'extras', 'AgentResult', 'BLOCKED', 'clarify', 'Tuned', 'EFFORTS', 'verify']
+__all__ = ['build', 'extras', 'AgentResult', 'BLOCKED', 'clarify', 'Tuned', 'EFFORTS', 'FEEDS_FILE', 'verify']
 
 
 def build(http, engine=None, customs=(), prefer_keyless: bool = False) -> dict:
@@ -26,6 +26,9 @@ def build(http, engine=None, customs=(), prefer_keyless: bool = False) -> dict:
 
 # The effort each LLM agent call used in this task, newest last (read into `answered.checks.effort`).
 EFFORTS: ContextVar[list | None] = ContextVar('efforts', default=None)
+# Set for a step whose answer a create step builds a long file from (docs/PLAN-accuracy-v2.md B5): research, knowledge
+# and report then write document notes instead of a short answer.
+FEEDS_FILE: ContextVar[bool] = ContextVar('feeds_file', default=False)
 
 
 class Tuned:

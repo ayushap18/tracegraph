@@ -174,7 +174,7 @@ async def test_engine_override_is_per_run():
 async def test_tokens_sum_planner_agents_and_merger():
     two = {'subtasks': [{'text': 'hey', 'depends_on': []}, {'text': 'hello again', 'depends_on': []}]}
     router = Router(FakeJev(route_for=lambda t: ('chat', 0.9)), engine=ScriptEngine(plan=two))
-    events = await run(router, 'hey and hello again')
+    events = await run(router, 'good morning, and hello again')
     # planner 7/4, two chat agents 5/3 each, merger 5/3; Jev: the plan's safety check, the speculative route of the
     # whole query (made alongside the LLM planner, not needed for a two-step plan) and two routes, at 100 each
     assert events[-1]['tokens'] == {'jev_in': 400, 'llm_in': 7 + 5 + 5 + 5, 'llm_out': 4 + 3 + 3 + 3}

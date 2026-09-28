@@ -1,6 +1,8 @@
 """The ruleset for created files (docs/RULES-files.md): the rule list served by GET /api/rules, the RuleResult each
 check produces, and verify(), which reopens a rendered file with its own library and checks it (V1-V4, L4, plus the
-per-format F, X and A rules that can be read back from the file)."""
+per-format F, X and A rules that can be read back from the file). Given the request's brief
+(docs/PLAN-accuracy-v2.md C7), it also checks the file against it: pages or slides (V5), images (V6), font (V7), theme
+and the black-and-white scan (V8) and diagrams (V9), and every embedded image's origin and credit (X6)."""
 import io
 import re
 import zipfile
@@ -45,13 +47,15 @@ RULES: list[dict] = [
     _rule('S5', 'fix', 'Numbers in tables and charts are numbers, not strings ("1,200" becomes 1200; "$1,200.50" and "12%" '
                        'become numbers that keep their money or percent format). Non-numeric chart '
                        'values drop that point.'),
-    _rule('S6', 'fix', 'Every table row has as many cells as there are columns (short rows padded, long rows trimmed).'),
+    _rule('S6', 'fix', 'Every table row has as many cells as there are columns (short rows padded, long rows trimmed). '
+                       'Diagrams are well formed: one root, no loops or cycles, known node names.'),
     _rule('S7', 'block', 'Facts in the file come from the conversation, attached files or the model\'s answer in this '
                          'run; the spec never asks the renderer to fetch anything.'),
-    _rule('L1', 'block', 'Spec at most 60 KB of JSON (table rows are limited by L2 instead); at most 40 sections and 30 '
+    _rule('L1', 'block', 'Spec at most 200 KB of JSON (table rows are limited by L2 instead); at most 40 sections and 30 '
                          'blocks per section.'),
     _rule('L2', 'fix', 'Tables: at most 2,000 rows and 30 columns in XLSX; 200 rows in PDF, DOCX and MD (the rest noted); '
-                       '12 rows per slide (split across slides).'),
+                       '12 rows per slide (split across slides). Diagrams: at most 30 timeline events, 40 tree nodes in '
+                       '4 levels, 12 flow steps.'),
     _rule('L3', 'fix', 'Slides: at most 6 bullets per slide and 18 words per bullet; longer content moves to the slide '
                        'notes.'),
     _rule('L4', 'block', 'Output file at most 15 MB.'),
@@ -75,18 +79,26 @@ RULES: list[dict] = [
     _rule('X2', 'fix', 'Spreadsheet formula injection: a cell whose text starts with =, +, -, @, tab or CR is stored as '
                        'text with a leading apostrophe, unless it is a formula the spec marked as one, built only from '
                        'cell references and SUM, AVERAGE, MIN, MAX, COUNT or ROUND.'),
-    _rule('X3', 'fix', 'No external references: no remote images, no external links in formulas, no linked objects. '
-                       'Web addresses appear only as text.'),
+    _rule('X3', 'fix', 'No remote references; images only as embedded bytes from the asset cache. No external links in '
+                       'formulas, no linked objects. Web addresses appear only as text.'),
     _rule('X4', 'block', 'Content Jev would block is not written to a file: the request goes through the same safety '
                          'check as any question, and so does the spec text.'),
     _rule('X5', None, 'Created files are stored like uploads (by id, never by user path). Sandbox files stay in memory '
                       'and disappear with the sandbox.'),
+    _rule('X6', 'block', 'Every embedded image is a PNG or JPEG from the local asset cache, re-encoded, found under an '
+                         'allowed licence, with a credit line naming its title, author, licence and source.'),
     _rule('V1', 'block', 'The file reopens with its own library (pypdf, python-docx, python-pptx, openpyxl) or parses as '
                          'Markdown.'),
     _rule('V2', 'warn', 'The title and every section heading appear in the reopened file\'s text.'),
     _rule('V3', 'warn', 'Page, slide or sheet counts match the spec (after the L2 and L3 splits).'),
-    _rule('V4', 'warn', 'Every chart in the spec exists in PPTX or XLSX, is drawn in PDF, or appears as a table in DOCX '
-                        'and MD.'),
+    _rule('V4', 'warn', 'Every chart and diagram in the spec exists in PPTX or XLSX, is drawn in PDF, or appears as a '
+                        'table or picture in DOCX and MD.'),
+    _rule('V5', 'warn', 'Pages (or slides) are within the count the request asked for.'),
+    _rule('V6', 'warn', 'When images were asked for, at least one licensed image is embedded.'),
+    _rule('V7', 'warn', 'The requested font was used, or the answer names the font used instead.'),
+    _rule('V8', 'warn', 'The file uses the theme the request asked for; a black and white PDF draws only greys, and its '
+                        'images are greyscale.'),
+    _rule('V9', 'warn', 'At least as many diagrams are drawn as the request asked for (2 for "multiple diagrams").'),
     _rule('A1', 'fix', 'Headings are real headings (styles, outline entries, slide titles), never bold paragraphs.'),
     _rule('A2', 'fix', 'Tables have a header row marked as a header.'),
     _rule('A3', 'warn', 'Charts carry a text title, and a one-line summary of what they show appears next to them.'),
@@ -135,6 +147,66 @@ def _count_charts(data: bytes, folder: str) -> tuple[int, list[str]]:
     return len(names), titles
 
 
+_COLOR_OP = re.compile(rb'(?<![\w.])(-?\d*\.?\d+)\s+(-?\d*\.?\d+)\s+(-?\d*\.?\d+)\s+(rg|RG)(?![\w])')
+
+
+def pdf_scan(data: bytes, reader=None) -> dict:
+    """What a PDF draws, read from its pages: {images: [colour space of each image XObject], fonts: [BaseFont names],
+    colors: [(r, g, b) of every rg/RG operator], gray: every colour is a grey and every image DeviceGray}."""
+    from pypdf import PdfReader
+    reader = reader or PdfReader(io.BytesIO(data))
+    images, fonts, colors, seen = [], set(), [], set()
+
+    def resources(res):
+        res = res.get_object() if res is not None else None
+        if not res:
+            return
+        for name, f in (res.get('/Font') or {}).items():
+            f = f.get_object()
+            if f.get('/BaseFont'):
+                fonts.add(str(f['/BaseFont']).lstrip('/'))
+        for name, x in (res.get('/XObject') or {}).items():
+            ref = getattr(x, 'idnum', None)
+            x = x.get_object()
+            if ref is not None:
+                if ref in seen:
+                    continue
+                seen.add(ref)
+            if x.get('/Subtype') == '/Image':
+                cs = x.get('/ColorSpace')
+                cs = cs.get_object() if hasattr(cs, 'get_object') else cs
+                images.append(str(cs[0] if isinstance(cs, list) else cs))
+            elif x.get('/Subtype') == '/Form':
+                content(x.get_data())
+                resources(x.get('/Resources'))
+
+    def content(raw: bytes):
+        for m in _COLOR_OP.finditer(raw or b''):
+            colors.append(tuple(float(v) for v in m.groups()[:3]))
+    for page in reader.pages:
+        c = page.get_contents()
+        content(c.get_data() if c is not None else b'')
+        resources(page.get('/Resources'))
+    grey = all(abs(r - g) < 1e-3 and abs(g - b) < 1e-3 for r, g, b in colors)
+    return {'images': images, 'fonts': sorted(fonts), 'colors': colors,
+            'gray': grey and all(cs == '/DeviceGray' for cs in images)}
+
+
+def grey_scan(data: bytes) -> tuple[bool, str]:
+    """V8 for a black and white PDF: every rg/RG colour has r == g == b and every image is DeviceGray."""
+    scan = pdf_scan(data)
+    bad = [c for c in scan['colors'] if not (abs(c[0] - c[1]) < 1e-3 and abs(c[1] - c[2]) < 1e-3)]
+    colour_images = [cs for cs in scan['images'] if cs != '/DeviceGray']
+    if not bad and not colour_images:
+        return True, f'only greys drawn; {len(scan["images"])} greyscale image{"" if len(scan["images"]) == 1 else "s"}'
+    parts = []
+    if bad:
+        parts.append(f'{len(bad)} coloured fills or strokes (for example rgb {", ".join(f"{v:.2f}" for v in bad[0])})')
+    if colour_images:
+        parts.append(f'{len(colour_images)} images in colour ({colour_images[0]})')
+    return False, '; '.join(parts)
+
+
 def _pdf_info(data: bytes, spec: dict) -> dict:
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(data))
@@ -150,12 +222,50 @@ def _pdf_info(data: bytes, spec: dict) -> dict:
     outline = list(walk(reader.outline))
     meta = reader.metadata or {}
     box = reader.pages[0].mediabox
-    raw = data
+    # the structure only: compressed page and image data (ASCII85 text) can hold "/JS" by chance
+    raw = re.sub(rb'(?<!end)stream\r?\n.*?endstream', b'', data, flags=re.S)
     return {'text': text + '\n' + '\n'.join(t for _, t in outline), 'pages': pages, 'outline': outline,
             'title': str(meta.get('/Title') or ''), 'size': (float(box.width), float(box.height)),
             'first_page': reader.pages[0].extract_text() or '',
-            'active': re.findall(rb'/(JavaScript|JS|Launch|EmbeddedFiles?|RichMedia|XFA)\b', raw),
-            'external': re.findall(rb'/(URI|GoToR|SubmitForm|ImportData)\b', raw)}
+            'active': re.findall(rb'/(JavaScript|JS|Launch|EmbeddedFiles?|RichMedia|XFA)\b', raw) + _active_names(reader),
+            'external': re.findall(rb'/(URI|GoToR|SubmitForm|ImportData)\b', raw), 'reader': reader}
+
+
+ACTIVE = {'/JavaScript', '/JS', '/Launch', '/EmbeddedFiles', '/EmbeddedFile', '/RichMedia', '/XFA'}
+
+
+def _active_names(reader) -> list[bytes]:
+    """Active content found by walking the document's objects (the catalog, its name tree and actions, each page's
+    actions and annotations), which also finds what an object stream would hide from the byte scan."""
+    found: set[str] = set()
+
+    def look(obj, depth=0):
+        if depth > 6:
+            return
+        try:
+            obj = obj.get_object()
+        except Exception:
+            pass
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key in ACTIVE:
+                    found.add(key)
+                if key == '/S' and str(value) in ACTIVE:
+                    found.add(str(value))
+                if key in ('/OpenAction', '/AA', '/A', '/Names', '/AcroForm', '/Next') or key in ACTIVE:
+                    look(value, depth + 1)
+        elif isinstance(obj, list):
+            for value in obj:
+                look(value, depth + 1)
+    try:
+        look(reader.trailer['/Root'])
+        for page in reader.pages:
+            look(page.get('/AA'))
+            for annot in page.get('/Annots') or []:
+                look(annot)
+    except Exception:
+        pass
+    return [name.lstrip('/').encode() for name in sorted(found)]
 
 
 def _docx_info(data: bytes) -> dict:
@@ -171,19 +281,35 @@ def _docx_info(data: bytes) -> dict:
         tr_pr = t.rows[0]._tr.trPr if len(t.rows) else None
         header_marked.append(tr_pr is not None and tr_pr.find(qn('w:tblHeader')) is not None)
     normal = doc.styles['Normal'].font.size
+    pictures = [str(s._inline.docPr.get('descr') or '') for s in doc.inline_shapes]
     return {'text': '\n'.join([t for _, t in paras] + cells), 'paras': paras, 'tables': len(doc.tables),
             'header_marked': header_marked, 'title': doc.core_properties.title or '',
-            'normal_pt': normal.pt if normal is not None else None}
+            'normal_pt': normal.pt if normal is not None else None, 'pictures': pictures,
+            'diagrams': sum(p.startswith('Diagram:') for p in pictures),
+            'images': sum(not p.startswith('Diagram:') for p in pictures)}
+
+
+def _walk(shapes):
+    """Every shape on a slide, the ones inside group shapes too."""
+    for shape in shapes:
+        yield shape
+        if shape.shape_type == 6:  # MSO_SHAPE_TYPE.GROUP
+            yield from _walk(shape.shapes)
 
 
 def _pptx_info(data: bytes) -> dict:
     from pptx import Presentation
     prs = Presentation(io.BytesIO(data))
     slides, texts, body_sizes, tables_first_row, notes = [], [], [], [], []
+    diagrams, images = 0, 0
     for slide in prs.slides:
         title = slide.shapes.title.text_frame.text if slide.shapes.title is not None else ''
         slides.append(title)
-        for shape in slide.shapes:
+        for shape in _walk(slide.shapes):
+            if shape.shape_type == 6 and shape.name.startswith('Diagram:'):
+                diagrams += 1
+            if shape.shape_type == 13 and shape.name == 'Image':  # MSO_SHAPE_TYPE.PICTURE
+                images += 1
             if shape.has_text_frame:
                 texts.append(shape.text_frame.text)
                 if shape.name == 'Body':
@@ -197,7 +323,7 @@ def _pptx_info(data: bytes) -> dict:
         notes.append(slide.notes_slide.notes_text_frame.text if slide.has_notes_slide else '')
     return {'text': '\n'.join(slides + texts), 'slides': slides, 'size': (prs.slide_width, prs.slide_height),
             'body_sizes': body_sizes, 'tables_first_row': tables_first_row, 'notes': notes,
-            'title': prs.core_properties.title or ''}
+            'title': prs.core_properties.title or '', 'diagrams': diagrams, 'images': images}
 
 
 def _xlsx_info(data: bytes) -> dict:
@@ -283,12 +409,13 @@ def _lost_chars(spec: dict, fonts) -> tuple[int, int, str]:
     return lost, total, ''.join(examples)
 
 
-def verify(spec: dict, fmt: str, data: bytes) -> list[RuleResult]:
-    """Reopen the rendered file and check it. Raises SpecError for V1 (does not reopen), L4 (too big) and X1 (active
-    content); everything else comes back as one RuleResult per rule."""
+def verify(spec: dict, fmt: str, data: bytes, brief=None) -> list[RuleResult]:
+    """Reopen the rendered file and check it. Raises SpecError for V1 (does not reopen), L4 (too big), X1 (active
+    content) and X6 (an image not from the asset cache, or without a credit); everything else comes back as one
+    RuleResult per rule. With the request's brief (create/brief.py) the file is also checked against it (V5-V9)."""
     from . import themes
-    from .render import _Fonts, chart_summary, safe_formula, sheet_name, theme_name, xlsx_plan
-    from .spec import FORMATS, normalize
+    from .render import _Fonts, body_font, chart_summary, safe_formula, sheet_name, theme_name, xlsx_plan
+    from .spec import DIAGRAMS, FORMATS, normalize
 
     if fmt not in FORMATS:
         raise SpecError('X1', f'Files are made as {", ".join(FORMATS)} only, not {str(fmt)[:12]!r}.')
@@ -307,7 +434,8 @@ def verify(spec: dict, fmt: str, data: bytes) -> list[RuleResult]:
     charts = [b for s in sections for b in s['blocks'] if b['type'] == 'chart']
     tables = [b for s in sections for b in s['blocks'] if b['type'] == 'table']
     corpus = _norm(info['text'])
-    pdf_fonts = _Fonts(themes.get('clean')) if fmt == 'pdf' else None
+    theme = theme_name(spec, None)
+    pdf_fonts = _Fonts(themes.get(theme), body_font(spec, 'pdf', theme)) if fmt == 'pdf' else None
     fix = (lambda s: pdf_fonts.fit(s)[0]) if pdf_fonts else (lambda s: s)  # what the PDF could draw
 
     # V2: title and headings in the text, as written (a PDF that drew them as "????" has lost them)
@@ -489,7 +617,143 @@ def verify(spec: dict, fmt: str, data: bytes) -> list[RuleResult]:
                               if titled and summaries else 'a chart is missing its title or summary line'))
     ratio, pair = themes.worst_contrast(theme_name(spec, None))
     out.append(RuleResult('A4', 'fix', ratio >= 4.5, f'lowest text contrast {ratio:.1f}:1 ({pair})'))
+
+    # V4 counts diagrams too; X6 whenever the file holds images; V5-V9 against the brief
+    diagrams = [b for s in sections for b in s['blocks'] if b['type'] in DIAGRAMS]
+    images = [b for s in sections for b in s['blocks'] if b['type'] == 'image']
+    drawn = _diagrams_drawn(fmt, info, data, diagrams, lambda t: _found(fix(t), corpus))
+    if diagrams:
+        v4 = next(r for r in out if r.id == 'V4')
+        v4.ok = v4.ok and drawn >= len(diagrams)
+        v4.note = f'{v4.note}; {drawn} of {len(diagrams)} diagrams drawn'
+    embedded = _images_embedded(fmt, info)
+    if images or brief is not None:
+        out.append(_x6(fmt, data, images, embedded))
+    if brief is not None:
+        out += _brief_checks(spec, fmt, info, brief, theme, drawn, charts, embedded, data)
     return out
+
+
+def _diagrams_drawn(fmt: str, info: dict, data: bytes, diagrams: list[dict], found) -> int:
+    if fmt == 'pdf':
+        return sum(1 for b in diagrams if found(b['title']))
+    if fmt in ('docx', 'pptx'):
+        return info['diagrams']
+    if fmt == 'md':
+        return data.decode('utf-8', 'replace').count('```mermaid\n')
+    return sum(1 for line in info['text'].split('\n') if line.startswith('Diagram: '))
+
+
+def _images_embedded(fmt: str, info: dict) -> int:
+    if fmt == 'pdf':
+        return len(pdf_scan(b'', info['reader'])['images'])
+    if fmt in ('docx', 'pptx'):
+        return info['images']
+    return 0
+
+
+def _x6(fmt: str, data: bytes, images: list[dict], embedded: int) -> RuleResult:
+    """X6: every image block is a re-encoded PNG in the asset cache with a credit, and the file embeds only PNG or JPEG
+    pictures. Raises SpecError when that does not hold."""
+    from . import assets
+    for b in images:
+        path = assets.CACHE / f'{b["asset"]}.png'
+        try:
+            head = path.read_bytes()[:8]
+        except OSError:
+            raise SpecError('X6', 'An image in the file is not in the local asset cache.')
+        if head != b'\x89PNG\r\n\x1a\n':
+            raise SpecError('X6', 'An image in the asset cache is not a re-encoded PNG.')
+        if not str(b.get('credit') or '').strip():
+            raise SpecError('X6', 'An image in the file has no credit line (title, author, licence and source).')
+    if fmt in ('docx', 'pptx'):
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            media = [n for n in z.namelist() if re.match(r'(word|ppt)/media/', n)]
+        odd = [n for n in media if not re.search(r'\.(png|jpe?g)$', n, re.I)]
+        if odd:
+            raise SpecError('X6', 'The file embeds a picture that is not PNG or JPEG: ' + ', '.join(odd[:3]))
+    if not images:
+        return RuleResult('X6', 'block', True, 'no images')
+    shown = embedded if fmt in ('pdf', 'docx', 'pptx') else 0
+    where = f'{shown} embedded' if fmt in ('pdf', 'docx', 'pptx') else f'not embedded in {fmt.upper()}; credits kept'
+    return RuleResult('X6', 'block', True, f'{len(images)} image{"" if len(images) == 1 else "s"} from the asset cache, '
+                                           f'each credited ({where})')
+
+
+def span(lo_hi) -> str:
+    lo, hi = lo_hi
+    return f'{lo}' if lo == hi else f'{lo}-{hi}'
+
+
+def _brief_checks(spec, fmt, info, brief, theme, drawn, charts, embedded, data) -> list[RuleResult]:
+    from . import fonts as font_mod
+    from .brief import WORDS_PER_PAGE, diagrams_min
+    out = []
+    # V5: pages or slides within the range asked for
+    if brief.slides and fmt == 'pptx':
+        n = len(info['slides'])
+        lo, hi = brief.slides
+        out.append(RuleResult('V5', 'warn', lo <= n <= hi, f'{n} slides, asked for {span(brief.slides)}' if lo <= n <= hi
+                              else f'asked for {span(brief.slides)} slides, made {n}'))
+    elif brief.pages and fmt == 'pdf':
+        n = info['pages']
+        lo, hi = brief.pages
+        out.append(RuleResult('V5', 'warn', lo <= n <= hi, f'{n} pages, asked for {span(brief.pages)}' if lo <= n <= hi
+                              else f'asked for {span(brief.pages)} pages, made {n}'))
+    elif brief.pages and fmt in ('docx', 'md'):
+        words = len(re.findall(r'\w+', info['text']))
+        n = max(1, round(words / WORDS_PER_PAGE))
+        lo, hi = brief.pages
+        ok = lo - 1 <= n <= hi + 1
+        out.append(RuleResult('V5', 'warn', ok, f'about {n} pages ({words:,} words), asked for {span(brief.pages)}'
+                              if ok else f'asked for {span(brief.pages)} pages, made about {n} ({words:,} words)'))
+    # V6: images
+    if brief.images:
+        ok = embedded >= 1
+        note = (f'{embedded} image{"" if embedded == 1 else "s"} embedded' if ok else
+                f'no images embedded; a {fmt.upper()} file can\'t hold them' if fmt in ('md', 'xlsx') else
+                'no images embedded (asked for images)')
+        out.append(RuleResult('V6', 'warn', ok, note))
+    # V7: the font
+    if brief.font:
+        choice = font_mod.resolve(brief.font, fmt, theme=theme)
+        shown = font_mod.display(brief.font)
+        if choice.embedded and fmt == 'pdf':
+            ps = _postscript(choice.regular)
+            used = any(ps and f.split('+')[-1] == ps for f in pdf_scan(b'', info['reader'])['fonts'])
+            out.append(RuleResult('V7', 'warn', used, f'{shown} embedded' if used else
+                                  f'{shown} was chosen but is not embedded in the PDF'))
+        elif choice.note:
+            out.append(RuleResult('V7', 'warn', True, f'{shown} not used; the answer names what the file uses instead'
+                                  if fmt == 'pdf' else f'{shown} named, not embedded' if fmt != 'md' else
+                                  'Markdown carries no font; the answer says so'))
+        else:
+            out.append(RuleResult('V7', 'warn', True, f'{choice.used or shown} used'))
+    # V8: the theme, and for a black and white PDF every colour and image
+    if brief.theme:
+        ok, note = theme == brief.theme, f'theme {theme}' + ('' if theme == brief.theme else f', asked for {brief.theme}')
+        if ok and brief.theme == 'mono' and fmt == 'pdf':
+            ok, scan = grey_scan(data)
+            note = f'{note}; {scan}'
+        out.append(RuleResult('V8', 'warn', ok, note))
+    # V9: diagrams (charts count only when no diagram kind was named: "a report with charts")
+    if brief.diagrams:
+        want = diagrams_min(brief)
+        got = drawn + (len(charts) if not brief.diagram_kinds else 0)
+        out.append(RuleResult('V9', 'warn', got >= want, f'{got} diagram{"" if got == 1 else "s"} drawn, asked for at '
+                                                          f'least {want}'))
+    return out
+
+
+def _postscript(path: str | None) -> str | None:
+    if not path:
+        return None
+    try:
+        from reportlab.pdfbase.ttfonts import TTFontFile
+        name = TTFontFile(path).name
+        return name.decode('latin-1') if isinstance(name, bytes) else str(name)
+    except Exception:
+        return None
 
 
 _LIB = {'pdf': 'pypdf', 'docx': 'python-docx', 'pptx': 'python-pptx', 'xlsx': 'openpyxl', 'md': 'a UTF-8 Markdown read'}

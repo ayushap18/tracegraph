@@ -221,8 +221,8 @@ async def test_style_reaches_a_lone_llm_agent_and_the_merger():
     await router.handle('write a report on bees and tell me a joke', 'you', style='table')
     agent_systems = [c['system'] for c in llm_calls(engine, 'agent')]
     assert len(agent_systems) == 2 and not any('Answer style' in s for s in agent_systems)  # several answers: the merger
-    assert llm_calls(engine, 'merge')[0]['system'].endswith('Answer style: a Markdown table where the answer has several '
-                                                             'parts or values.')
+    assert ('Answer style: a Markdown table where the answer has several parts or values.'
+            in llm_calls(engine, 'merge')[0]['system'])
     assert router.history[-1]['style'] == 'table'
 
 

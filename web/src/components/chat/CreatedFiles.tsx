@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { convertCreated, createdUrl, errorText, previewCreated } from '../../api'
-import type { CreatedFile, FileFormat, FilePreview, RuleResult } from '../../protocol'
+import type { CreatedFile, FileFormat, FilePhase, FilePreview, ImageCredit, RuleResult, ThemeName } from '../../protocol'
 import { Button, IconButton, Skeleton, buttonClass, timeAgo, useToast } from '../../ui'
+import { safeHref } from '../../lib'
 import { Icon, type UiIconName } from '../../icons'
 import Markdown from '../Markdown'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -39,6 +40,20 @@ export function fileSize(bytes: number) {
 export const tokensText = (n: number) => (n > 0 ? `${n.toLocaleString()} token${n === 1 ? '' : 's'}` : 'no model tokens')
 const plural = (n: number, w: string) => `${n.toLocaleString()} ${w}${n === 1 ? '' : 's'}`
 
+const range = (r: [number, number]) => (r[0] === r[1] ? `${r[0]}` : `${r[0]}-${r[1]}`)
+
+/** What the request asked for, beside what was made: "asked 12-13" (pages or slides). */
+export function askedText(f: CreatedFile) {
+  if (f.slides != null && f.brief?.slides) return `asked ${range(f.brief.slides)}`
+  if (f.pages != null && f.brief?.pages) return `asked ${range(f.brief.pages)}`
+  return null
+}
+
+// How a file met the request's brief (docs/PLAN-accuracy-v2.md C4-C7): one line per conformance rule.
+const BRIEF_RULES: Record<string, string> = { V5: 'Length', V6: 'Images', V7: 'Font', V8: 'Look', V9: 'Diagrams' }
+const THEME_LABEL: Record<ThemeName, string> = { clean: 'Clean', dark: 'Dark', warm: 'Warm', mono: 'Black and white' }
+const PHASE_LABEL: Record<FilePhase['phase'], string> = { outline: 'Outline', sections: 'Sections', topup: 'Top-up', assets: 'Images', render: 'Render' }
+
 /** "4 pages", "10 slides" or "2 sheets: Sales, Costs". */
 export function shapeText(f: CreatedFile) {
   if (f.pages != null) return plural(f.pages, 'page')
@@ -52,6 +67,35 @@ export function filesOfTasks(tasks: Array<{ answered?: { created_files?: Created
   const out: CreatedFile[] = []
   for (const t of tasks) for (const f of t.answered?.created_files ?? t.created_files ?? []) if (!out.some(x => x.id === f.id)) out.push(f)
   return out
+}
+
+/** The primary file of a run: the merger's pick, else the last file marked primary. Null when neither is known (older
+ *  runs), so callers fall back to one flat list. */
+export function primaryOf(files: CreatedFile[], primary?: string | null): CreatedFile | null {
+  if (primary) { const hit = files.find(f => f.id === primary); if (hit) return hit }
+  if (!files.some(f => f.role)) return null
+  return [...files].reverse().find(f => f.role === 'primary') ?? null
+}
+
+/** A run's files: the primary file first, then the files made along the way folded under "Working files". */
+export function RunFiles({ files, primary, className }: { files: CreatedFile[]; primary?: string | null; className?: string }) {
+  const main = primaryOf(files, primary)
+  if (!main || files.length < 2) return <CreatedFiles files={files} className={className} />
+  const rest = files.filter(f => f.id !== main.id)
+  return (
+    <div className={cn('flex min-w-0 flex-col gap-2', className)}>
+      <CreatedFiles files={[main]} label="Created file" />
+      <Collapsible>
+        <CollapsibleTrigger className="group/work -mx-1 inline-flex cursor-pointer items-center gap-1.5 rounded-sm px-1 py-0.5 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/35">
+          <Icon name="files" size={14} />Working files <span className="tabular-nums">({rest.length})</span>
+          <Icon name="chevron-down" size={14} className="transition-transform group-data-[state=open]/work:rotate-180" />
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <CreatedFiles files={rest} label="Working files" className="mt-2" />
+        </CollapsibleContent>
+      </Collapsible>
+    </div>
+  )
 }
 
 /** A run's files as a list of cards. Converted files join the list under the file they came from. */
@@ -89,7 +133,10 @@ export function CreatedFileCard({ file: f, onConverted, onDelete, origin, now, c
   const [open, setOpen] = useState(false)
   const [converting, setConverting] = useState<FileFormat | null>(null)
   const shape = shapeText(f)
-  const warns = f.rules?.filter(r => r.severity === 'warn' && !r.ok) ?? []
+  const asked = askedText(f)
+  // Brief conformance gets its own row, so its failures are not listed twice among the warnings.
+  const brief = f.brief ? f.rules?.filter(r => r.id in BRIEF_RULES) ?? [] : []
+  const warns = f.rules?.filter(r => r.severity === 'warn' && !r.ok && !brief.includes(r)) ?? []
   const fixes = f.rules?.filter(r => r.severity === 'fix' && !r.ok) ?? []
   const previewId = `cf-preview-${f.id}`
 
@@ -119,6 +166,7 @@ export function CreatedFileCard({ file: f, onConverted, onDelete, origin, now, c
             <span className="font-medium">{info.short}</span>
             <Dot /><span className="tabular-nums">{fileSize(f.size)}</span>
             {shape && <><Dot /><span className="min-w-0 max-w-full truncate tabular-nums" title={shape}>{shape}</span></>}
+            {asked && <><Dot /><span className="tabular-nums" title="What the request asked for">{asked}</span></>}
             <Dot /><span className="tabular-nums" title="LLM tokens the content cost. Conversions and files made from an answer or a table cost none.">{tokensText(f.tokens)}</span>
             <Dot /><span>{SOURCE[f.source] ?? f.source}</span>
             {f.sandbox && <><Dot /><span className="inline-flex items-center gap-1"><Icon name="sandbox" size={11} />sandbox only</span></>}
@@ -160,7 +208,15 @@ export function CreatedFileCard({ file: f, onConverted, onDelete, origin, now, c
         </div>
       </div>
 
+      <FileChips file={f} />
+      {brief.length > 0 && <BriefRow rules={brief} />}
       {(warns.length > 0 || fixes.length > 0) && <RuleNotes warns={warns} fixes={fixes} />}
+      {(!!f.credits?.length || !!f.phases?.length) && (
+        <div className="flex flex-col gap-1.5 border-t border-border px-3 py-2">
+          {!!f.credits?.length && <Credits credits={f.credits} />}
+          {!!f.phases?.length && <Phases phases={f.phases} />}
+        </div>
+      )}
 
       {open && (
         <div id={previewId} className="border-t border-border p-3">
@@ -172,6 +228,109 @@ export function CreatedFileCard({ file: f, onConverted, onDelete, origin, now, c
 }
 
 const Dot = () => <span aria-hidden="true" className="text-muted-foreground/60">·</span>
+
+const CHIP = 'inline-flex h-6 min-w-0 max-w-full items-center gap-1 rounded-md border border-border bg-subtle/60 px-1.5 text-xs text-muted-foreground'
+
+/** Theme, font used, diagrams and images, when the server reports them. */
+function FileChips({ file: f }: { file: CreatedFile }) {
+  const theme = f.theme ?? f.brief?.theme ?? null
+  const asked = f.brief?.font
+  const fontTitle = f.font_used
+    ? asked && asked.toLowerCase() !== f.font_used.toLowerCase() ? `You asked for ${asked}; the file uses ${f.font_used}` : `The file uses ${f.font_used}`
+    : undefined
+  if (!theme && !f.font_used && f.diagrams == null && f.images == null) return null
+  return (
+    <ul className="m-0 flex list-none flex-wrap gap-1.5 border-t border-border px-3 py-2" aria-label="How the file looks">
+      {theme && <li className={CHIP} title="Colour theme"><Icon name="palette" size={12} className="shrink-0" />{THEME_LABEL[theme] ?? theme}</li>}
+      {f.font_used && <li className={CHIP} title={fontTitle}><Icon name="font" size={12} className="shrink-0" /><span className="truncate">{f.font_used}</span></li>}
+      {f.diagrams != null && <li className={CHIP}><Icon name="graph" size={12} className="shrink-0" /><span className="tabular-nums">{plural(f.diagrams, 'diagram')}</span></li>}
+      {f.images != null && <li className={CHIP}><Icon name="images" size={12} className="shrink-0" /><span className="tabular-nums">{plural(f.images, 'image')}</span></li>}
+    </ul>
+  )
+}
+
+/** "Brief": did the file meet what was asked (length, images, font, look, diagrams)? Failures say why. */
+function BriefRow({ rules }: { rules: RuleResult[] }) {
+  return (
+    <div className="flex min-w-0 flex-wrap items-start gap-x-3 gap-y-1 border-t border-border px-3 py-2 text-xs">
+      <span className="font-medium text-muted-foreground">Brief</span>
+      <ul className="m-0 flex min-w-0 flex-1 list-none flex-col gap-1 p-0" aria-label="How the file met the request">
+        {rules.map(r => (
+          <li key={r.id} className={cn('flex min-w-0 items-start gap-1.5', r.ok ? 'text-foreground' : 'text-warn')}>
+            <Icon name={r.ok ? 'check' : 'close'} size={13} strokeWidth={2.2} className={cn('mt-px shrink-0', r.ok ? 'text-ok' : 'text-warn')} />
+            <span className="sr-only">{r.ok ? 'met' : 'not met'}: </span>
+            <span className="min-w-0 [overflow-wrap:anywhere]"><RuleId id={r.id} />{BRIEF_RULES[r.id]}{!r.ok && r.note ? `: ${r.note}` : ''}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+const DISCLOSURE = 'group/d -mx-1 inline-flex cursor-pointer items-center gap-1 self-start rounded-sm px-1 text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/35'
+const LINKED = 'rounded-sm text-foreground underline decoration-border underline-offset-2 outline-none hover:decoration-foreground focus-visible:ring-[3px] focus-visible:ring-ring/35'
+
+function Credits({ credits }: { credits: ImageCredit[] }) {
+  return (
+    <Collapsible className="flex flex-col">
+      <CollapsibleTrigger className={DISCLOSURE}>
+        <Icon name="images" size={12} />Image credits <span className="tabular-nums">({credits.length})</span>
+        <Icon name="chevron-down" size={12} className="transition-transform group-data-[state=open]/d:rotate-180" />
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <ol className="m-0 mt-1.5 flex list-decimal flex-col gap-1 pl-5 text-xs text-muted-foreground marker:tabular-nums">
+          {credits.map(c => (
+            <li key={c.asset} className="[overflow-wrap:anywhere]">
+              <a href={safeHref(c.source_url)} target="_blank" rel="noreferrer noopener" className={LINKED}>{c.title || 'Image'}</a>
+              {c.author && <> by {c.author}</>}{', '}
+              {c.license_url ? <a href={safeHref(c.license_url)} target="_blank" rel="noreferrer noopener" className={LINKED}>{c.license}</a> : c.license}
+              {c.caption && <span className="block">{c.caption}</span>}
+            </li>
+          ))}
+        </ol>
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
+/** Where the file's tokens went: outline, sections, top-up, images and render. */
+function Phases({ phases }: { phases: FilePhase[] }) {
+  const total = phases.reduce((n, p) => n + p.llm_in + p.llm_out, 0)
+  return (
+    <Collapsible className="flex flex-col">
+      <CollapsibleTrigger className={DISCLOSURE}>
+        <Icon name="spend" size={12} />Token use by phase <span className="tabular-nums">({tokensText(total)})</span>
+        <Icon name="chevron-down" size={12} className="transition-transform group-data-[state=open]/d:rotate-180" />
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div className="mt-1.5 overflow-x-auto">
+          <table className="w-full max-w-md border-collapse text-xs tabular-nums">
+            <thead>
+              <tr className="text-muted-foreground">
+                <th scope="col" className="py-1 pr-3 text-left font-medium">Phase</th>
+                <th scope="col" className="py-1 pr-3 text-right font-medium">Calls</th>
+                <th scope="col" className="py-1 pr-3 text-right font-medium">In</th>
+                <th scope="col" className="py-1 pr-3 text-right font-medium">Out</th>
+                <th scope="col" className="py-1 text-right font-medium">Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {phases.map((p, i) => (
+                <tr key={p.phase + i} className="border-t border-border text-foreground">
+                  <td className="py-1 pr-3">{PHASE_LABEL[p.phase] ?? p.phase}</td>
+                  <td className="py-1 pr-3 text-right">{p.calls}</td>
+                  <td className="py-1 pr-3 text-right">{p.llm_in.toLocaleString()}</td>
+                  <td className="py-1 pr-3 text-right">{p.llm_out.toLocaleString()}</td>
+                  <td className="py-1 text-right">{p.ms >= 1000 ? `${(p.ms / 1000).toFixed(1)} s` : `${Math.round(p.ms)} ms`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
 
 function RuleNotes({ warns, fixes }: { warns: RuleResult[]; fixes: RuleResult[] }) {
   return (

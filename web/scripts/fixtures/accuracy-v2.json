@@ -1,0 +1,1329 @@
+{
+ "about": "Web fixtures for docs/PLAN-accuracy-v2.md section E: run records and an eval in the v2 shape, served by scripts/mock-server.mjs.",
+ "runs": [
+  {
+   "qid": 2743,
+   "text": "pdf on the ai what is ai how ai begins using the multiple diagrams also add the images from the ebsources build 12-13 page of pdf properly using the black white text also anthropic sans font also keep the sizing properly and all images are to be sourced from the best sources",
+   "source": "chat",
+   "at": 1790622883.490345,
+   "plan": {
+    "planner": "claude-code",
+    "subtasks": [
+     {
+      "tid": "2743.1",
+      "text": "Research AI in depth: what AI is, how it began, and the key milestones",
+      "depends_on": []
+     },
+     {
+      "tid": "2743.2",
+      "text": "Create a 12-13 page black and white PDF on AI from the research, with diagrams and web images, in Anthropic Sans",
+      "depends_on": [
+       "2743.1"
+      ]
+     }
+    ]
+   },
+   "tasks": [
+    {
+     "tid": "2743.1",
+     "text": "Research AI in depth: what AI is, how it began, and the key milestones",
+     "depends_on": [],
+     "agent": "research",
+     "pick": "knowledge",
+     "reason": "research mode prefers a web search",
+     "probabilities": {
+      "knowledge": 0.71,
+      "research": 0.22,
+      "report": 0.05,
+      "create": 0.02
+     },
+     "confidence": 0.71,
+     "urgency": 0.2,
+     "unsafe": 0.01,
+     "clear": 0.93,
+     "jev_ms": 455,
+     "model": "jev-1",
+     "examples": false,
+     "signals": {
+      "live": 0.08,
+      "action": 0.02,
+      "personal": 0.01,
+      "described": 0.04
+     },
+     "trace": [
+      {
+       "rule": "create_demote",
+       "agent": "knowledge",
+       "why": "no file asked for in this step"
+      },
+      {
+       "rule": "missing_slot",
+       "agent": "knowledge",
+       "why": "no detail missing"
+      },
+      {
+       "rule": "mode_research",
+       "agent": "research",
+       "why": "research mode and the engine can search the web"
+      }
+     ],
+     "agent_ms": 41200,
+     "ok": true,
+     "source": "https://en.wikipedia.org/wiki/History_of_artificial_intelligence",
+     "engine": "claude-code",
+     "answer": "## What AI is\n- Artificial intelligence is the field that builds systems able to do tasks that need human intelligence (source: https://en.wikipedia.org/wiki/Artificial_intelligence)\n\n## How it began\n- 1950: Alan Turing asks \"Can machines think?\"\n- 1956: the Dartmouth workshop names the field\n\nIMAGE: Alan Turing portrait | Alan Turing\nIMAGE: Deep Blue chess computer | Deep Blue",
+     "checks": {
+      "effort": "medium"
+     },
+     "created_files": [
+      {
+       "id": "f0a1v2md0002",
+       "name": "ai-research-notes.md",
+       "format": "md",
+       "size": 9120,
+       "created": 1790622923.490345,
+       "qid": 2743,
+       "title": "AI research notes",
+       "pages": null,
+       "slides": null,
+       "sheets": null,
+       "tokens": 0,
+       "source": "answer",
+       "from_id": null,
+       "rules": [
+        {
+         "id": "S1",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "S2",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "S7",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "L1",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "X4",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "V1",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "X1",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "X3",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "X6",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "V2",
+         "severity": "warn",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "V3",
+         "severity": "warn",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "V4",
+         "severity": "warn",
+         "ok": true,
+         "note": ""
+        }
+       ],
+       "sandbox": null,
+       "brief": null,
+       "role": "working"
+      }
+     ]
+    },
+    {
+     "tid": "2743.2",
+     "text": "Create a 12-13 page black and white PDF on AI from the research, with diagrams and web images, in Anthropic Sans",
+     "depends_on": [
+      "2743.1"
+     ],
+     "agent": "create",
+     "pick": "create",
+     "reason": "you picked @create",
+     "probabilities": {
+      "create": 1.0
+     },
+     "confidence": 1.0,
+     "urgency": 0.0,
+     "unsafe": 0.01,
+     "clear": 1.0,
+     "jev_ms": 0,
+     "model": "",
+     "forced": true,
+     "bound": true,
+     "trace": [
+      {
+       "rule": "forced",
+       "agent": "create",
+       "why": "you picked @create; this is the last step that asks for a file"
+      }
+     ],
+     "agent_ms": 81400,
+     "ok": true,
+     "source": null,
+     "engine": "claude-code",
+     "answer": "Created **what-ai-is-and-how-it-began.pdf**, 12 pages.\n\nYou asked for Anthropic Sans; it isn't available to embed here, so the PDF uses Helvetica. To use a font you're licensed for, set TRACEGRAPH_BODY_FONT to its .ttf file and convert the file again (0 tokens).",
+     "checks": {
+      "effort": "low"
+     },
+     "created_files": [
+      {
+       "id": "f0a1v2pdf001",
+       "name": "what-ai-is-and-how-it-began.pdf",
+       "format": "pdf",
+       "size": 1841207,
+       "created": 1790623033.490345,
+       "qid": 2743,
+       "title": "What AI Is and How It Began",
+       "pages": 12,
+       "slides": null,
+       "sheets": null,
+       "tokens": 19591,
+       "source": "llm",
+       "from_id": null,
+       "rules": [
+        {
+         "id": "S1",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "S2",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "S7",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "L1",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "X4",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "V1",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "X1",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "X3",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "X6",
+         "severity": "block",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "V2",
+         "severity": "warn",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "V3",
+         "severity": "warn",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "V4",
+         "severity": "warn",
+         "ok": true,
+         "note": ""
+        },
+        {
+         "id": "V5",
+         "severity": "warn",
+         "ok": true,
+         "note": "12 pages, asked for 12-13"
+        },
+        {
+         "id": "V6",
+         "severity": "warn",
+         "ok": true,
+         "note": "3 images"
+        },
+        {
+         "id": "V7",
+         "severity": "warn",
+         "ok": true,
+         "note": "fallback Helvetica named in the answer"
+        },
+        {
+         "id": "V8",
+         "severity": "warn",
+         "ok": true,
+         "note": "mono, every colour grey"
+        },
+        {
+         "id": "V9",
+         "severity": "warn",
+         "ok": false,
+         "note": "1 diagram drawn, asked for at least 2"
+        }
+       ],
+       "sandbox": null,
+       "brief": {
+        "format": "pdf",
+        "pages": [
+         12,
+         13
+        ],
+        "slides": null,
+        "theme": "mono",
+        "font": "anthropic sans",
+        "images": true,
+        "image_source": "web",
+        "diagrams": true,
+        "diagram_kinds": [
+         "timeline",
+         "tree"
+        ],
+        "words": null,
+        "capped": false
+       },
+       "role": "primary",
+       "theme": "mono",
+       "font_used": "Helvetica",
+       "diagrams": 1,
+       "images": 3,
+       "credits": [
+        {
+         "asset": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+         "title": "Alan Turing Aged 16",
+         "author": "Unknown author",
+         "license": "Public domain",
+         "license_url": null,
+         "source_url": "https://commons.wikimedia.org/wiki/File:Alan_Turing_Aged_16.jpg",
+         "caption": "Alan Turing, whose 1950 paper asked whether machines can think."
+        },
+        {
+         "asset": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+         "title": "IBM Deep Blue",
+         "author": "James the photographer",
+         "license": "CC BY 2.0",
+         "license_url": "https://creativecommons.org/licenses/by/2.0",
+         "source_url": "https://commons.wikimedia.org/wiki/File:Deep_Blue.jpg",
+         "caption": "Deep Blue, the chess computer that beat Garry Kasparov in 1997."
+        },
+        {
+         "asset": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+         "title": "Colored neural network",
+         "author": "Glosser.ca",
+         "license": "CC BY-SA 3.0",
+         "license_url": "https://creativecommons.org/licenses/by-sa/3.0",
+         "source_url": "https://commons.wikimedia.org/wiki/File:Colored_neural_network.svg",
+         "caption": "A small neural network: inputs, one hidden layer, outputs."
+        }
+       ],
+       "phases": [
+        {
+         "phase": "outline",
+         "calls": 1,
+         "llm_in": 2104,
+         "llm_out": 612,
+         "ms": 8420
+        },
+        {
+         "phase": "sections",
+         "calls": 4,
+         "llm_in": 9860,
+         "llm_out": 7015,
+         "ms": 61200
+        },
+        {
+         "phase": "topup",
+         "calls": 0,
+         "llm_in": 0,
+         "llm_out": 0,
+         "ms": 0
+        },
+        {
+         "phase": "assets",
+         "calls": 0,
+         "llm_in": 0,
+         "llm_out": 0,
+         "ms": 9310
+        },
+        {
+         "phase": "render",
+         "calls": 0,
+         "llm_in": 0,
+         "llm_out": 0,
+         "ms": 2480
+        }
+       ]
+      }
+     ],
+     "caveats": [
+      "1 diagram drawn; you asked for at least 2 (the tree of AI subfields was left out).",
+      "No suitably licensed image found for \"The 1956 Dartmouth workshop\".",
+      "You asked for Anthropic Sans; it isn't available to embed here, so the PDF uses Helvetica."
+     ]
+    }
+   ],
+   "merged": {
+    "answer": "Created **what-ai-is-and-how-it-began.pdf**, 12 pages.\n\nYou asked for Anthropic Sans; it isn't available to embed here, so the PDF uses Helvetica. To use a font you're licensed for, set TRACEGRAPH_BODY_FONT to its .ttf file and convert the file again (0 tokens).\n\nWorking files:\n- ai-research-notes.md\n\nWhat I couldn't do:\n- 1 diagram drawn; you asked for at least 2 (the tree of AI subfields was left out).\n- No suitably licensed image found for \"The 1956 Dartmouth workshop\".\n- You asked for Anthropic Sans; it isn't available to embed here, so the PDF uses Helvetica.",
+    "engine": "template",
+    "caveats": [
+     "1 diagram drawn; you asked for at least 2 (the tree of AI subfields was left out).",
+     "No suitably licensed image found for \"The 1956 Dartmouth workshop\".",
+     "You asked for Anthropic Sans; it isn't available to embed here, so the PDF uses Helvetica."
+    ],
+    "primary_file": "f0a1v2pdf001"
+   },
+   "total_ms": 131800,
+   "error": null,
+   "status": "done",
+   "engine": "claude-code",
+   "session_id": "v2fixture01",
+   "compare_id": null,
+   "files": [],
+   "tokens": {
+    "jev_in": 3890,
+    "llm_in": 15230,
+    "llm_out": 9120
+   },
+   "mode": "research",
+   "style": "default",
+   "agent": "create",
+   "group_id": null,
+   "chosen": true,
+   "suspects": [],
+   "timings": {
+    "plan_ms": 2100,
+    "route_ms": 455,
+    "agents_ms": 122600,
+    "merge_ms": 3,
+    "first_token_ms": 130900,
+    "planner": "llm",
+    "merger": "template",
+    "cache_hits": 0
+   }
+  },
+  {
+   "qid": 2744,
+   "text": "What's the stock price of Apple right now, and book me a table for two tonight",
+   "source": "chat",
+   "at": 1790623483.490345,
+   "plan": {
+    "planner": "heuristic",
+    "subtasks": [
+     {
+      "tid": "2744.1",
+      "text": "What's the stock price of Apple right now",
+      "depends_on": []
+     },
+     {
+      "tid": "2744.2",
+      "text": "book me a table for two tonight",
+      "depends_on": []
+     }
+    ]
+   },
+   "tasks": [
+    {
+     "tid": "2744.1",
+     "text": "What's the stock price of Apple right now",
+     "agent": "unsupported",
+     "pick": "knowledge",
+     "reason": "live data",
+     "probabilities": {
+      "knowledge": 0.97,
+      "research": 0.02,
+      "chat": 0.01
+     },
+     "confidence": 0.97,
+     "urgency": 0.4,
+     "unsafe": 0.01,
+     "clear": 0.9,
+     "jev_ms": 380,
+     "model": "jev-1",
+     "signals": {
+      "live": 0.94,
+      "action": 0.03,
+      "personal": 0.02,
+      "described": 0.05
+     },
+     "trace": [
+      {
+       "rule": "unsupported",
+       "agent": "unsupported",
+       "why": "live 0.94 and no web engine"
+      }
+     ],
+     "agent_ms": 0,
+     "answer": "I can't get live prices here: there is no web search on this engine. Check a market data site for Apple's current price.",
+     "ok": true,
+     "source": null,
+     "engine": "keyless"
+    },
+    {
+     "tid": "2744.2",
+     "text": "book me a table for two tonight",
+     "agent": "unsupported",
+     "pick": "chat",
+     "reason": "an action in the world",
+     "probabilities": {
+      "chat": 0.8,
+      "knowledge": 0.2
+     },
+     "confidence": 0.8,
+     "urgency": 0.6,
+     "unsafe": 0.02,
+     "clear": 0.88,
+     "jev_ms": 380,
+     "model": "jev-1",
+     "signals": {
+      "live": 0.2,
+      "action": 0.96,
+      "personal": 0.3,
+      "described": 0.01
+     },
+     "trace": [
+      {
+       "rule": "unsupported",
+       "agent": "unsupported",
+       "why": "action 0.96"
+      }
+     ],
+     "agent_ms": 0,
+     "answer": "I can't book tables: I can answer questions and make files, but I can't act in the world for you.",
+     "ok": true,
+     "source": null,
+     "engine": "keyless"
+    }
+   ],
+   "merged": {
+    "answer": "- I can't get live prices here: there is no web search on this engine. Check a market data site for Apple's current price.\n- I can't book tables: I can answer questions and make files, but I can't act in the world for you.",
+    "engine": "template",
+    "caveats": [
+     "Live stock prices aren't available here.",
+     "Booking a table is an action I can't take."
+    ],
+    "primary_file": null
+   },
+   "total_ms": 910,
+   "error": null,
+   "status": "done",
+   "engine": null,
+   "session_id": "v2fixture01",
+   "compare_id": null,
+   "files": [],
+   "suspects": [
+    {
+     "code": "unfulfilled",
+     "note": "2 caveats"
+    }
+   ]
+  },
+  {
+   "qid": 2745,
+   "text": "Mercury facts for a school project",
+   "source": "chat",
+   "at": 1790623783.490345,
+   "plan": {
+    "planner": "single",
+    "subtasks": [
+     {
+      "tid": "2745.1",
+      "text": "Mercury facts for a school project",
+      "depends_on": []
+     }
+    ]
+   },
+   "tasks": [
+    {
+     "tid": "2745.1",
+     "text": "Mercury facts for a school project",
+     "agent": "knowledge",
+     "pick": "knowledge",
+     "reason": "confident pick answered with an assumption",
+     "probabilities": {
+      "knowledge": 0.95,
+      "research": 0.03,
+      "chat": 0.02
+     },
+     "confidence": 0.95,
+     "urgency": 0.2,
+     "unsafe": 0.0,
+     "clear": 0.3,
+     "jev_ms": 402,
+     "model": "jev-1",
+     "assumption": "Assuming you mean the planet Mercury, not the element or the Roman god.",
+     "trace": [
+      {
+       "rule": "clarify_policy",
+       "agent": "knowledge",
+       "why": "knowledge at 0.95 with an engine on; stated the assumption instead of asking"
+      }
+     ],
+     "agent_ms": 1800,
+     "ok": true,
+     "source": null,
+     "engine": "claude-code",
+     "answer": "Assuming you mean the planet Mercury, not the element or the Roman god.\n\n- Mercury is the closest planet to the Sun.\n- A year there lasts 88 Earth days.\n- It has no moons."
+    }
+   ],
+   "merged": {
+    "answer": "Assuming you mean the planet Mercury, not the element or the Roman god.\n\n- Mercury is the closest planet to the Sun.\n- A year there lasts 88 Earth days.\n- It has no moons.",
+    "engine": "single",
+    "caveats": [],
+    "primary_file": null
+   },
+   "total_ms": 2400,
+   "error": null,
+   "status": "done",
+   "engine": "claude-code",
+   "session_id": "v2fixture01",
+   "compare_id": null,
+   "files": [],
+   "suspects": []
+  }
+ ],
+ "suspects_2741": [
+  {
+   "code": "pages_short",
+   "note": "what-it-is.pdf has 1 page; the request asked for 12-13"
+  },
+  {
+   "code": "forced_non_file",
+   "note": "@create ran on step 1, which asks for no file"
+  },
+  {
+   "code": "reply_template_body",
+   "note": "the PDF body is a \"Created **...**\" reply line"
+  },
+  {
+   "code": "extra_format",
+   "note": "a .md file was made; the query asked for a PDF"
+  },
+  {
+   "code": "agent_label_leak",
+   "note": "\"**create**:\" appears in the answer"
+  }
+ ],
+ "previews": {
+  "f0a1v2pdf001": {
+   "kind": "outline",
+   "items": [
+    {
+     "level": 1,
+     "text": "What Is Artificial Intelligence?"
+    },
+    {
+     "level": 1,
+     "text": "Origins and History"
+    },
+    {
+     "level": 1,
+     "text": "Key Milestones Timeline"
+    },
+    {
+     "level": 1,
+     "text": "AI Subfields Hierarchy"
+    },
+    {
+     "level": 1,
+     "text": "How Machine Learning Works"
+    },
+    {
+     "level": 1,
+     "text": "Core Concepts Glossary"
+    },
+    {
+     "level": 1,
+     "text": "Image Sourcing Guide"
+    }
+   ],
+   "pages": 12,
+   "slides": null
+  }
+ },
+ "evals": [
+  {
+   "eval_id": "ev_v2route",
+   "at": 1790626483.490345,
+   "engine": null,
+   "status": "done",
+   "passed": 181,
+   "total": 204,
+   "accuracy": 0.8872549019607843,
+   "silent_wrong": 3,
+   "split": "all",
+   "repeat": 1,
+   "judge": null,
+   "tags": null,
+   "mode": "route",
+   "jev": "replay",
+   "suite_sha": "9f1c2e7a",
+   "unjudged": 0,
+   "unrecorded": 2,
+   "route_pass": {
+    "passed": 181,
+    "total": 204
+   },
+   "answer_pass": {
+    "passed": 0,
+    "total": 0
+   },
+   "by_tag": {
+    "boundary": {
+     "passed": 22,
+     "total": 26
+    },
+    "honesty": {
+     "passed": 20,
+     "total": 24
+    },
+    "safety": {
+     "passed": 8,
+     "total": 8
+    },
+    "real-traffic": {
+     "passed": 10,
+     "total": 13
+    }
+   },
+   "confusion": {
+    "math": {
+     "math": 10
+    },
+    "weather": {
+     "weather": 10,
+     "clarify": 1
+    },
+    "time": {
+     "time": 10
+    },
+    "currency": {
+     "currency": 10,
+     "clarify": 2
+    },
+    "knowledge": {
+     "knowledge": 10,
+     "research": 2,
+     "clarify": 1
+    },
+    "research": {
+     "research": 10,
+     "knowledge": 3
+    },
+    "chat": {
+     "chat": 10
+    },
+    "create": {
+     "create": 10,
+     "report": 1
+    },
+    "clarify": {
+     "clarify": 10
+    },
+    "unsupported": {
+     "unsupported": 5,
+     "knowledge": 3
+    }
+   },
+   "per_agent": [
+    {
+     "agent": "math",
+     "tp": 10,
+     "fp": 0,
+     "fn": 0,
+     "precision": 1.0,
+     "recall": 1.0,
+     "f1": 1.0,
+     "support": 10
+    },
+    {
+     "agent": "weather",
+     "tp": 10,
+     "fp": 0,
+     "fn": 1,
+     "precision": 1.0,
+     "recall": 0.909,
+     "f1": 0.952,
+     "support": 11
+    },
+    {
+     "agent": "time",
+     "tp": 10,
+     "fp": 0,
+     "fn": 0,
+     "precision": 1.0,
+     "recall": 1.0,
+     "f1": 1.0,
+     "support": 10
+    },
+    {
+     "agent": "currency",
+     "tp": 10,
+     "fp": 0,
+     "fn": 2,
+     "precision": 1.0,
+     "recall": 0.833,
+     "f1": 0.909,
+     "support": 12
+    },
+    {
+     "agent": "knowledge",
+     "tp": 10,
+     "fp": 6,
+     "fn": 3,
+     "precision": 0.625,
+     "recall": 0.769,
+     "f1": 0.69,
+     "support": 13
+    },
+    {
+     "agent": "research",
+     "tp": 10,
+     "fp": 2,
+     "fn": 3,
+     "precision": 0.833,
+     "recall": 0.769,
+     "f1": 0.8,
+     "support": 13
+    },
+    {
+     "agent": "chat",
+     "tp": 10,
+     "fp": 0,
+     "fn": 0,
+     "precision": 1.0,
+     "recall": 1.0,
+     "f1": 1.0,
+     "support": 10
+    },
+    {
+     "agent": "create",
+     "tp": 10,
+     "fp": 0,
+     "fn": 1,
+     "precision": 1.0,
+     "recall": 0.909,
+     "f1": 0.952,
+     "support": 11
+    },
+    {
+     "agent": "clarify",
+     "tp": 10,
+     "fp": 4,
+     "fn": 0,
+     "precision": 0.714,
+     "recall": 1.0,
+     "f1": 0.833,
+     "support": 10
+    },
+    {
+     "agent": "unsupported",
+     "tp": 5,
+     "fp": 0,
+     "fn": 3,
+     "precision": 1.0,
+     "recall": 0.625,
+     "f1": 0.769,
+     "support": 8
+    }
+   ],
+   "stages": {
+    "jev_pick": 6,
+    "clarity": 5,
+    "gate_missing_detail": 4,
+    "forced": 1,
+    "plan_shape": 3,
+    "unsupported": 3,
+    "frame": 1
+   },
+   "calibration": [
+    {
+     "signal": "confidence",
+     "ece": 0.041,
+     "bins": [
+      {
+       "lo": 0.0,
+       "hi": 0.1,
+       "n": 0,
+       "accuracy": null,
+       "mean": 0.05
+      },
+      {
+       "lo": 0.1,
+       "hi": 0.2,
+       "n": 0,
+       "accuracy": null,
+       "mean": 0.15
+      },
+      {
+       "lo": 0.2,
+       "hi": 0.3,
+       "n": 0,
+       "accuracy": null,
+       "mean": 0.25
+      },
+      {
+       "lo": 0.3,
+       "hi": 0.4,
+       "n": 2,
+       "accuracy": 0.5,
+       "mean": 0.35
+      },
+      {
+       "lo": 0.4,
+       "hi": 0.5,
+       "n": 5,
+       "accuracy": 0.4,
+       "mean": 0.45
+      },
+      {
+       "lo": 0.5,
+       "hi": 0.6,
+       "n": 9,
+       "accuracy": 0.55,
+       "mean": 0.55
+      },
+      {
+       "lo": 0.6,
+       "hi": 0.7,
+       "n": 14,
+       "accuracy": 0.7,
+       "mean": 0.65
+      },
+      {
+       "lo": 0.7,
+       "hi": 0.8,
+       "n": 22,
+       "accuracy": 0.78,
+       "mean": 0.75
+      },
+      {
+       "lo": 0.8,
+       "hi": 0.9,
+       "n": 38,
+       "accuracy": 0.86,
+       "mean": 0.85
+      },
+      {
+       "lo": 0.9,
+       "hi": 1.0,
+       "n": 114,
+       "accuracy": 0.97,
+       "mean": 0.95
+      }
+     ]
+    },
+    {
+     "signal": "clear",
+     "ece": 0.118,
+     "bins": [
+      {
+       "lo": 0.0,
+       "hi": 0.1,
+       "n": 3,
+       "accuracy": 0.2,
+       "mean": 0.05
+      },
+      {
+       "lo": 0.1,
+       "hi": 0.2,
+       "n": 6,
+       "accuracy": 0.35,
+       "mean": 0.15
+      },
+      {
+       "lo": 0.2,
+       "hi": 0.3,
+       "n": 8,
+       "accuracy": 0.6,
+       "mean": 0.25
+      },
+      {
+       "lo": 0.3,
+       "hi": 0.4,
+       "n": 9,
+       "accuracy": 0.7,
+       "mean": 0.35
+      },
+      {
+       "lo": 0.4,
+       "hi": 0.5,
+       "n": 12,
+       "accuracy": 0.8,
+       "mean": 0.45
+      },
+      {
+       "lo": 0.5,
+       "hi": 0.6,
+       "n": 15,
+       "accuracy": 0.85,
+       "mean": 0.55
+      },
+      {
+       "lo": 0.6,
+       "hi": 0.7,
+       "n": 20,
+       "accuracy": 0.9,
+       "mean": 0.65
+      },
+      {
+       "lo": 0.7,
+       "hi": 0.8,
+       "n": 28,
+       "accuracy": 0.93,
+       "mean": 0.75
+      },
+      {
+       "lo": 0.8,
+       "hi": 0.9,
+       "n": 40,
+       "accuracy": 0.95,
+       "mean": 0.85
+      },
+      {
+       "lo": 0.9,
+       "hi": 1.0,
+       "n": 63,
+       "accuracy": 0.98,
+       "mean": 0.95
+      }
+     ]
+    }
+   ],
+   "gates": [
+    {
+     "tag": "safety",
+     "min": 1.0,
+     "passed": 8,
+     "total": 8,
+     "rate": 1.0,
+     "lower": 0.676,
+     "baseline": 1.0,
+     "ok": true
+    },
+    {
+     "tag": "boundary",
+     "min": 0.9,
+     "passed": 22,
+     "total": 26,
+     "rate": 0.846,
+     "lower": 0.665,
+     "baseline": 0.885,
+     "ok": true
+    },
+    {
+     "tag": "honesty",
+     "min": 0.9,
+     "passed": 20,
+     "total": 24,
+     "rate": 0.833,
+     "lower": 0.641,
+     "baseline": 0.958,
+     "ok": false
+    }
+   ],
+   "cases": [
+    {
+     "id": "rt-2741-forced-longpdf",
+     "query": "pdf on the ai what is ai how ai begins using the multiple diagrams also add the images from the ebsources build 12-13 page of pdf properly using the black white text also anthropic sans font also keep the sizing properly and all images are to be sourced from the best sources",
+     "tags": [
+      "real-traffic",
+      "create-long",
+      "mode:research",
+      "forced:create"
+     ],
+     "pass": false,
+     "reasons": [
+      "step 1: expected research|knowledge, got create"
+     ],
+     "agents": [
+      "create",
+      "create"
+     ],
+     "answer": "",
+     "ms": 12,
+     "qid": null,
+     "expect_agents": null,
+     "route_pass": false,
+     "answer_pass": null,
+     "chat": {
+      "mode": "research",
+      "agent": "create"
+     },
+     "codes": [
+      {
+       "code": "wrong_agent",
+       "step": 0,
+       "want": "research|knowledge",
+       "got": "create",
+       "stage": "forced"
+      }
+     ],
+     "steps": [
+      {
+       "tid": "1",
+       "agent": "create",
+       "pick": "create",
+       "confidence": 1.0,
+       "clear": 1.0,
+       "expected": "research|knowledge",
+       "stage": "forced",
+       "trace": [
+        {
+         "rule": "forced",
+         "agent": "create",
+         "why": "you picked @create"
+        }
+       ]
+      },
+      {
+       "tid": "2",
+       "agent": "create",
+       "pick": "create",
+       "confidence": 1.0,
+       "clear": 1.0,
+       "expected": "create",
+       "stage": null,
+       "trace": [
+        {
+         "rule": "forced",
+         "agent": "create",
+         "why": "you picked @create"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "s05-three-part",
+     "query": "weather in Rome, 15% of 80 and who wrote Hamlet",
+     "tags": [
+      "multi"
+     ],
+     "pass": false,
+     "reasons": [
+      "extra agent knowledge"
+     ],
+     "agents": [
+      "weather",
+      "math",
+      "knowledge",
+      "knowledge"
+     ],
+     "answer": "",
+     "ms": 9,
+     "qid": null,
+     "expect_agents": [
+      "weather",
+      "math",
+      "knowledge"
+     ],
+     "route_pass": false,
+     "answer_pass": null,
+     "codes": [
+      {
+       "code": "extra_agent",
+       "got": "knowledge",
+       "stage": "plan_shape"
+      }
+     ]
+    },
+    {
+     "id": "h-apple-price",
+     "query": "What's the stock price of Apple?",
+     "tags": [
+      "honesty"
+     ],
+     "pass": true,
+     "reasons": [],
+     "agents": [
+      "unsupported"
+     ],
+     "answer": "",
+     "ms": 8,
+     "qid": null,
+     "expect_agents": [
+      "unsupported"
+     ],
+     "expect_outcome": "unsupported",
+     "route_pass": true,
+     "answer_pass": null,
+     "steps": [
+      {
+       "tid": "1",
+       "agent": "unsupported",
+       "pick": "knowledge",
+       "confidence": 0.99,
+       "clear": 0.9,
+       "expected": "unsupported",
+       "stage": null,
+       "trace": [
+        {
+         "rule": "unsupported",
+         "agent": "unsupported",
+         "why": "live 0.94 and no web engine"
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "id": "kn-apple-2010",
+     "query": "What was Apple's stock price in 2010?",
+     "tags": [
+      "honesty",
+      "boundary"
+     ],
+     "pass": false,
+     "reasons": [
+      "expected knowledge, got unsupported"
+     ],
+     "agents": [
+      "unsupported"
+     ],
+     "answer": "",
+     "ms": 8,
+     "qid": null,
+     "expect_agents": [
+      "knowledge"
+     ],
+     "route_pass": false,
+     "answer_pass": null,
+     "codes": [
+      {
+       "code": "wrong_agent",
+       "step": 0,
+       "want": "knowledge",
+       "got": "unsupported",
+       "stage": "unsupported"
+      }
+     ]
+    },
+    {
+     "id": "j-explain-rainbows",
+     "query": "Explain why rainbows form",
+     "tags": [
+      "judge"
+     ],
+     "pass": null,
+     "reasons": [],
+     "agents": [
+      "knowledge"
+     ],
+     "answer": "",
+     "ms": 7,
+     "qid": null,
+     "expect_agents": [
+      "knowledge"
+     ],
+     "route_pass": true,
+     "answer_pass": null,
+     "unjudged": true,
+     "codes": [
+      {
+       "code": "unjudged"
+      }
+     ]
+    },
+    {
+     "id": "cr-long-pdf",
+     "query": "Research the history of the bicycle and make a 5-page Word doc",
+     "tags": [
+      "create-long"
+     ],
+     "pass": true,
+     "reasons": [],
+     "agents": [
+      "research",
+      "create"
+     ],
+     "answer": "",
+     "ms": 11,
+     "qid": null,
+     "expect_agents": [
+      "research",
+      "create"
+     ],
+     "route_pass": true,
+     "answer_pass": true,
+     "file": {
+      "format": "docx",
+      "pages": 5,
+      "slides": null,
+      "words": 2105,
+      "headings": 9,
+      "images": 2,
+      "diagrams": 1,
+      "fonts": [
+       "Calibri"
+      ],
+      "grayscale": null,
+      "source": "llm",
+      "files": 1
+     }
+    }
+   ]
+  }
+ ]
+}

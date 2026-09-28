@@ -261,8 +261,14 @@ async def test_eval_run_progress_and_results(client, tmp_path, monkeypatch):
     extra = {'split': 'all', 'repeat': 1, 'judge': None, 'tags': None, 'by_tag': {'c': {'passed': 1, 'total': 1},
              's': {'passed': 0, 'total': 2}}, 'p50_ms': listed[0]['p50_ms'], 'p95_ms': listed[0]['p95_ms'], 'flaky': 0,
              'judge_mean': None, 'judge_errors': []}  # EvalSummaryExtra (docs/PLAN-speed-evals-chat.md)
-    assert listed == [{'eval_id': eid, 'at': listed[0]['at'], 'engine': 'none', 'status': 'done', 'done': 3, 'passed': 1,
-                       'total': 3, 'accuracy': 0.3333, 'silent_wrong': 1, 'examples': False, **extra}]  # the currency case answered ok but wrong
+    v2 = {'mode', 'jev', 'suite_sha', 'route_pass', 'answer_pass', 'by_tag_route', 'unjudged', 'unrecorded', 'tokens',
+          'stages', 'confusion', 'per_agent', 'calibration'}  # accuracy v2 (docs/PLAN-accuracy-v2.md D3-D8)
+    assert {k: v for k, v in listed[0].items() if k not in v2} == {
+        'eval_id': eid, 'at': listed[0]['at'], 'engine': 'none', 'status': 'done', 'done': 3, 'passed': 1,
+        'total': 3, 'accuracy': 0.3333, 'silent_wrong': 1, 'examples': False, **extra}  # the currency case answered ok but wrong
+    assert len(listed) == 1 and set(listed[0]) >= v2 and listed[0]['mode'] == 'full' and listed[0]['unjudged'] == 0
+    assert listed[0]['route_pass'] == {'passed': 1, 'total': 2} and listed[0]['answer_pass'] == {'passed': 1, 'total': 2}
+    assert listed[0]['confusion'] == {'weather': {'weather': 1}} and listed[0]['stages'] == {'confidence': 1, 'agent_answer': 1}
     d = await json_of(await client.get(f'/api/evals/{eid}'))
     assert d['done'] == 3 and [c['id'] for c in d['cases']] == ['w', 'h', 'e']
     w, h, e = d['cases']
@@ -327,7 +333,8 @@ async def test_engine_test_endpoint(client, monkeypatch):
 
 async def test_features_in_config(client):
     f = (await json_of(await client.get('/api/config')))['features']
-    assert f == {'files': True, 'compare': True, 'evals': True, 'custom_agents': True, 'exec': False}
+    assert f == {'files': True, 'compare': True, 'evals': True, 'custom_agents': True, 'exec': False,
+                 'cassette': evals_mod.CASSETTE.exists()}
     await client.post('/control', json={'engine': 'codex'})
     assert (await json_of(await client.get('/api/config')))['features']['exec'] is True
     await client.post('/control', json={'engine': 'claude-code'})

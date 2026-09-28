@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { ask, cancelRun, errorText, getRun } from '../api'
-import type { CreatedFile, RunRecord, RunTimings } from '../protocol'
+import { ApiError, ask, cancelRun, errorText, getRun, promoteRun } from '../api'
+import type { CreatedFile, PromoteRunResponse, RunRecord, RunTimings, SuspectCheck } from '../protocol'
 import { useRunState, useStore } from '../store'
 import type { Run, Task } from '../useEventStream'
 import { Badge, Button, Card, EmptyState, Skeleton, StatusBadge, Tabs, copyText, navigate, timeAgo, useHashPath, useToast } from '../ui'
@@ -12,7 +12,10 @@ import { RouteFeedback, canLabel, useRunLabels } from '../components/RouteFeedba
 import { Waterfall } from '../components/Viz'
 import { Timings } from '../components/Timings'
 import { AgentBadge, BackLink, PageBody } from '../components/app'
-import { CreatedFiles, filesOfTasks } from '../components/chat/CreatedFiles'
+import { CreatedFiles, RunFiles, filesOfTasks } from '../components/chat/CreatedFiles'
+import { Assumptions, CaveatsBox, withoutAssumptions, withoutCaveats } from '../components/chat/Caveats'
+import { assumptionsOf, caveatsOf } from '../components/chat/Turn'
+import { StepPolicy } from '../components/StepPolicy'
 import { cn } from '@/lib/utils'
 import { pct } from '../lib'
 
@@ -105,6 +108,7 @@ export default function RunDetail({ params }: { params: Record<string, string> }
               <Badge tone="neutral">{run.source}</Badge>
               {run.engine && <Badge tone="neutral"><EngineIcon name={run.engine} size={12} />{run.engine}</Badge>}
               {run.plan && <Badge tone="neutral" icon="planner">{run.plan.planner} plan</Badge>}
+              {(stored.rec?.dry_run ?? run.dry_run) === 'route' && <Badge tone="info" icon="route" title="Planned and routed only; no agent ran">routing only</Badge>}
             </div>
             <h2 className="m-0 max-w-[70ch] text-xl font-semibold leading-snug tracking-[-0.015em] text-balance break-words text-foreground sm:text-2xl">{run.text || '…'}</h2>
             <dl className="m-0 flex flex-wrap gap-x-8 gap-y-3">
@@ -134,6 +138,7 @@ export default function RunDetail({ params }: { params: Record<string, string> }
             <Button variant="primary" icon="replay" loading={busy === 'replay'} disabled={!run.text} onClick={() => void replay()}>Replay</Button>
           </div>
         </header>
+        <Suspects qid={run.qid} suspects={stored.rec?.suspects ?? run.suspects} />
       </div>
 
       <div className="flex min-w-0 flex-col gap-4">
@@ -178,6 +183,7 @@ function SubtasksTab({ run, rec }: { run: Run; rec: RunRecord | null }) {
             </p>
           )}
           <TaskCard task={t} bare />
+          <StepPolicy routed={t.routed} className="border-t border-border pt-3" />
           <StepFiles files={filesOfTask(t, rec)} />
           {run.done && canLabel(run.source, t) && (
             <RouteFeedback qid={run.qid} task={t} label={labels[t.tid]} onLabel={setLabel} className="border-t border-border pt-3" />
@@ -216,20 +222,25 @@ function AnswerTab({ run, rec }: { run: Run; rec: RunRecord | null }) {
   const toast = useToast()
   const tasks = run.order.map(t => run.tasks[t]).filter(Boolean)
   const answer = run.merged?.answer || run.mergeStream || tasks.map(t => t.answered?.answer ?? t.stream).filter(Boolean).join('\n\n')
+  const caveats = caveatsOf(run)
+  const assumptions = assumptionsOf(run)
+  const shown = withoutAssumptions(withoutCaveats(answer, caveats), assumptions)
   const copy = async () => { (await copyText(answer)) ? toast.success('Answer copied') : toast.error('Could not copy') }
   const made = tasks.flatMap(t => filesOfTask(t, rec)).filter((f, i, all) => all.findIndex(x => x.id === f.id) === i)
   return (
     <div className="grid items-start gap-4 lg:grid-cols-3">
       <Card className={tasks.length > 0 ? 'lg:col-span-2' : 'lg:col-span-3'} title="Answer" icon="answer" actions={answer ? <Button variant="ghost" size="sm" icon="copy" onClick={() => void copy()}>Copy</Button> : undefined}
         subtitle={run.merged ? `${run.merged.engine === 'single' ? 'direct' : run.merged.engine} merge${run.merged.ms != null ? ` · ${secs(run.merged.ms)}` : ''}` : undefined}>
-        {answer ? <div className={cn('min-w-0 max-w-[75ch] text-[14.5px] leading-relaxed break-words text-foreground', !run.done && STREAMING)}><Markdown text={answer} /></div>
+        <Assumptions items={assumptions} className="mb-3" />
+        {answer ? <div className={cn('min-w-0 max-w-[75ch] text-[14.5px] leading-relaxed break-words text-foreground', !run.done && STREAMING)}><Markdown text={shown} /></div>
           : run.done ? <EmptyState compact icon="answer" title="No answer" text={run.error ?? (run.status === 'cancelled' ? 'The run was stopped.' : 'Nothing was returned.')} />
           : <Skeleton lines={4} />}
         {run.error && answer && <p className="m-0 mt-3 flex items-start gap-1.5 text-[13px] text-warn"><Icon name="alert" size={14} className="mt-0.5 shrink-0" />{run.error}</p>}
+        {run.done && <CaveatsBox caveats={caveats} className="mt-4" />}
       </Card>
       {made.length > 0 && (
         <Card className="lg:col-span-2 lg:row-start-2" title="Created files" icon="files" subtitle="Download, preview or convert. Converting reuses the stored content, so it costs no model tokens.">
-          <CreatedFiles files={made} />
+          <RunFiles files={made} primary={run.merged?.primary_file} />
         </Card>
       )}
       {tasks.length > 0 && (
@@ -243,6 +254,7 @@ function AnswerTab({ run, rec }: { run: Run; rec: RunRecord | null }) {
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   {t.routed ? <AgentBadge agent={t.routed.agent} pct={pct(t.routed.confidence)} /> : <span className="text-xs text-muted-foreground">{t.error ? 'failed' : 'pending'}</span>}
+                  {t.routed?.bound && <Badge tone="accent" icon="agent" title="This step took the agent picked with @">bound</Badge>}
                   {t.answered && <span className="text-xs tabular-nums text-muted-foreground">{secs(t.answered.agent_ms)}</span>}
                   {filesOfTask(t, rec).length > 0 && <Badge tone="neutral" icon="files">{filesOfTask(t, rec).length === 1 ? '1 file' : `${filesOfTask(t, rec).length} files`}</Badge>}
                 </div>
@@ -286,5 +298,55 @@ function DetailSkeleton() {
         </div>
       </div>
     </PageBody>
+  )
+}
+
+const SUSPECT_LABEL: Record<string, string> = {
+  pages_short: 'File too short', forced_non_file: '@create on a step with no file', reply_template_body: 'File holds a reply line',
+  extra_format: 'File in a format not asked for', unfulfilled: 'Parts not done', dup_clarify: 'Repeated question',
+  agent_label_leak: 'Agent label leaked', dead_end: 'Dead-end answer', cut_off: 'Context cut off',
+}
+
+/** Checks that flag this run as likely wrong, and "Make eval case", which drafts a case from it for the eval suite. */
+function Suspects({ qid, suspects }: { qid: number; suspects: SuspectCheck[] | undefined }) {
+  const toast = useToast()
+  const [busy, setBusy] = useState(false)
+  const [made, setMade] = useState<PromoteRunResponse | null>(null)
+  useEffect(() => { setMade(null) }, [qid])
+  if (!suspects?.length) return null
+  const promote = async () => {
+    setBusy(true)
+    try {
+      const res = await promoteRun(qid)
+      setMade(res)
+      toast.success(res.created ? `Drafted eval case ${res.case_id}` : `Eval case ${res.case_id} is already there`)
+    } catch (e) {
+      toast.error(e instanceof ApiError && e.status === 409 ? `An eval case for run #${qid} already exists` : `Could not make an eval case: ${errorText(e)}`)
+    } finally { setBusy(false) }
+  }
+  return (
+    <section aria-label="Suspect checks" className="flex flex-col gap-2 rounded-lg border border-warn/30 bg-warn/10 p-3 sm:p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <h3 className="m-0 flex items-center gap-1.5 text-[13px] font-semibold text-foreground">
+          <Icon name="flag" size={14} className="text-warn" />This run looks wrong in {suspects.length === 1 ? '1 way' : `${suspects.length} ways`}
+        </h3>
+        <Button variant="secondary" size="sm" icon="evals" loading={busy} disabled={!!made} onClick={() => void promote()}>
+          {made ? 'Eval case made' : 'Make eval case'}
+        </Button>
+      </div>
+      <ul className="m-0 flex list-none flex-col gap-1 p-0">
+        {suspects.map((s, i) => (
+          <li key={s.code + i} className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-[13px] text-foreground">
+            <span className="font-medium" title={s.code}>{SUSPECT_LABEL[s.code] ?? s.code.replace(/_/g, ' ')}</span>
+            {s.note && <span className="min-w-0 text-muted-foreground [overflow-wrap:anywhere]">{s.note}</span>}
+          </li>
+        ))}
+      </ul>
+      {made && (
+        <p className="m-0 text-xs text-muted-foreground [overflow-wrap:anywhere]">
+          Case <span className="font-mono text-foreground">{made.case_id}</span> {made.created ? 'saved to' : 'is in'} <span className="font-mono text-foreground">{made.path}</span>. Edit its expectations there, then run the evals.
+        </p>
+      )}
+    </section>
   )
 }

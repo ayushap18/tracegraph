@@ -1,7 +1,8 @@
 """aiohttp routes: GET / (web/dist or legacy page), GET /events (SSE), POST /ask, POST /control, GET /api/config,
 plus the v4 API in docs/PLAN-v4.md §1 (runs, sessions, agents, files, compare, evals, engine test), the learning API in
 docs/PLAN-learning.md (labels, review queue, route examples, eval compare, engine health) and created files in
-docs/PLAN-files.md (list, download, preview, convert, the ruleset)."""
+docs/PLAN-files.md (list, download, preview, convert, the ruleset), and from docs/PLAN-accuracy-v2.md the query limit
+(B4), suspect runs and promoting a run to an eval case (D6) and routing-only evals (D3)."""
 import asyncio
 import json
 import os
@@ -18,7 +19,7 @@ from . import create as create_mod
 from . import evals as evals_mod
 from . import judge as judge_mod
 from . import labels as labels_mod
-from .config import AGENTS, DIST, GROUP_MAX, GUARDS, LEGACY_PAGE, MODES, REPORT, RESEARCH, RUN, STYLES
+from .config import AGENTS, DIST, GROUP_MAX, GUARDS, LEGACY_PAGE, MAX_QUERY_CHARS, MODES, REPORT, RESEARCH, RUN, STYLES
 from .engines import EngineError, catalog, choose
 from .engines.health import pct, unblock
 from .agents import create as maker
@@ -75,11 +76,45 @@ SOURCES = ('you', 'chat', 'compare', 'eval', 'sandbox')
 SANDBOX_ID = re.compile(r'^[A-Za-z0-9_-]{8,64}$')
 
 
+def too_long(text: str):
+    """B4: a query over MAX_QUERY_CHARS is refused whole, never cut short (its last constraints would be lost)."""
+    if len(text) > MAX_QUERY_CHARS:
+        return web.json_response({'error': f'Your message is {len(text):,} characters; the limit is {MAX_QUERY_CHARS:,}.',
+                                  'limit': MAX_QUERY_CHARS}, status=400)
+    return None
+
+
+def body_font() -> str | None:
+    """The family of TRACEGRAPH_BODY_FONT (a .ttf/.otf file), or None when it isn't set to a file."""
+    path = os.environ.get('TRACEGRAPH_BODY_FONT')
+    if not path or not Path(path).is_file():
+        return None
+    try:
+        from .create import fonts
+        family = getattr(fonts, 'family_of', None)
+        if callable(family):
+            return family(path) or Path(path).stem
+    except Exception:
+        pass
+    return Path(path).stem
+
+
+def with_limits(d: dict) -> dict:
+    """Config and hello carry the query limit and the document font; the router's own values win when it has them."""
+    return {'limits': {'query_chars': MAX_QUERY_CHARS}, 'fonts': {'body': body_font()}, **d}
+
+
+def emit_config(router):
+    router.bus.emit('config', **with_limits(router.config()))
+
+
 async def ask(request):
     body, router = await read_json(request), request.app[ROUTER]
-    text = str(body.get('query', '')).strip()[:500]
+    text = str(body.get('query', '')).strip()
     if not text:
         return err('empty query')
+    if (resp := too_long(text)) is not None:
+        return resp
     source = body.get('source') or 'you'
     session_id = body.get('session_id') or None
     files = body.get('files') or []
@@ -313,15 +348,47 @@ async def cancel_run(request):
     return web.json_response({'ok': True})
 
 
+SUSPECT_SCAN = 5000  # most saved runs one ?suspect=1 page looks through
+
+
 async def list_runs(request):
+    """GET /api/runs: newest first. ?suspect=1 keeps only runs with suspects (D6), paging through older runs until the
+    page is full."""
     router, q = request.app[ROUTER], request.query
     try:
         limit = max(1, min(200, int(q.get('limit', 50))))
         before = int(q['before']) if q.get('before') else None
     except ValueError:
         return err('limit and before must be integers')
-    runs = router.store.list_runs(limit, before, q.get('q'), q.get('source'), q.get('status'), q.get('engine'))
+    if q.get('suspect') not in (None, '', '0', 'false'):
+        runs, scanned = [], 0
+        while len(runs) < limit and scanned < SUSPECT_SCAN:
+            batch = router.store.list_runs(200, before, q.get('q'), q.get('source'), q.get('status'), q.get('engine'))
+            if not batch:
+                break
+            scanned += len(batch)
+            runs += [r for r in batch if evals_mod.suspects_of(r)]
+            before = batch[-1]['qid']
+        runs = runs[:limit]
+    else:
+        runs = router.store.list_runs(limit, before, q.get('q'), q.get('source'), q.get('status'), q.get('engine'))
+    # a run saved before suspects were stored gets them computed now, so the Suspect column and filter can show it
+    runs = [r if isinstance(r.get('suspects'), list) else {**r, 'suspects': evals_mod.suspects_of(r)} for r in runs]
     return web.json_response({'runs': [router.inflight.get(r['qid'], r) for r in runs]})
+
+
+async def promote_run(request):
+    """POST /api/runs/{qid}/promote: the run as a draft case in evals/cases.local.jsonl (PromoteRunResponse)."""
+    try:
+        qid = int(request.match_info['qid'])
+    except ValueError:
+        return err('bad qid', 404)
+    try:
+        return web.json_response(evals_mod.promote_run(request.app[ROUTER], qid))
+    except evals_mod.PromoteError as e:
+        return err(str(e), e.status)
+    except evals_mod.CaseError as e:
+        return err(f'bad eval case: {e}', 500)
 
 
 async def get_run(request):
@@ -398,7 +465,9 @@ async def delete_session(request):
 # ---------- agents ----------
 
 GUARD_INFO = {'clarify': 'Asks a follow-up question when the request is unclear or Jev is not confident enough to route it',
-              'blocked': 'Declines requests that Jev flags as harmful or unsafe'}
+              'blocked': 'Declines requests that Jev flags as harmful or unsafe',
+              'unsupported': 'Says honestly when a request needs something this app cannot do, such as live data or '
+                             'acting in the world'}
 NAME = re.compile(r'^[a-z][a-z0-9_-]{1,23}$')
 MAX_CUSTOM = 12
 
@@ -449,7 +518,7 @@ async def create_agent(request):
         return err(str(e), e.status)
     router.store.add_agent(a)
     router.reload_customs()
-    router.bus.emit('config', **router.config())  # Jev's route criteria changed, so every browser's agent list does too
+    emit_config(router)  # Jev's route criteria changed, so every browser's agent list does too
     return web.json_response(custom_info(router, a), status=201)
 
 
@@ -459,7 +528,7 @@ async def delete_agent(request):
         return err(f'{name} is not a custom agent')
     router.store.delete_agent(name)
     router.reload_customs()
-    router.bus.emit('config', **router.config())
+    emit_config(router)
     return web.json_response({'ok': True})
 
 
@@ -657,8 +726,10 @@ async def preview_sandbox_created(request):
 
 async def compare(request):
     body, router = await read_json(request), request.app[ROUTER]
-    text = str(body.get('query', '')).strip()[:500]
+    text = str(body.get('query', '')).strip()
     names = body.get('engines')
+    if (resp := too_long(text)) is not None:
+        return resp
     try:
         if not text:
             raise Bad('empty query')
@@ -684,11 +755,24 @@ async def get_compare(request):
 
 async def run_eval(request):
     """RunEvalBody: engine, examples, split (dev/holdout/all), tags (any of), repeat (1-5), judge (engine name, auto or
-    null). A judge that is the engine under test is swapped for another available engine when there is one."""
+    null), mode (full, or route: only routing, no agent runs) and jev (route mode: live, or replay from the committed
+    cassette; recording happens only from the CLI). A judge that is the engine under test is swapped for another
+    available engine when there is one; auto takes the first healthy engine in STRONGEST order."""
     body, router = await read_json(request), request.app[ROUTER]
     examples, split, tags = body.get('examples'), body.get('split', 'all'), body.get('tags')
     repeat, judge = body.get('repeat', 1), body.get('judge')
+    mode, jev = body.get('mode') or 'full', body.get('jev') or 'live'
     try:
+        if mode not in evals_mod.EVAL_MODES:
+            raise Bad(f'mode must be one of {", ".join(evals_mod.EVAL_MODES)}')
+        if jev not in ('live', 'replay'):
+            raise Bad('jev must be live or replay (a cassette is recorded from the CLI)')
+        if jev == 'replay' and mode != 'route':
+            raise Bad('jev replay needs mode route')
+        if jev == 'replay' and not evals_mod.CASSETTE.exists():
+            raise Bad('no Jev cassette has been recorded', 409)
+        if mode == 'route' and judge is not None:
+            raise Bad('route mode has no answers to judge')
         engine = pick_engine(router, body['engine']) if body.get('engine') else router.engine
         if examples is not None and not isinstance(examples, bool):
             raise Bad('examples must be true or false')
@@ -701,7 +785,7 @@ async def run_eval(request):
         if judge is not None and not (isinstance(judge, str) and (judge == 'auto' or judge in router.engines)):
             raise Bad(f'unknown judge engine {judge!r}')
         try:
-            judge_engine, _ = judge_mod.pick(router.engines, judge, engine)
+            judge_engine, _ = judge_mod.pick(router.engines, judge, engine, healthy=router.healthy)
         except judge_mod.JudgeError as e:
             raise Bad(str(e), 409)
         try:
@@ -712,8 +796,10 @@ async def run_eval(request):
             raise Bad('no cases match that split and those tags')
     except Bad as e:
         return err(str(e), e.status)
+    if mode == 'route':
+        engine = None
     eid = evals_mod.start(router, engine, engine.name if engine else 'none', cases, examples, split=split, tags=tags or None,
-                          repeat=repeat, judge=judge_engine)
+                          repeat=repeat, judge=judge_engine, mode=mode, jev=jev)
     return web.json_response({'eval_id': eid})
 
 
@@ -869,7 +955,7 @@ async def control(request):
         if not isinstance(body['route_examples'], bool):
             return web.json_response({'error': 'route_examples must be true or false'}, status=400)
         router.set_route_examples(body['route_examples'])  # also clears the route cache
-        router.bus.emit('config', **router.config())
+        emit_config(router)
     if 'engine_order' in body:
         auto = router.engines.get('auto')
         if auto is None or not isinstance(body['engine_order'], list):
@@ -880,7 +966,7 @@ async def control(request):
             return web.json_response({'error': str(e)}, status=400)
         if router.engine is auto:
             background(warm_up(auto))
-        router.bus.emit('config', **router.config())
+        emit_config(router)
     if 'engine' in body:
         name = str(body['engine'] or 'none')
         if name == 'none':
@@ -896,13 +982,13 @@ async def control(request):
             router.use_engine(engine)
             background(warm_up(engine))
         # Agents, prices and the engine badge all change, so every browser gets the new config (older clients ignore it).
-        router.bus.emit('config', **router.config())
+        emit_config(router)
     router.bus.emit('state', state=router.state)
     return web.json_response({**router.state, 'engine': router.engine.name if router.engine else None})
 
 
 async def config(request):
-    return web.json_response(request.app[ROUTER].config())
+    return web.json_response(with_limits(request.app[ROUTER].config()))
 
 
 async def events(request):
@@ -923,7 +1009,7 @@ async def events(request):
     await resp.prepare(request)
     q = router.bus.subscribe(accept)
     try:
-        hello = router.hello()
+        hello = with_limits(router.hello())
         if sid:  # a sandbox starts empty: only its own in-flight runs (after a reconnect) are replayed
             hello['history'] = [r for qid, r in sorted(router.inflight.items()) if router.sandbox.get(qid) == sid]
         await resp.write(sse(hello))
@@ -1006,10 +1092,12 @@ def create_app(router_factory=None) -> web.Application:
         router.store.close()
 
     app.add_routes([
-        web.get('/', index), web.get('/events', events), web.post('/ask', ask), web.post('/control', control),
+        web.get('/', index), web.get('/events', events), web.post('/ask', ask), web.post('/api/ask', ask),
+        web.post('/control', control),
         web.get('/api/config', config),
         web.get('/api/runs', list_runs), web.get('/api/runs/{qid}', get_run), web.post('/api/runs/{qid}/cancel', cancel_run),
-        web.post('/api/runs/{qid}/choose', choose_run), web.get('/api/timings', timings_summary),
+        web.post('/api/runs/{qid}/choose', choose_run), web.post('/api/runs/{qid}/promote', promote_run),
+        web.get('/api/timings', timings_summary),
         web.get('/api/sessions', list_sessions), web.get('/api/sessions/{id}', get_session),
         web.delete('/api/sessions/{id}', delete_session), web.delete('/api/sandbox/{id}', clear_sandbox),
         web.post('/api/sandbox/{id}/files', upload_sandbox_file), web.delete('/api/sandbox/{id}/files/{fid}', delete_sandbox_file),

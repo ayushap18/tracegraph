@@ -110,3 +110,47 @@ async def test_merger_marks_partial_claude_text_before_concat():
     chunks, emit = collector()  # nothing streamed: no marker
     await merge('q', RESULTS, emit, eng(FakeAnthropic(api_errors()['status'])))
     assert len(chunks) == 1 and chunks[0].startswith('**weather**')
+
+
+# ---------- research that feeds a file (docs/PLAN-accuracy-v2.md B5) ----------
+
+class Recorder:
+    name, label, supports_web = 'claude-code', 'Claude Code', True
+
+    def __init__(self, text='notes'):
+        self.text, self.calls = text, []
+
+    async def stream(self, *, system, prompt, effort='medium', emit_delta=None, max_tokens=2048, web=False, **kw):
+        from jevrouter.engines import Reply
+        self.calls.append({'system': system, 'prompt': prompt, 'max_tokens': max_tokens, 'web': web})
+        return Reply(self.text, 5, 3)
+
+
+@pytest.mark.parametrize('agent,web', [('research', True), ('knowledge', False), ('report', False)])
+async def test_notes_prompts_when_a_step_feeds_a_file(agent, web):
+    from jevrouter.agents import llm
+    engine = Recorder()
+    run = agents.build(None, engine)[agent]
+    token = agents.FEEDS_FILE.set(True)
+    try:
+        r = await run('Research the history of AI', lambda t: None)
+    finally:
+        agents.FEEDS_FILE.reset(token)
+    call = engine.calls[0]
+    assert r.ok and call['max_tokens'] == 4096 and call['web'] is web
+    assert call['system'] == (llm.NOTES_RESEARCH if agent == 'research' else llm.NOTES_KNOWLEDGE)
+    assert '600-1,200 words' in call['system'] and 'IMAGE: <search query> | <caption>' in call['system']
+    if not web:
+        assert 'from your own knowledge' in call['system'] and 'Do not use tools.' in call['system']
+    # without the flag the agent writes its usual short answer
+    engine.calls.clear()
+    await run('Research the history of AI', lambda t: None)
+    assert '600-1,200 words' not in engine.calls[0]['system']
+
+
+def test_image_ideas_are_read_from_notes():
+    from jevrouter.agents.llm import image_ideas
+    notes = ('## Origins\n- 1956: Dartmouth workshop\nIMAGE: Alan Turing portrait | Alan Turing in 1951\n'
+             '- `IMAGE: ENIAC computer | ENIAC in 1946`\nIMAGE: no caption here\n')
+    assert image_ideas(notes) == [('Alan Turing portrait', 'Alan Turing in 1951'), ('ENIAC computer', 'ENIAC in 1946')]
+    assert len(image_ideas('\n'.join(f'IMAGE: q{i} | c{i}' for i in range(12)))) == 8

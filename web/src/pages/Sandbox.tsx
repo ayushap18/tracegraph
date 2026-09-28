@@ -3,6 +3,7 @@ import { ask, cancelRun, clearSandbox, errorText } from '../api'
 import type { AskBody, FileInfo } from '../protocol'
 import { colorOf } from '../protocol'
 import { useEventStream, type Run } from '../useEventStream'
+import { COUNT_FROM } from '../components/chat/ChatOptions'
 import { Badge, Button, IconButton, Kbd, useToast } from '../ui'
 import { AgentIcon, Icon } from '../icons'
 import { TraceView } from '../components/TraceView'
@@ -28,13 +29,12 @@ const newSandboxId = () =>
   'sbx-' + (globalThis.crypto?.randomUUID?.().replace(/-/g, '') ?? Math.random().toString(36).slice(2) + Date.now().toString(36))
 const newGroupId = () => Math.random().toString(36).slice(2, 10)
 
-const MAX_CHARS = 500
-
 export default function Sandbox() {
   const toast = useToast()
   const [sid, setSid] = useState(newSandboxId)
   // A private event stream: its hello carries no history, and it only receives this sandbox's runs.
   const { store } = useEventStream('/events?sandbox=' + encodeURIComponent(sid))
+  const MAX_CHARS = store.limits.query_chars // the server's query limit, from this stream's hello
 
   const [groups, setGroups] = useState<TurnGroup[]>([])
   const [text, setText] = useState('')
@@ -146,7 +146,7 @@ export default function Sandbox() {
       setSending(false)
       input.current?.focus()
     }
-  }, [busy, draft, comparing, engineOk, compareWith, engine, files, sid, store.engines, store.engine, toast])
+  }, [busy, draft, comparing, engineOk, compareWith, engine, files, sid, store.engines, store.engine, toast, MAX_CHARS])
 
   /** Edit and re-run: a new version of a turn. It replaces the turn the server remembers (the latest version),
    *  so its context is the turns before it and later follow-ups see the new answer. */
@@ -295,7 +295,7 @@ export default function Sandbox() {
                   Not saved, {comparing ? `${compareWith.length} engines side by side` : `engine: ${engine ? engineLabelOf(store.engines, engine) : activeLabel}`}
                   {draft ? `, draft: ${draft.name}` : ''}
                 </span>
-                {text.length > 400 && <span className="tabular-nums">{text.length}/{MAX_CHARS}</span>}
+                {text.length >= Math.min(COUNT_FROM, MAX_CHARS) && <span className="tabular-nums">{text.length.toLocaleString()}/{MAX_CHARS.toLocaleString()}</span>}
               </span>
             </div>
             {/* Export and Keep live in the top bar from sm up; on phones they sit here. */}

@@ -47,6 +47,17 @@ def test_parse_currency(q, expected):
     assert parse_currency(q, KNOWN) == expected
 
 
+@pytest.mark.parametrize('q,expected', [
+    ("What's 20% of 1500 USD in INR?", (300.0, 'USD', 'INR')),
+    ('Convert 15 percent of $200 to EUR', (30.0, 'USD', 'EUR')),
+    ("What's 7% of €33 in GBP?", (2.31, 'EUR', 'GBP')),
+])
+def test_a_share_of_an_amount_is_the_amount_converted(q, expected):
+    # the percentage is not the amount: "20% of 1500 USD" converts 300 USD, and the parser uses every number it saw
+    from jevrouter import gate
+    assert parse_currency(q, KNOWN) == expected and gate.parse_for('currency', q).full
+
+
 def test_parse_currency_errors():
     assert isinstance(parse_currency('convert 100 USD', KNOWN), str)
     assert isinstance(parse_currency('100 USD to dollars', KNOWN), str)
@@ -97,3 +108,72 @@ def test_currency_signs(q, want):
 def test_leading_place_names(q, place):
     from jevrouter.agents.tools import find_place
     assert find_place(q) == place
+
+
+@pytest.mark.parametrize('q, found', [
+    ('Weather in Paris, Texas', ('Paris', 'Texas')), ('sorry, I meant Paris in Texas', ('Paris', 'Texas')),
+    ("What's the weather in Sydney, Australia?", ('Sydney', 'Australia')),
+    ('Weather in New York', None), ('Weather in Paris', None), ('Weather in Trinidad and Tobago', None),
+])
+def test_a_place_qualified_by_its_region(q, found):
+    from jevrouter.agents.tools import qualified_place
+    assert qualified_place(q) == found
+
+
+async def test_weather_for_a_qualified_place_is_looked_up_inside_its_region(monkeypatch):
+    from jevrouter.agents import tools
+    asked = []
+
+    async def fake(http, ttl, url, **params):
+        asked.append(params)
+        if 'geocoding' in url:
+            return {'results': [{'name': 'Paris', 'country': 'France', 'admin1': 'Ile-de-France', 'latitude': 48.9,
+                                 'longitude': 2.3},
+                                {'name': 'Paris', 'country': 'United States', 'admin1': 'Texas', 'latitude': 33.7,
+                                 'longitude': -95.6}][:params['count']]}
+        return {'current': {'temperature_2m': 30, 'weather_code': 0, 'wind_speed_10m': 5},
+                'daily': {'precipitation_probability_max': [0, 0], 'weather_code': [0, 0],
+                          'temperature_2m_min': [20, 20], 'temperature_2m_max': [31, 31]}}
+
+    monkeypatch.setattr(tools, 'cached_json', fake)
+    r = await tools.agent_weather('Weather in Paris, Texas', None)
+    assert r.ok and r.answer.startswith('Paris, Texas, United States: now 30°C') and asked[0]['name'] == 'Paris'
+    r = await tools.agent_weather('Weather in Paris', None)
+    assert r.answer.startswith('Paris, France: now')
+
+
+@pytest.mark.parametrize('q,expected', [
+    ('Convert 100 Canadian dollars to EUR', (100.0, 'CAD', 'EUR')),  # never USD
+    ('100 Australian dollars in yen', (100.0, 'AUD', 'JPY')),
+    ('Convert 100 Hong Kong dollars to GBP', (100.0, 'HKD', 'GBP')),
+    ('How much is 100 British pounds in US dollars', (100.0, 'GBP', 'USD')),
+    ('Convert 50 USD to Mexican pesos', (50.0, 'USD', 'MXN')),
+])
+def test_a_nationality_names_its_own_currency(q, expected):
+    from jevrouter.agents.tools import ECB_CODES
+    assert parse_currency(q, ECB_CODES) == expected
+
+
+@pytest.mark.parametrize('q,unknown,unsupported', [
+    ('Convert 100 USD to Wakandan dollars', 'Wakandan dollars', 'Wakandan dollars'),
+    ('what is 100 USD in WKD', 'WKD', 'WKD'),
+    ('Convert 20 Fijian dollars to EUR', None, 'Fijian dollars'),  # real, but no rates here: never read as USD
+    ('50 Egyptian pounds to USD', None, 'EGP'),
+    ('Convert 100 USD to INR', None, None), ('What time is it in UTC?', None, None),
+])
+def test_a_currency_that_is_not_real_or_not_covered(q, unknown, unsupported):
+    from jevrouter.agents.tools import ECB_CODES, unknown_currency, unsupported_currency
+    assert unknown_currency(q) == unknown and unsupported_currency(q, ECB_CODES) == unsupported
+
+
+async def test_an_unknown_currency_gets_an_honest_answer_not_a_question(monkeypatch):
+    from jevrouter import gate
+    from jevrouter.agents import tools
+
+    async def fake(http, ttl, url, **params):
+        return {c: c for c in tools.ECB_CODES}
+
+    monkeypatch.setattr(tools, 'cached_json', fake)
+    r = await tools.agent_currency('Convert 100 USD to Wakandan dollars', None)
+    assert not r.ok and r.answer.startswith("I don't recognise Wakandan dollars as a real currency")
+    assert gate.question('currency', 'Convert 100 USD to Wakandan dollars') is None

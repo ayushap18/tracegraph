@@ -2,15 +2,25 @@
 // Scripted stand-in for the Python backend: serves web/dist and speaks the SSE protocol plus the v4 REST API
 // (PLAN-v4 §1), so the UI can be exercised without Jev or an LLM. Usage: node scripts/mock-server.mjs [port]
 // (default 8777; use 8790-8799 while the real server runs on 8777). Pass --quiet to skip the startup demo.
+// TG_DIST=<dir> serves a build from elsewhere (vite build --outDir <dir>), so web/dist is left alone.
+// Accuracy v2 fixtures (docs/PLAN-accuracy-v2.md E): scripts/fixtures/accuracy-v2.json adds a 2741-like run in the new
+// shape, an unsupported run, an assumption run and a routing-only eval; tests/fixtures/run2741.json adds the original
+// run 2741, flagged with the suspects the new checks would give it.
 import http from 'node:http'
 import { readFile } from 'node:fs/promises'
-import { extname, join, normalize, dirname } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { extname, join, normalize, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 
 const PORT = +(process.argv.find(a => /^\d+$/.test(a)) || process.env.PORT || 8777)
 const QUIET = process.argv.includes('--quiet')
-const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
+const HERE = dirname(fileURLToPath(import.meta.url))
+const DIST = resolve(process.env.TG_DIST || join(HERE, '..', 'dist'))
+const readJson = path => { try { return JSON.parse(readFileSync(path, 'utf8')) } catch { return null } }
+const V2 = readJson(join(HERE, 'fixtures', 'accuracy-v2.json'))
+const RUN2741 = readJson(join(HERE, '..', '..', 'tests', 'fixtures', 'run2741.json'))
+const QUERY_CHARS = 4000 // config.MAX_QUERY_CHARS
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.ico': 'image/x-icon' }
 
 const BUILTIN = {
@@ -31,7 +41,7 @@ const FILE_AGENTS = {
   document: 'Questions about the attached documents or files',
   data: 'Statistics, totals, averages or analysis of an attached CSV/JSON table',
 }
-const GUARDS = ['clarify', 'blocked']
+const GUARDS = ['clarify', 'blocked', 'unsupported']
 const SAMPLES = ["What's 18% of 2450?", 'weather in Paris and convert 100 EUR to INR', 'What time is it in New York?',
   'Who was Nikola Tesla?', 'reverse a list in python', 'convert 100 USD to EUR, then tell me the weather in the capital of that currency\'s biggest economy',
   'hello there', 'do the thing']
@@ -53,6 +63,8 @@ const customAgents = new Map() // name -> agent
 const files = new Map() // id -> file info + text
 const compares = new Map() // id -> { compare_id, query, runs: [{engine, qid}] }
 const evals = new Map() // id -> eval detail
+const previews = new Map() // created file id -> FilePreview
+const promoted = new Set() // qids with a drafted eval case
 const running = new Map() // qid -> { cancelled }
 const clients = new Set()
 let nextQid = 1
@@ -75,10 +87,11 @@ function agentsNow(withFiles = false) {
   return out
 }
 const engineInfo = name => ENGINES.find(e => e.name === name) ?? null
-const features = () => ({ files: true, compare: true, evals: true, custom_agents: true, exec: activeEngine === 'codex' })
+const features = () => ({ files: true, compare: true, evals: true, custom_agents: true, exec: activeEngine === 'codex', cassette: true })
 const config = () => ({
   agents: agentsNow(), guards: GUARDS, claude: !!activeEngine, engine: engineInfo(activeEngine), engines: ENGINES,
   state, stats, samples: SAMPLES, prices: PRICES, features: features(),
+  limits: { query_chars: QUERY_CHARS }, fonts: { body: process.env.TRACEGRAPH_BODY_FONT ? 'DejaVu Sans' : null },
 })
 
 function probs(top, p, pool = Object.keys(BUILTIN)) {
@@ -248,8 +261,26 @@ function seed() {
     merged: { answer: 'Nikola Tesla (1856–1943) was a Serbian-American inventor known for AC power systems.', engine: 'single' }, total_ms: 1320, error: null, status: 'done', engine: null, session_id: s2.id, compare_id: null, files: [] })
   customAgents.set('legal', { name: 'legal', description: 'Plain-English explanations of contracts, clauses and legal terms', kind: 'custom', engine_required: true, available: false,
     prompt: 'You explain legal language in plain English. Always add a note that this is not legal advice.', web: false })
+  seedV2()
   const eid = 'ev_' + id(3)
   evals.set(eid, { eval_id: eid, at: t + 3600, engine: null, status: 'done', passed: 10, total: 12, accuracy: 10 / 12, silent_wrong: 1, cases: evalCases().map((c, i) => ({ ...c, pass: i % 5 !== 2, reasons: i % 5 !== 2 ? [] : ['expected agent currency, got knowledge'], agents: [c.expect], answer: 'seeded answer', ms: 800 + i * 20, qid: null })) })
+}
+
+// Fixture runs share one chat, so the Chat page shows them as turns; the original 2741 keeps its own chat.
+function seedV2() {
+  if (RUN2741) {
+    const r = { ...RUN2741.record, suspects: V2?.suspects_2741 ?? [] }
+    records.set(r.qid, r)
+    sessions.set(r.session_id, { id: r.session_id, title: 'Run 2741 as it was', created: r.at, updated: r.at })
+  }
+  if (!V2) return
+  for (const r of V2.runs) {
+    records.set(r.qid, r)
+    if (r.session_id && !sessions.has(r.session_id)) sessions.set(r.session_id, { id: r.session_id, title: 'Accuracy v2 fixtures', created: r.at, updated: r.at })
+  }
+  for (const [fid, pv] of Object.entries(V2.previews ?? {})) previews.set(fid, pv)
+  for (const e of V2.evals ?? []) evals.set(e.eval_id, e)
+  nextQid = Math.max(nextQid, ...records.keys()) + 1
 }
 
 function evalCases() {
@@ -335,6 +366,7 @@ function listAgentInfos() {
   out.push({ name: 'data', description: FILE_AGENTS.data, kind: 'builtin', engine_required: false, available: true })
   out.push({ name: 'clarify', description: 'Asks for detail when a request is unclear', kind: 'guard', engine_required: false, available: true })
   out.push({ name: 'blocked', description: 'Refuses unsafe requests', kind: 'guard', engine_required: false, available: true })
+  out.push({ name: 'unsupported', description: "Says plainly when a request needs something the assistant can't do here", kind: 'guard', engine_required: false, available: true })
   for (const a of customAgents.values()) out.push({ ...a, available: eng })
   return out
 }
@@ -356,8 +388,9 @@ const server = http.createServer(async (req, res) => {
   }
   if (M === 'POST' && p === '/ask') {
     const b = await body(req)
-    const q = typeof b?.query === 'string' ? b.query.trim().slice(0, 500) : ''
+    const q = typeof b?.query === 'string' ? b.query.trim() : ''
     if (!q) return json(res, 400, { error: 'empty query' })
+    if (q.length > QUERY_CHARS) return json(res, 400, { error: `Your message is ${q.length.toLocaleString('en-US')} characters; the limit is ${QUERY_CHARS.toLocaleString('en-US')}.`, limit: QUERY_CHARS })
     if (b.engine) {
       const e = engineInfo(b.engine)
       if (!e && b.engine !== 'none') return json(res, 400, { error: `unknown engine '${b.engine}'` })
@@ -401,13 +434,26 @@ const server = http.createServer(async (req, res) => {
     const before = +(url.searchParams.get('before') || Infinity)
     const q = (url.searchParams.get('q') || '').toLowerCase()
     const src = url.searchParams.get('source'), st = url.searchParams.get('status'), eng = url.searchParams.get('engine')
+    const sus = url.searchParams.get('suspect') === '1'
     const list = [...records.values()].filter(r => r.qid < before && (!q || r.text.toLowerCase().includes(q) || String(r.qid) === q.replace('#', ''))
-      && (!src || r.source === src) && (!st || r.status === st) && (!eng || (r.engine ?? 'default') === eng)).sort((a, b) => b.qid - a.qid).slice(0, limit)
+      && (!src || r.source === src) && (!st || r.status === st) && (!eng || (r.engine ?? 'default') === eng) && (!sus || r.suspects?.length))
+      .sort((a, b) => b.qid - a.qid).slice(0, limit)
     return json(res, 200, { runs: list })
   }
   if ((m = /^\/api\/runs\/(\d+)$/.exec(p)) && M === 'GET') {
     const r = records.get(+m[1])
     return r ? json(res, 200, r) : json(res, 404, { error: 'unknown run' })
+  }
+  if ((m = /^\/api\/runs\/(\d+)\/promote$/.exec(p)) && M === 'POST') {
+    const qid = +m[1]
+    if (!records.has(qid)) return json(res, 404, { error: 'unknown run' })
+    if (promoted.has(qid)) return json(res, 409, { error: `case run-${qid} already exists` })
+    promoted.add(qid)
+    return json(res, 200, { case_id: `run-${qid}`, created: true, path: 'evals/cases.local.jsonl' })
+  }
+  if ((m = /^\/api\/created\/([\w-]+)\/preview$/.exec(p)) && M === 'GET') {
+    const pv = previews.get(m[1])
+    return pv ? json(res, 200, pv) : json(res, 404, { error: 'no preview in the mock' })
   }
   if ((m = /^\/api\/runs\/(\d+)\/cancel$/.exec(p)) && M === 'POST') {
     const qid = +m[1]
@@ -478,7 +524,8 @@ const server = http.createServer(async (req, res) => {
   // ---------- compare ----------
   if (p === '/api/compare' && M === 'POST') {
     const b = (await body(req)) || {}
-    const query = String(b.query ?? '').trim().slice(0, 500)
+    const query = String(b.query ?? '').trim()
+    if (query.length > QUERY_CHARS) return json(res, 400, { error: `Your message is ${query.length.toLocaleString('en-US')} characters; the limit is ${QUERY_CHARS.toLocaleString('en-US')}.`, limit: QUERY_CHARS })
     const names = Array.isArray(b.engines) ? [...new Set(b.engines.map(String))] : []
     if (!query) return json(res, 400, { error: 'empty query' })
     if (names.length < 2 || names.length > 4) return json(res, 400, { error: 'pick 2-4 engines' })
@@ -500,7 +547,9 @@ const server = http.createServer(async (req, res) => {
     const engine = b.engine ? String(b.engine) : activeEngine ?? 'none'
     if (engine !== 'none' && !engineInfo(engine)) return json(res, 400, { error: `unknown engine '${engine}'` })
     const eval_id = 'ev_' + id(3)
-    evals.set(eval_id, { eval_id, at: now(), engine: engine === 'none' ? null : engine, status: 'running', passed: 0, total: evalCases().length, accuracy: 0, silent_wrong: 0, cases: [] })
+    const route = b.mode === 'route'
+    evals.set(eval_id, { eval_id, at: now(), engine: engine === 'none' ? null : engine, status: 'running', passed: 0, total: evalCases().length, accuracy: 0, silent_wrong: 0, cases: [],
+      ...(route ? { mode: 'route', jev: b.jev === 'replay' ? 'replay' : 'live', unjudged: 0, unrecorded: 0 } : {}), ...(b.judge ? { judge: String(b.judge) } : {}) })
     runEval(eval_id, engine)
     return json(res, 200, { eval_id })
   }

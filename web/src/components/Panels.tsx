@@ -1,9 +1,10 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
 import { colorOf, type ControlState } from '../protocol'
 import type { Run, Store, Task } from '../useEventStream'
-import { post } from '../useEventStream'
+import { DEFAULT_LIMITS, post } from '../useEventStream'
 import { clock, costs, latency, money, ms, pct, rows, safeHref } from '../lib'
 import Markdown from './Markdown'
+import { StepPolicy } from './StepPolicy'
 import { Icon, type UiIconName } from '../icons'
 import { Sparkline, useCountUp } from './Viz'
 import { AgentBadge, ChartCard, EngineBadge, Meta, Stat, StatStrip } from './app'
@@ -38,7 +39,9 @@ export function Bars({ probs, max = 5 }: { probs: Record<string, number>; max?: 
 
 const RANGE_CLS = 'h-4 w-28 cursor-pointer accent-primary'
 
-export function AskBox({ samples, state, inputRef }: { samples: string[]; state: ControlState; inputRef: RefObject<HTMLInputElement> }) {
+export function AskBox({ samples, state, inputRef, maxChars = DEFAULT_LIMITS.query_chars }: {
+  samples: string[]; state: ControlState; inputRef: RefObject<HTMLInputElement>; maxChars?: number // the server's query limit
+}) {
   const [q, setQ] = useState('')
   const past = useRef<string[]>([])
   const cursor = useRef(-1)
@@ -48,7 +51,7 @@ export function AskBox({ samples, state, inputRef }: { samples: string[]; state:
   const switchId = useId()
   useEffect(() => setIntervalV(state.interval), [state.interval])
   const ask = async (text: string) => {
-    const v = text.trim().slice(0, 500)
+    const v = text.trim().slice(0, maxChars)
     if (!v) return
     past.current = [v, ...past.current.filter(p => p !== v)].slice(0, 30)
     cursor.current = -1
@@ -83,7 +86,7 @@ export function AskBox({ samples, state, inputRef }: { samples: string[]; state:
       <form className="flex flex-wrap items-center gap-2 sm:gap-3" onSubmit={submit}>
         <div className="relative min-w-0 flex-[1_1_320px]">
           <Icon name="search" size={18} className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground" />
-          <input ref={inputRef} value={q} onChange={e => setQ(e.target.value)} onKeyDown={recall} maxLength={500} autoComplete="off" aria-label="Query"
+          <input ref={inputRef} value={q} onChange={e => setQ(e.target.value)} onKeyDown={recall} maxLength={maxChars} autoComplete="off" aria-label="Query"
             placeholder="Ask anything, or several things: weather in Paris and convert 100 EUR to INR"
             className="h-11 w-full min-w-0 rounded-md border border-input bg-background pr-10 pl-10 text-base text-foreground shadow-xs outline-none transition-[border-color,box-shadow] placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/35 sm:text-[15px]" />
           <span className="pointer-events-none absolute top-1/2 right-3 hidden -translate-y-1/2 sm:block"><Kbd>/</Kbd></span>
@@ -351,7 +354,7 @@ export function Inspector({ id, store, onClose, run }: { id: string; store: Stor
       <h3 className={h3}><Icon name="subtasks" size={15} className="text-muted-foreground" />Subtask <span className="font-mono tabular-nums">{tid}</span></h3>
       <p className="m-0 break-words text-foreground">{hit.task.text}</p>
       {hit.task.routed
-        ? <><div><Chip agent={hit.task.routed.agent} /></div><Bars probs={hit.task.routed.probabilities} max={8} /></>
+        ? <><div><Chip agent={hit.task.routed.agent} /></div><Bars probs={hit.task.routed.probabilities} max={8} /><StepPolicy routed={hit.task.routed} /></>
         : <p className="m-0 text-muted-foreground">{hit.task.error ?? 'routing…'}</p>}
       <div className={WELL}><Markdown text={hit.task.answered?.answer ?? (hit.task.stream || '…')} /></div>
     </> : <p className="m-0 text-muted-foreground">Subtask {tid} is no longer in memory.</p>

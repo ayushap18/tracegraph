@@ -63,7 +63,7 @@ export interface HistoryRecord {
   at: number
   plan: { planner: Planner; subtasks: Subtask[] } | null
   tasks: Array<{ tid: string; text?: string; error?: string } & Partial<RoutedFields> & Partial<AnsweredFields>>
-  merged: { answer: string; engine: MergeEngine } | null
+  merged: MergedRecord | null
   total_ms: number | null
   error?: string | null
   // v4 (additive): absent on records from older servers.
@@ -88,7 +88,10 @@ export interface RunRecord extends HistoryRecord {
   timings?: RunTimings
 }
 
-export interface Features { files: boolean; compare: boolean; evals: boolean; custom_agents: boolean; exec: boolean }
+export interface Features {
+  files: boolean; compare: boolean; evals: boolean; custom_agents: boolean; exec: boolean
+  cassette?: boolean // a Jev cassette is recorded, so a routing-only eval can replay it (older servers leave it out)
+}
 
 export interface HelloEvent {
   type: 'hello'
@@ -160,7 +163,7 @@ export interface CompareDetail { compare_id: string; query: string; runs: RunRec
 
 export type EvalStatus = 'running' | 'done' | 'cancelled' | 'error'
 export interface EvalSummary extends EvalSummaryExtra { eval_id: string; at: number; engine: string | null; status: EvalStatus; passed: number; total: number; accuracy: number; silent_wrong: number; done?: number; examples?: boolean }
-export interface EvalCase extends EvalCaseExtra { id: string; query: string; tags: string[]; pass: boolean; reasons: string[]; agents: string[]; answer: string; ms: number; qid: number | null; expect_agents?: string[] | null; expect_outcome?: string | null }
+export interface EvalCase extends EvalCaseExtra { id: string; query: string; tags: string[]; pass: boolean | null; reasons: string[]; agents: string[]; answer: string; ms: number; qid: number | null; expect_agents?: string[] | null; expect_outcome?: string | null }
 export interface EvalDetail extends EvalSummary { cases: EvalCase[] }
 
 export interface EngineTestResult { ok: boolean; ms: number; text?: string; error?: string }
@@ -176,7 +179,7 @@ export const MIN_CONFIDENCE = 0.45
 export const COLORS: Record<string, string> = {
   math: '#4f7cff', weather: '#1597a9', time: '#8b5cf6', currency: '#1f9d5a', knowledge: '#c98a06',
   code: '#e0582a', chat: '#cf4b97', research: '#0e9594', clarify: '#80858f', blocked: '#d93a30',
-  document: '#6371f0', data: '#2a8f82', report: '#a86d24', run: '#c2410c',
+  document: '#6371f0', data: '#2a8f82', report: '#a86d24', run: '#c2410c', unsupported: '#9a8558',
 }
 const FALLBACK = ['#7a6cf0', '#3d9970', '#c0587e', '#b8860b', '#5a8fa8']
 export function colorOf(agent: string | undefined): string {
@@ -280,3 +283,134 @@ export type FilePreview =
   | { kind: 'markdown'; text: string }
   | { kind: 'outline'; items: Array<{ level: number; text: string }>; pages?: number | null; slides?: number | null }
   | { kind: 'sheets'; sheets: Array<{ name: string; columns: string[]; rows: Array<Array<string | number | null>>; total_rows: number }> }
+
+// ---------- accuracy v2 (docs/PLAN-accuracy-v2.md) ----------
+export type GuardOutcome = 'clarify' | 'blocked' | 'unsupported'
+export type PolicyRule =
+  | 'blocked' | 'blocked_dependency' | 'unsupported' | 'cant_do' | 'forced' | 'create_demote' | 'file_intent'
+  | 'keyless_contract' | 'confirmed' | 'attached_file' | 'refers_back_file' | 'advice' | 'time_sensitive'
+  | 'clarify_policy' | 'missing_slot' | 'mode_research' | 'ambiguous_term' | 'frame'
+/** One rule the decision policy applied to a step, in order. `agent` is the agent after this rule. */
+export interface PolicyStep { rule: PolicyRule; agent: string; why: string }
+/** Jev's extra scores from the same route call (0..1). */
+export interface RouteSignals { live?: number; action?: number; personal?: number; described?: number }
+/** What a finished step is about, carried to the next turn (keyless follow-ups). */
+export interface TurnFrame { agent: string; slots: Record<string, string | number> }
+
+export interface RoutedFields {
+  trace?: PolicyStep[]
+  signals?: RouteSignals
+  bound?: boolean          // this step took the run's @agent (only one step per run)
+  assumption?: string      // stated before the answer instead of asking a clarifying question
+  frame_used?: TurnFrame   // the previous turn's frame this step was completed from
+}
+export interface AnsweredFields {
+  caveats?: string[]       // what this step could not do, in plain words
+  frame?: TurnFrame
+}
+export interface MergedEvent { caveats?: string[]; primary_file?: string | null } // primary_file: CreatedFile id
+/** The stored merged answer. Phase 0 also changes the one existing line in HistoryRecord from
+ *  `merged: { answer: string; engine: MergeEngine } | null` to `merged: MergedRecord | null`
+ *  (the only edit above this block: TS can't redeclare a merged property with a different type). */
+export interface MergedRecord { answer: string; engine: MergeEngine; caveats?: string[]; primary_file?: string | null }
+
+export type SuspectCode =
+  | 'pages_short' | 'forced_non_file' | 'reply_template_body' | 'extra_format' | 'unfulfilled' | 'dup_clarify'
+  | 'agent_label_leak' | 'dead_end' | 'cut_off'
+export interface SuspectCheck { code: SuspectCode; note: string }
+export interface RunRecord { suspects?: SuspectCheck[]; dry_run?: 'route' | null }
+export interface PromoteRunResponse { case_id: string; created: boolean; path: string }
+
+export interface Limits { query_chars: number }
+export interface FontsInfo { body: string | null } // TRACEGRAPH_BODY_FONT family, or null
+export interface HelloEvent { limits?: Limits; fonts?: FontsInfo }
+
+// Created files: the request's brief and how the file met it.
+export type ThemeName = 'clean' | 'dark' | 'warm' | 'mono'
+export type DiagramKind = 'timeline' | 'tree' | 'flow'
+export interface FileBrief {
+  format: FileFormat | null
+  pages: [number, number] | null
+  slides: [number, number] | null
+  theme: ThemeName | null
+  font: string | null
+  images: boolean
+  image_source: 'web' | null
+  diagrams: boolean
+  diagram_kinds: DiagramKind[]
+  words: number | null
+  capped: boolean
+}
+export interface ImageCredit {
+  asset: string; title: string; author: string; license: string; license_url: string | null
+  source_url: string; caption: string
+}
+export interface FilePhase { phase: 'outline' | 'sections' | 'topup' | 'assets' | 'render'; calls: number; llm_in: number; llm_out: number; ms: number }
+export interface CreatedFile {
+  brief?: FileBrief | null
+  role?: 'primary' | 'working'
+  theme?: ThemeName
+  font_used?: string | null
+  diagrams?: number
+  images?: number
+  credits?: ImageCredit[]
+  phases?: FilePhase[]
+}
+
+// Evals
+export interface ChatOpts { mode?: ChatMode; agent?: string; style?: AnswerStyle }
+export type EvalMode = 'full' | 'route'
+export type JevSource = 'live' | 'replay' | 'record'
+export type FailStage =
+  | 'plan_text' | 'plan_shape' | 'jev_pick' | 'clarity' | 'confidence' | 'gate_missing_detail' | 'gate_cant'
+  | 'gate_wants_file' | 'unsupported' | 'forced' | 'frame' | 'agent_answer' | 'file' | 'judge' | 'budget'
+export type ReasonCodeName =
+  | 'wrong_agent' | 'extra_agent' | 'missing_agent' | 'forbidden_agent' | 'wrong_outcome' | 'plan_shape' | 'wrong_deps'
+  | 'answer_regex' | 'forbidden_regex' | 'file' | 'judge' | 'budget' | 'unjudged' | 'run_status' | 'unrecorded'
+export interface ReasonCode { code: ReasonCodeName; step?: number; want?: string; got?: string; stage?: FailStage }
+export interface StepRoute {
+  tid: string; agent: string; pick: string; confidence: number; clear: number
+  expected?: string | null; stage?: FailStage | null; trace?: PolicyStep[]
+}
+export interface FileScore {
+  format: FileFormat; pages: number | null; slides: number | null; words: number; headings: number
+  images: number; diagrams: number; fonts: string[]; grayscale: boolean | null
+  source: CreatedFile['source']; files: number
+}
+export interface AgentPR {
+  agent: string; tp: number; fp: number; fn: number
+  precision: number | null; recall: number | null; f1: number | null; support: number
+}
+export interface CalibrationBin { lo: number; hi: number; n: number; accuracy: number | null; mean: number }
+export interface Calibration { signal: 'confidence' | 'clear'; bins: CalibrationBin[]; ece: number | null }
+export interface TagGate {
+  tag: string; min: number; passed: number; total: number; rate: number; lower: number
+  baseline: number | null; ok: boolean
+}
+export interface EvalCaseExtra {
+  route_pass?: boolean
+  answer_pass?: boolean | null
+  unjudged?: boolean
+  codes?: ReasonCode[]
+  steps?: StepRoute[]
+  file?: FileScore | null
+  tokens?: RunTokens
+  chat?: ChatOpts
+}
+export interface EvalSummaryExtra {
+  mode?: EvalMode
+  jev?: JevSource
+  suite_sha?: string
+  route_pass?: TagScore
+  answer_pass?: TagScore
+  by_tag_route?: Record<string, TagScore>
+  unjudged?: number
+  unrecorded?: number
+  confusion?: Record<string, Record<string, number>> // expected -> got -> count
+  per_agent?: AgentPR[]
+  stages?: Partial<Record<FailStage, number>>
+  calibration?: Calibration[]
+  gates?: TagGate[]
+  tokens?: RunTokens
+}
+export interface RunEvalBody { mode?: EvalMode; jev?: JevSource }

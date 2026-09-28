@@ -12,9 +12,9 @@ import { TopActions } from '../components/Shell'
 import { cn } from '@/lib/utils'
 import { BotHead, Turn, UserMessage, answerOf } from '../components/chat/Turn'
 import { AnswerGroup, RetryMenu } from '../components/chat/AnswerGroup'
-import { CompareMenu, ModeSwitch, PresetMenu, PresetRow, StyleMenu } from '../components/chat/ChatOptions'
+import { CompareMenu, LengthCounter, ModeSwitch, PresetMenu, PresetRow, StyleMenu, tooLong } from '../components/chat/ChatOptions'
 import { AgentChip, MentionList, useMention } from '../components/chat/AgentMention'
-import { CreatedFiles, filesOfTasks } from '../components/chat/CreatedFiles'
+import { CreatedFiles, RunFiles, filesOfTasks } from '../components/chat/CreatedFiles'
 import {
   PRESETS, engineLabel, extrasOf, pickableEngines, readCompare, readOpts, researchReason, takeAgent, writeCompare, writeOpts,
   type ChatOpts, type Preset, type RunExtras,
@@ -194,6 +194,8 @@ export default function Chat() {
   const running = !!lastItem && lastItem.some(r => !r.done)
   const uploading = files.some(f => f.status === 'uploading')
   const filesEnabled = store.features.files || !store.ready
+  const limit = store.limits.query_chars
+  const over = tooLong(text, limit)
 
   useLayoutEffect(() => {
     const el = ta.current
@@ -275,8 +277,9 @@ export default function Chat() {
   const sendLock = useRef(false)
   const send = useCallback(async (raw: string, sid: string | null) => {
     if (sendLock.current || files.some(f => f.status === 'uploading')) return
-    const q0 = raw.trim().slice(0, 500)
+    const q0 = raw.trim()
     if (!q0) return
+    if (tooLong(q0, limit)) { toast.error(`Your message is ${q0.length.toLocaleString()} characters; the limit is ${limit.toLocaleString()}.`); return }
     const typed = takeAgent(q0, offered.map(a => a.name))
     const agent = agentPick ?? typed.agent
     const q = typed.agent ? typed.text : q0
@@ -320,7 +323,7 @@ export default function Chat() {
       sendLock.current = false
       setSending(null)
     }
-  }, [files, loadSessions, toast, offered, agentPick, comparing, comparePicks, mode, opts, addExtras])
+  }, [files, loadSessions, toast, offered, agentPick, comparing, comparePicks, mode, opts, addExtras, limit])
 
   // "Try another engine": a new run for the same question, added to its answer group (not chosen until picked).
   const [retrying, setRetrying] = useState<number | null>(null)
@@ -374,7 +377,7 @@ export default function Chat() {
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      if (!running && !uploading && !sending) void send(text, sessionId)
+      if (!running && !uploading && !sending && !over) void send(text, sessionId)
     }
   }
   const stop = async () => {
@@ -532,7 +535,7 @@ export default function Chat() {
                       <Turn run={run} selected={traceOpen && selected?.qid === run.qid} fileName={fileName} extras={extras[run.qid]}
                         engineLabel={run.engine ? engineLabel(store.engines, run.engine) : undefined} actions={actionsFor(run)}
                         onShowTrace={() => showTrace(run.qid)} />
-                      {made.length > 0 && <CreatedFiles files={made} className="pl-[18px]" />}
+                      {made.length > 0 && <RunFiles files={made} primary={run.merged?.primary_file} className="pl-[18px]" />}
                     </div>
                   )
                 }
@@ -575,7 +578,7 @@ export default function Chat() {
                 <PresetMenu onPick={applyPreset} />
               </ModeSwitch>
             </div>
-            <form onSubmit={e => { e.preventDefault(); if (!running && !uploading && !sending) void send(text, sessionId) }}
+            <form onSubmit={e => { e.preventDefault(); if (!running && !uploading && !sending && !over) void send(text, sessionId) }}
               className={cn('relative rounded-xl border bg-surface p-2 shadow-sm transition-colors focus-within:border-edge',
                 dragging ? 'border-dashed border-primary focus-within:border-primary' : 'border-border')}>
               <MentionList m={mention} />
@@ -609,22 +612,25 @@ export default function Chat() {
                 <input ref={fileInput} type="file" accept={ACCEPT} multiple hidden onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }} />
                 <IconButton icon="paperclip" label={filesEnabled ? 'Attach files (.txt .md .csv .json .pdf, up to 10 MB)' : 'File attachments are not enabled on this server'}
                   disabled={!filesEnabled} onClick={() => fileInput.current?.click()} className="mb-0.5 shrink-0" />
-                <textarea ref={ta} value={text} rows={1} maxLength={500} onChange={e => { setText(e.target.value); mention.sync() }} onKeyDown={onComposerKey}
+                <textarea ref={ta} value={text} rows={1} aria-invalid={over || undefined} aria-describedby="chat-length" onChange={e => { setText(e.target.value); mention.sync() }} onKeyDown={onComposerKey}
                   onSelect={mention.sync} onBlur={mention.close} {...mention.inputProps}
                   placeholder={agentPick ? `Ask @${agentPick}…` : sessionId && turns.length ? 'Ask a follow-up…' : 'Ask anything, or type @ to pick an agent…'} aria-label="Message"
                   className="max-h-[220px] min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-2 font-sans text-[15px] leading-normal text-foreground outline-none placeholder:text-muted-foreground focus-visible:outline-none" />
                 {running ? (
                   <Button variant="secondary" icon="stop" onClick={() => void stop()} className="mb-0.5 shrink-0" aria-label="Stop the running answer">Stop</Button>
                 ) : (
-                  <IconButton type="submit" variant="primary" icon="send" label="Send" disabled={!text.trim() || uploading || !!sending} className="mb-0.5 shrink-0" />
+                  <IconButton type="submit" variant="primary" icon="send" label={over ? `Send (the message is over ${limit.toLocaleString()} characters)` : 'Send'}
+                    disabled={!text.trim() || uploading || !!sending || over} className="mb-0.5 shrink-0" />
                 )}
               </div>
             </form>
             <p className="mt-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1 text-xs text-muted-foreground">
               <span className="inline-flex items-center gap-1 max-sm:hidden"><Kbd>Enter</Kbd> send, <Kbd>Shift</Kbd>+<Kbd>Enter</Kbd> new line, <Kbd>@</Kbd> agent</span>
-              <span className="min-w-0 truncate">
-                {comparing ? `Comparing: ${comparePicks.map(n => engineLabel(store.engines, n)).join(', ')}` : store.engine ? `Engine: ${store.engine.label}` : 'Keyless mode'}
-                {text.length > 400 && <span className="tabular-nums max-sm:hidden"> · {text.length}/500</span>}
+              <span className="flex min-w-0 items-center gap-3 sm:ml-auto">
+                <span className="min-w-0 truncate">
+                  {comparing ? `Comparing: ${comparePicks.map(n => engineLabel(store.engines, n)).join(', ')}` : store.engine ? `Engine: ${store.engine.label}` : 'Keyless mode'}
+                </span>
+                <LengthCounter id="chat-length" length={text.trim().length} limit={limit} />
               </span>
             </p>
           </div>

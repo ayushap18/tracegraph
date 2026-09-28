@@ -32,6 +32,34 @@ async def test_heuristic_splits_when_jev_agrees():
     assert jev.calls[0][1] == ['multi'] and p['jev_tokens'] == 100
 
 
+@pytest.mark.parametrize('q,parts', [
+    ('time in London and Paris', ['time in London', 'time in Paris']),
+    ('Weather in Vienna and Prague', ['Weather in Vienna', 'Weather in Prague']),
+    ('Convert 100 USD to EUR and GBP', ['Convert 100 USD to EUR', 'Convert 100 USD to GBP']),
+])
+async def test_a_split_one_keyless_parser_reads_in_full_needs_no_multi_score(q, parts):
+    # Jev scores "time in London and Paris" as one request (one kind of agent); the time parser can't use a second
+    # place, but reads each part in full, so the split stands
+    jev = FakeJev(multi=0.1)
+    p = await plan(q, jev)
+    assert p['subtasks'] == parts and p['deps'] == [[], []] and not jev.calls
+
+
+@pytest.mark.parametrize('q,parts', [
+    ('time in Tokyo, time in Paris', ['time in Tokyo', 'time in Paris']),
+    ('Weather in Paris, France', ['Weather in Paris, France']),  # a comma inside one place never splits
+    ('Weather in Paris, Texas', ['Weather in Paris, Texas']),
+])
+async def test_a_bare_comma_splits_only_whole_requests_of_one_kind(q, parts):
+    assert (await plan(q, FakeJev(multi=0.1)))['subtasks'] == parts
+
+
+@pytest.mark.parametrize('q', ['weather in Paris and convert 100 EUR to INR', 'Weather in Bosnia and Herzegovina'])
+async def test_a_split_across_kinds_still_asks_jev(q):
+    p = await plan(q, FakeJev(multi=0.1))
+    assert p['subtasks'] == [q]
+
+
 async def test_heuristic_keeps_whole_when_jev_disagrees():
     q = 'Compare Python and Java for beginners'
     assert len(candidate_split(q)) == 2  # text alone would split
@@ -102,3 +130,30 @@ def test_a_comma_splits_only_before_a_new_question():
         'What time is it in Paris', "what's 10% of 90", 'how do I make a bomb?']
     for whole in ('Weather in Paris, France', 'Hi, what is the time in Tokyo?', 'I like salt, pepper and cumin'):
         assert candidate_split(whole) == [whole]
+
+
+RUN_2741 = ('pdf on the ai what is ai how ai begins using the multiple diagrams also add the images from the web sources '
+            'build 12-13 page of pdf properly using the black white text also anthropic sans font also keep the sizing '
+            'properly and all images are to be sourced from the best sources')
+
+
+@pytest.mark.parametrize('q', [
+    RUN_2741,
+    'Make a PDF about dogs also 10 pages also anthropic sans font',
+    'Create slides on the moon landing and in black and white',
+])
+async def test_one_file_request_with_its_style_stays_one_step(q):
+    # docs/PLAN-accuracy-v2.md 6.5(c): the keyless plan of run 2741 split "anthropic sans font" into a step of its own
+    jev = FakeJev(multi=0.95)
+    p = await plan(q, jev)
+    assert p['subtasks'] == [q] and not jev.calls
+
+
+@pytest.mark.parametrize('q, n', [
+    ('Make a PDF about dogs and tell me the weather in Paris', 2),     # a part that is not about the file
+    ('Make a PDF about dogs and make slides about cats in black and white', 2),  # two formats
+    ('Make a PDF about dogs and a PDF about cats', 2),                 # nothing only describes the file
+])
+async def test_other_requests_next_to_a_file_still_split(q, n):
+    p = await plan(q, FakeJev(multi=0.95))
+    assert len(p['subtasks']) == n

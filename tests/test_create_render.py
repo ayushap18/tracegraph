@@ -591,3 +591,99 @@ def test_huge_integers_do_not_crash_any_format(fmt):
         {'type': 'chart', 'kind': 'bar', 'title': 'Chart', 'labels': ['x', 'y'], 'series': [{'name': 's', 'values': [10 ** 400, 5]}]}]}]}
     data = render(spec, fmt)
     assert verify(spec, fmt, data)[0].ok
+
+
+# ---------- body fonts (docs/PLAN-accuracy-v2.md C6) ----------
+
+VERA = str(__import__('pathlib').Path(__import__('reportlab').__file__).parent / 'fonts' / 'Vera.ttf')
+
+
+def pdf_fonts(data: bytes) -> list[str]:
+    from jevrouter.create.rules import pdf_scan
+    return pdf_scan(data)['fonts']
+
+
+def text_fonts(data: bytes) -> dict[str, str]:
+    """Each string the first page draws -> the BaseFont it is drawn in."""
+    from pypdf import PdfReader
+    page = PdfReader(io.BytesIO(data)).pages[0]
+    names = {k: str(v.get_object()['/BaseFont']).lstrip('/') for k, v in page['/Resources']['/Font'].items()}
+    out, font = {}, None
+    for m in re.finditer(rb'/([\w+]+) [\d.]+ Tf|\(((?:[^()\\]|\\.)*)\) Tj', page.get_contents().get_data()):
+        if m.group(1):
+            font = names.get('/' + m.group(1).decode())
+        else:
+            out[m.group(2).decode('latin-1')] = font
+    return out
+
+
+@pytest.fixture
+def no_system_fonts(monkeypatch):
+    from jevrouter.create import fonts
+    monkeypatch.setattr(fonts, 'system_index', lambda: {})
+    monkeypatch.delenv('TRACEGRAPH_BODY_FONT', raising=False)
+
+
+def test_body_font_from_the_environment_is_embedded(monkeypatch, no_system_fonts):
+    from jevrouter.create import fonts
+    from jevrouter.create.brief import parse_brief
+    monkeypatch.setenv('TRACEGRAPH_BODY_FONT', VERA)
+    spec = {'title': 'Plain Latin text', 'font': 'bitstream vera sans',
+            'sections': [{'heading': 'Body', 'blocks': [{'type': 'paragraph', 'text': 'Latin body text here.'}]}]}
+    choice = fonts.resolve('bitstream vera sans', 'pdf')
+    assert choice.embedded and choice.used == 'Bitstream Vera Sans' and choice.note is None
+    assert fonts.env_family() == 'Bitstream Vera Sans'
+    data = render(spec, 'pdf')
+    assert any(f.endswith('+BitstreamVeraSans-Roman') for f in pdf_fonts(data))
+    drawn = text_fonts(data)  # the Latin body, title, heading and page footer all use it
+    assert {drawn[t] for t in ('Latin body text here.', 'Plain Latin text', 'Body', 'Page 1')} == \
+        {next(f for f in pdf_fonts(data) if 'BitstreamVera' in f)}
+    res = {r.id: r for r in verify(spec, 'pdf', data, brief=parse_brief('use Bitstream Vera Sans font'))}
+    assert res['V7'].ok and res['V7'].note == 'Bitstream Vera Sans embedded' and res['V2'].ok
+    # with no font asked for, the environment's font is the body font too
+    assert any('BitstreamVera' in f for f in pdf_fonts(render({**spec, 'font': None}, 'pdf')))
+
+
+def test_a_font_that_is_not_here_is_named_honestly(no_system_fonts):
+    from jevrouter.create import fonts
+    from jevrouter.create.brief import parse_brief
+    choice = fonts.resolve('anthropic sans', 'pdf')
+    assert (choice.used, choice.embedded) == ('Helvetica', False)
+    assert choice.note == ("You asked for Anthropic Sans; it isn't available to embed here, so the PDF uses Helvetica. "
+                           "To use a font you're licensed for, set TRACEGRAPH_BODY_FONT to its .ttf file and convert "
+                           "the file again (0 tokens).")
+    assert fonts.resolve('anthropic sans', 'pdf', theme='warm').used == 'Times-Roman'
+    assert fonts.resolve('helvetica', 'pdf').note is None
+    spec = {'title': 'T', 'font': 'anthropic sans', 'sections': [{'heading': 'A', 'blocks': [
+        {'type': 'paragraph', 'text': 'x'}]}]}
+    data = render(spec, 'pdf')
+    assert set(pdf_fonts(data)) <= {'Helvetica', 'Helvetica-Bold', 'Helvetica-Oblique'}
+    assert {r.id: r for r in verify(spec, 'pdf', data, brief=parse_brief('in anthropic sans font'))}['V7'].ok
+    docx = render(spec, 'docx')
+    assert b'Anthropic Sans' in zipfile.ZipFile(io.BytesIO(docx)).read('word/styles.xml')
+    pptx = zipfile.ZipFile(io.BytesIO(render(spec, 'pptx')))
+    assert any(b'typeface="Anthropic Sans"' in pptx.read(n) for n in pptx.namelist() if n.startswith('ppt/slides/'))
+
+
+def test_a_standard_font_the_theme_does_not_use_is_drawn_as_asked(no_system_fonts):
+    spec = {'title': 'Warm', 'theme': 'warm', 'font': 'helvetica', 'sections': [{'heading': 'A', 'blocks': [
+        {'type': 'paragraph', 'text': 'Body text in the asked font.'}]}]}
+    data = render(spec, 'pdf')
+    assert text_fonts(data)['Body text in the asked font.'] == 'Helvetica'
+    assert not any(f.startswith('Times') for f in pdf_fonts(data))
+
+
+def test_a_family_whose_name_ends_like_a_style_is_found(tmp_path, monkeypatch):
+    from jevrouter.create import fonts
+    for name in ('Times New Roman', 'Times New Roman Bold', 'Sanskrit', 'Arial Bold'):
+        (tmp_path / f'{name}.ttf').write_bytes(b'')
+    monkeypatch.setattr(fonts, 'FONT_DIRS', (str(tmp_path),))
+    fonts.system_index.cache_clear()
+    try:
+        index = fonts.system_index()
+        assert index['timesnewroman']['regular'].endswith('Times New Roman.ttf')
+        assert index['timesnewroman']['bold'].endswith('Times New Roman Bold.ttf')
+        assert index['sanskrit']['regular'].endswith('Sanskrit.ttf')
+        assert 'arialbold' not in index
+    finally:
+        fonts.system_index.cache_clear()

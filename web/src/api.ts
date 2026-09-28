@@ -3,7 +3,7 @@ import type {
   AgentInfo, AskBody, AskResponse, CompareDetail, CompareResponse, ControlBody, ControlResponse, EngineTestResult,
   EvalDetail, EvalSummary, FileInfo, NewAgent, RunRecord, SessionDetail, SessionSummary,
   AgentExamples, EngineHealth, EvalCompare, Label, NewLabel, ReviewItem, ShakyReason, Verdict,
-  RunEvalBody, TimingsSummary,
+  RunEvalBody, TimingsSummary, PromoteRunResponse,
   CreatedFile, FileFormat, FilePreview, RuleInfo,
 } from './protocol'
 
@@ -54,15 +54,23 @@ export const cancelRun = (qid: number) => post<{ ok: true }>(`/api/runs/${qid}/c
 export const clearSandbox = (id: string) =>
   fetch(`/api/sandbox/${encodeURIComponent(id)}`, { method: 'DELETE', keepalive: true }).then(() => undefined, () => undefined)
 
-export interface ListRunsParams { limit?: number; before?: number; q?: string; source?: string; status?: string; engine?: string }
+export interface ListRunsParams {
+  limit?: number; before?: number; q?: string; source?: string; status?: string; engine?: string
+  suspect?: boolean // only runs whose checks flagged them as likely wrong (suspect=1)
+}
 /** GET /api/runs → newest first. `before` is a qid cursor for "Load more". */
 export function listRuns(p: ListRunsParams = {}) {
   const qs = new URLSearchParams()
-  for (const [k, v] of Object.entries(p)) if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+  for (const [k, v] of Object.entries(p)) {
+    if (v === undefined || v === null || v === '' || v === false) continue
+    qs.set(k, v === true ? '1' : String(v))
+  }
   const s = qs.toString()
   return get<{ runs: RunRecord[] }>('/api/runs' + (s ? '?' + s : ''))
 }
 export const getRun = (qid: number) => get<RunRecord>(`/api/runs/${qid}`)
+/** Draft an eval case from a saved run (evals/cases.local.jsonl). 409 when the case exists, 404 for an unknown run. */
+export const promoteRun = (qid: number) => post<PromoteRunResponse>(`/api/runs/${qid}/promote`)
 /** Several answers: make this run the chosen answer of its group (only chosen runs feed follow-ups). */
 export const chooseRun = (qid: number) => post<{ ok: true; group_id: string; chosen: number }>(`/api/runs/${qid}/choose`)
 /** Per-stage p50/p90 over recent saved runs, optionally for one engine ('none' = keyless). */
@@ -107,7 +115,9 @@ export const getCompare = (id: string) => get<CompareDetail>(`/api/compare/${enc
 /** examples: run with route examples on (true) or off (false); omitted = the server's current setting. */
 export const runEval = (engine?: string, examples?: boolean) =>
   post<{ eval_id: string }>('/api/evals/run', { ...(engine ? { engine } : {}), ...(examples === undefined ? {} : { examples }) })
-/** Full options: split (dev/holdout/all), tag filter, repeat count for flakiness, judge engine for open-ended cases. */
+/** Full options: split (dev/holdout/all), tag filter, repeat count for flakiness, judge engine for open-ended cases
+ *  ('auto' picks a healthy engine other than the one under test), mode ('route' plans and routes only, no agents run)
+ *  and where Jev's answers come from ('replay' reads the recorded cassette). */
 export const runEvalWith = (body: RunEvalBody) => post<{ eval_id: string }>('/api/evals/run', body)
 export const compareEvals = (a: string, b: string) => get<EvalCompare>(`/api/evals/compare?a=${enc(a)}&b=${enc(b)}`)
 export const cancelEval = (id: string) => post<{ ok: true }>(`/api/evals/${enc(id)}/cancel`)

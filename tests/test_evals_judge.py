@@ -86,12 +86,16 @@ async def test_judge_scores_rubric_cases_in_an_eval():
     assert 'User: weather in Paris' in low.calls[0]['prompt'] and 'Paris: now 18°C' in low.calls[0]['prompt']
 
 
-async def test_an_unjudged_case_passes_but_a_failed_judge_fails_it_visibly():
+async def test_an_unjudged_case_is_left_out_and_a_failed_judge_fails_it_visibly():
     r = router()
-    case = {'id': 'j', 'query': 'weather in Paris', 'tags': [], 'judge': 'r', 'must_match': 'Paris'}
-    s = await evals.run_eval(r, 'e', None, 'none', [case])  # no judge chosen: the rubric is simply not scored
-    assert s['cases'][0]['pass'] and s['cases'][0]['judge'] is None and s['judge'] is None and s['judge_mean'] is None
-    assert s['judge_errors'] == []
+    case = {'id': 'j', 'query': 'weather in Paris', 'tags': ['t'], 'judge': 'r', 'must_match': 'Paris'}
+    s = await evals.run_eval(r, 'e', None, 'none', [case, {**case, 'id': 'k', 'must_match': 'Tokyo'}])
+    j, k = s['cases']  # no judge chosen: the rubric is not scored, so j neither passes nor fails
+    assert j['pass'] is None and j['unjudged'] and j['judge'] is None and j['codes'] == [{'code': 'unjudged', 'stage': 'judge'}]
+    assert j['answer_pass'] is None and k['pass'] is False and k['unjudged']  # a regex miss still fails it
+    assert (s['passed'], s['total'], s['unjudged'], s['accuracy']) == (0, 1, 1, 0.0) and s['by_tag'] == {'t': {'passed': 0, 'total': 1}}
+    assert s['judge'] is None and s['judge_mean'] is None and s['judge_errors'] == [] and s['silent_wrong'] == 1
+    assert 'unjudged 1' in evals.headline('none', s)
     s = await evals.run_eval(r, 'e2', None, 'none', [case], judge=JudgeEngine('not json at all'))
     c = s['cases'][0]
     assert not c['pass'] and c['judge'] is None and c['judge_error'] == 'the judge gave no correct score'

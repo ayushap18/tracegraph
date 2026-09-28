@@ -15,6 +15,15 @@ FIELDS = {
     'done': {'type', 'qid', 'total_ms', 'stats', 'status', 'tokens', 'timings'},  # v4 adds status and tokens, speed plan timings
     'error': {'type', 'qid', 'tid', 'message'},
 }
+# Fields an event may carry on top of FIELDS, only when they have something to say (older clients ignore them):
+# docs/PLAN-accuracy-v2.md adds the policy trace, Jev's signals, the @agent binding, a stated assumption and the frame
+# a keyless follow-up was completed from to `routed`; caveats and the frame a follow-up can build on to `answered`; and
+# what the run couldn't do and its primary file to `merged`.
+OPTIONAL = {
+    'routed': {'input', 'cached', 'forced', 'bound', 'trace', 'signals', 'assumption', 'frame_used'},
+    'answered': {'created_files', 'checks', 'caveats', 'frame'},
+    'merged': {'caveats', 'primary_file'},
+}
 STATS = {'queries', 'subtasks', 'errors', 'jev_input_tokens', 'claude_input_tokens', 'claude_output_tokens', 'by_agent'}
 
 
@@ -52,7 +61,9 @@ async def run(router, query):
 
 def check_fields(events):
     for e in events:
-        assert set(e) == FIELDS[e['type']], e
+        assert FIELDS[e['type']] <= set(e) <= FIELDS[e['type']] | OPTIONAL.get(e['type'], set()), e
+        if e['type'] == 'routed':  # the decision policy's trace ends on the step's agent (docs/PLAN-accuracy-v2.md A2)
+            assert e['trace'] and e['trace'][-1]['agent'] == e['agent'], e
 
 
 async def test_two_subtask_event_sequence():
@@ -85,7 +96,8 @@ async def test_two_subtask_event_sequence():
 
     merged = events[-2]
     assert merged['engine'] == 'concat'
-    assert merged['answer'] == '**weather**: Paris: now 18°C, clear sky\n\n**currency**: 100.00 EUR = 9,000.00 INR'
+    assert 'Paris: now 18°C, clear sky' in merged['answer'] and '100.00 EUR = 9,000.00 INR' in merged['answer']
+    assert merged['answer'].index('Paris') < merged['answer'].index('9,000.00 INR')
     done = events[-1]
     assert set(done['stats']) == STATS
     assert done['stats']['queries'] == 1 and done['stats']['subtasks'] == 2
@@ -95,7 +107,9 @@ async def test_two_subtask_event_sequence():
     rec = router.history[-1]
     assert set(rec) == {'qid', 'text', 'source', 'at', 'plan', 'tasks', 'merged', 'total_ms', 'error',
                         'status', 'engine', 'session_id', 'compare_id', 'files', 'tokens',  # v4 fields
-                        'mode', 'style', 'agent', 'group_id', 'chosen', 'timings'}  # speed plan and chat variety
+                        'mode', 'style', 'agent', 'group_id', 'chosen', 'timings',  # speed plan and chat variety
+                        'suspects'}  # accuracy v2 (D6)
+    assert rec['suspects'] == []
     assert rec['status'] == 'done' and done['status'] == 'done' and done['tokens'] == rec['tokens'] == {'jev_in': 300, 'llm_in': 0, 'llm_out': 0}
     assert rec['error'] is None and not router.inflight
     assert rec['plan']['planner'] == 'heuristic' and len(rec['tasks']) == 2
@@ -166,8 +180,10 @@ async def test_hello_history_is_qid_ordered_and_includes_inflight():
 def test_clarify_reason_names_the_condition_that_fired():
     from types import SimpleNamespace as NS
     from jevrouter.jev import decide
-    assert decide(NS(choice='chat', confidence=1.0), 0.0, 0.12) == ('clarify', 'unclear (12%)')
+    assert decide(NS(choice='knowledge', confidence=1.0), 0.0, 0.12) == ('clarify', 'unclear (12%)')
     assert decide(NS(choice='chat', confidence=0.2), 0.0, 0.9) == ('clarify', 'low confidence (20%)')
+    # small talk needs no more detail: a chat pick is exempt from the clarity veto (docs/PLAN-accuracy-v2.md A6)
+    assert decide(NS(choice='chat', confidence=1.0), 0.0, 0.12) == ('chat', 'chat at 100%')
 
 
 async def test_pipeline_with_llm_engine():

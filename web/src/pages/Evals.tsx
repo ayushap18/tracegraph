@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { cancelEval, errorText as errText, getEval, listEvals, runEvalWith } from '../api'
-import { Badge, Button, Card, EmptyState, ProgressBar, Skeleton, StatusBadge, navigate, useToast } from '../ui'
+import { Badge, Button, Card, EmptyState, ProgressBar, Skeleton, StatusBadge, navigate, useHashPath, useToast } from '../ui'
 import { useStore } from '../store'
 import { EngineIcon, Icon } from '../icons'
-import type { EvalCase, EvalDetail, EvalSummary } from '../protocol'
+import type { EvalCase, EvalDetail, EvalSummary, TagScore } from '../protocol'
 import { AgentBadge, BackLink, EngineBadge, PageBody, Stat, StatStrip } from '../components/app'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -15,6 +15,10 @@ import EvalCompare from './evals/EvalCompare'
 import { CELL, CHIP, HEAD, LINK_ICON, accTone, compareHref, parseCompare, pctOf, when } from './evals/shared'
 import { DEFAULT_OPTS, RunOptions, type RunOpts } from './evals/RunOptions'
 import { CaseExtras, CaseFlags, CaseTime, TagScorecard, extrasLabel, hasExtras, tagScores } from './evals/CaseExtras'
+import Confusion, { casePairs } from './evals/Confusion'
+import AgentScores from './evals/AgentScores'
+import Calibration from './evals/Calibration'
+import { CaseCodes, FileScoreLine, GatesTable, StageBars } from './evals/RouteReport'
 
 // Eval suite: run the cases in evals/cases.jsonl through the real pipeline, watch progress live over SSE,
 // and compare accuracy across runs. `#/evals/:id` drills into one run's cases; `#/evals/<a>...<b>` compares two.
@@ -82,8 +86,10 @@ function EvalList() {
     try {
       const res = await runEvalWith({
         ...(engine ? { engine } : {}), ...(examples === 'current' ? {} : { examples: examples === 'on' }),
-        split: opts.split, repeat: opts.repeat, judge: opts.judge === 'none' ? null : opts.judge,
+        split: opts.split, repeat: opts.repeat, judge: opts.judge === 'none' || opts.mode === 'route' ? null : opts.judge,
         ...(opts.tags.length ? { tags: opts.tags } : {}),
+        // Sent only when not the default, so servers from before routing-only runs see the same body as before.
+        ...(opts.mode !== 'full' ? { mode: opts.mode } : {}), ...(opts.mode === 'route' && opts.jev !== 'live' ? { jev: opts.jev } : {}),
       })
       setProgress(p => p?.eval_id === res.eval_id ? p : { eval_id: res.eval_id, done: 0, total: 0, passed: 0 })
       void load()
@@ -111,6 +117,10 @@ function EvalList() {
   const best = trend.length ? Math.max(...trend) : null
   // Tags seen in earlier runs feed the tag filter; the server has no separate list of them.
   const knownTags = useMemo(() => [...new Set((evals ?? []).flatMap(e => [...Object.keys(e.by_tag ?? {}), ...(e.tags ?? [])]))].sort(), [evals])
+  // The server says whether a Jev cassette is recorded; for an older server, a stored replay or record run shows it.
+  const replayReady = useMemo(() => !!store.features.cassette || (evals ?? []).some(e => e.jev === 'replay' || e.jev === 'record'),
+    [store.features.cassette, evals])
+  useEffect(() => { if (!replayReady && opts.jev === 'replay') setOpts(o => ({ ...o, jev: 'live' })) }, [replayReady, opts.jev])
 
   return (
     <PageBody>
@@ -146,7 +156,7 @@ function EvalList() {
               : <Button icon="play" onClick={() => void start()} disabled={starting}>{starting ? 'Starting…' : 'Run eval'}</Button>}
           </div>
         </div>
-        <RunOptions opts={opts} onChange={setOpts} knownTags={knownTags} engines={store.engines} engine={engine} disabled={!!progress} />
+        <RunOptions opts={opts} onChange={setOpts} knownTags={knownTags} engines={store.engines} engine={engine} disabled={!!progress} replayReady={replayReady} />
         {progress && (
           <div aria-live="polite" className="flex flex-col gap-2 rounded-md bg-subtle px-3 py-2.5">
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[13px]">
@@ -274,6 +284,8 @@ const latencyPair = (e: EvalSummary) => (e.p50_ms == null && e.p95_ms == null ? 
 function RunBadges({ e }: { e: EvalSummary }) {
   return (
     <>
+      {e.mode === 'route' && <Badge tone="info" icon="route" title={`Planned and routed only; Jev ${e.jev === 'replay' ? 'replayed from the cassette' : e.jev ?? 'live'}`}>routing{e.jev === 'replay' ? ', replay' : ''}</Badge>}
+      {!!e.unjudged && <Badge title="Rubric cases that ran without a judge; left out of the score">{e.unjudged} unjudged</Badge>}
       {e.split && e.split !== 'all' && <Badge tone={e.split === 'holdout' ? 'info' : 'neutral'} title={`Split: ${e.split}`}>{e.split}</Badge>}
       {e.repeat != null && e.repeat > 1 && <Badge title={`Each case ran ${e.repeat} times`}>x{e.repeat}</Badge>}
       {e.judge && <Badge title={`Open-ended answers judged by ${e.judge}`}>judge {e.judge}</Badge>}
@@ -302,12 +314,18 @@ function AccBar({ v }: { v: number }) {
   )
 }
 
-type PassFilter = 'all' | 'pass' | 'fail' | 'flaky'
+type PassFilter = 'all' | 'pass' | 'fail' | 'flaky' | 'unjudged'
+const scoreText = (s: TagScore | undefined) => (s && s.total ? `${s.passed}/${s.total}` : 'n/a')
+const scoreRate = (s: TagScore | undefined) => (s && s.total ? s.passed / s.total : null)
 const ANY_TAG = '__any'
 const USER_TAG = 'user'
 
 function EvalDetailPage({ id }: { id: string }) {
   const { subscribe } = useStore()
+  // ?exp=<agent>&got=<agent>: the confusion matrix cell the case list is filtered to.
+  const { query } = useHashPath()
+  const pair: [string, string] | null = query.get('exp') && query.get('got') ? [query.get('exp')!, query.get('got')!] : null
+  const clearPair = () => location.replace(`#/evals/${id}`)
   const [data, setData] = useState<EvalDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<PassFilter>('all')
@@ -334,8 +352,13 @@ function EvalDetailPage({ id }: { id: string }) {
   // "user" (cases promoted from your labels) leads the tag chips.
   const tags = useMemo(() => [...new Set(cases.flatMap(c => c.tags ?? []))].sort((x, y) => Number(y === USER_TAG) - Number(x === USER_TAG) || x.localeCompare(y)), [cases])
   const tagCount = (t: string) => cases.filter(c => c.tags?.includes(t)).length
-  const shown = cases.filter(c => (filter === 'all' || (filter === 'flaky' ? !!c.flaky : (filter === 'pass') === c.pass)) && (!tag || c.tags?.includes(tag)))
-  const failCount = cases.filter(c => !c.pass).length
+  const passOk = (c: EvalCase) => filter === 'all' || (filter === 'flaky' ? !!c.flaky : filter === 'unjudged' ? c.pass == null : c.pass === (filter === 'pass'))
+  const pairOk = (c: EvalCase) => !pair || casePairs(c).some(([e, g]) => e === pair[0] && g === pair[1])
+  const shown = cases.filter(c => passOk(c) && pairOk(c) && (!tag || c.tags?.includes(tag)))
+  // A rubric case run without a judge has pass null: it is neither passed nor failed.
+  const failCount = cases.filter(c => c.pass === false).length
+  const unjudgedCount = cases.filter(c => c.pass == null).length
+  const passCount = cases.filter(c => c.pass === true).length
   const flakyCount = cases.filter(c => c.flaky).length
   const scores = useMemo(() => tagScores(data?.by_tag, cases), [data?.by_tag, cases])
   const overBudget = cases.filter(c => c.over_budget).length
@@ -363,10 +386,10 @@ function EvalDetailPage({ id }: { id: string }) {
   const toggles = (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border px-4 py-3 sm:px-5">
       <ToggleGroup type="single" value={filter} onValueChange={v => { if (v) setFilter(v as PassFilter) }} spacing={1} aria-label="Filter by result" className="flex-wrap">
-        {(['all', 'pass', 'fail', ...(flakyCount ? ['flaky'] : [])] as PassFilter[]).map(f => (
+        {(['all', 'pass', 'fail', ...(flakyCount ? ['flaky'] : []), ...(unjudgedCount ? ['unjudged'] : [])] as PassFilter[]).map(f => (
           <ToggleGroupItem key={f} value={f} className={CHIP}>
-            {f === 'all' ? 'All' : f === 'pass' ? 'Passed' : f === 'fail' ? 'Failed' : 'Flaky'}
-            <span className="tabular-nums text-muted-foreground">{f === 'all' ? cases.length : f === 'pass' ? cases.length - failCount : f === 'fail' ? failCount : flakyCount}</span>
+            {f === 'all' ? 'All' : f === 'pass' ? 'Passed' : f === 'fail' ? 'Failed' : f === 'flaky' ? 'Flaky' : 'Unjudged'}
+            <span className="tabular-nums text-muted-foreground">{f === 'all' ? cases.length : f === 'pass' ? passCount : f === 'fail' ? failCount : f === 'flaky' ? flakyCount : unjudgedCount}</span>
           </ToggleGroupItem>
         ))}
       </ToggleGroup>
@@ -379,6 +402,15 @@ function EvalDetailPage({ id }: { id: string }) {
             </ToggleGroupItem>
           ))}
         </ToggleGroup>
+      )}
+      {pair && (
+        <span className="inline-flex h-8 items-center gap-1.5 rounded-md border border-primary/40 bg-primary/10 pl-2.5 pr-1 text-[13px] text-foreground">
+          expected <span className="font-medium">{pair[0]}</span>, got <span className="font-medium">{pair[1]}</span>
+          <button type="button" data-slot="button" onClick={clearPair} aria-label="Show every agent pair"
+            className="grid size-6 place-items-center rounded-sm text-muted-foreground hover:bg-subtle hover:text-foreground focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/35">
+            <Icon name="close" size={12} />
+          </button>
+        </span>
       )}
     </div>
   )
@@ -411,8 +443,54 @@ function EvalDetailPage({ id }: { id: string }) {
               note={data.tags?.length ? data.tags.map(t => '#' + t).join(' ') : 'every tag'} />
           </StatStrip>
         )}
+        {(data.mode != null || data.route_pass != null || data.answer_pass != null || data.unjudged != null) && (
+          <StatStrip cols={4}>
+            <Stat label="Route pass" size="md" value={scoreText(data.route_pass)} tone={scoreRate(data.route_pass) == null ? undefined : accTone(scoreRate(data.route_pass)!)}
+              note={scoreRate(data.route_pass) == null ? 'agent, outcome and plan checks' : `${pctOf(scoreRate(data.route_pass))} on agents, outcomes and plans`} />
+            <Stat label="Answer pass" size="md" value={scoreText(data.answer_pass)} tone={scoreRate(data.answer_pass) == null ? undefined : accTone(scoreRate(data.answer_pass)!)}
+              note={data.mode === 'route' ? 'routing only: no answers' : scoreRate(data.answer_pass) == null ? 'answer, file and judge checks' : `${pctOf(scoreRate(data.answer_pass))} on answers, files and judge`} />
+            <Stat label="Unjudged" size="md" value={data.unjudged ?? unjudgedCount} tone={(data.unjudged ?? unjudgedCount) ? 'warn' : undefined}
+              note="rubric cases with no judge, left out of the score" />
+            <Stat label="Mode" size="md" value={data.mode === 'route' ? 'Routing only' : 'Full'}
+              tone={data.unrecorded ? 'warn' : undefined}
+              note={data.mode === 'route' ? `Jev ${data.jev ?? 'live'}${data.unrecorded ? `, ${data.unrecorded} not recorded` : ''}` : 'every agent ran'} />
+          </StatStrip>
+        )}
         {data.status === 'running' && <ProgressBar value={data.total ? cases.length / data.total : 0} label="Eval progress" />}
       </section>
+
+      {!!data.gates?.length && (
+        <Card title="Gates" icon="shield" subtitle="A tag passes when its Wilson lower bound reaches the minimum, or it stays within the allowed drop from the baseline.">
+          <GatesTable gates={data.gates} />
+        </Card>
+      )}
+
+      {(data.confusion && Object.keys(data.confusion).length > 0) && (
+        <Card title="Routing confusion" icon="heatmap" subtitle="Expected agent by row, the agent the step got by column.">
+          <Confusion id={id} confusion={data.confusion} active={pair} />
+        </Card>
+      )}
+
+      {(!!data.per_agent?.length || (data.stages && Object.keys(data.stages).length > 0)) && (
+        <div className="grid min-w-0 gap-4 lg:grid-cols-2">
+          {!!data.per_agent?.length && (
+            <Card title="Per agent" icon="agents" subtitle="Precision, recall and F1 over routed steps, weakest first.">
+              <AgentScores rows={data.per_agent} />
+            </Card>
+          )}
+          {data.stages && Object.keys(data.stages).length > 0 && (
+            <Card title="Where failures happen" icon="timeline" subtitle="The first rule or stage that moved a step away from its expected agent.">
+              <StageBars stages={data.stages} />
+            </Card>
+          )}
+        </div>
+      )}
+
+      {!!data.calibration?.length && (
+        <Card title="Calibration" icon="confidence" subtitle="How often steps were right at each score. Lower ECE is better.">
+          <Calibration items={data.calibration} />
+        </Card>
+      )}
 
       {Object.keys(scores).length > 0 && (
         <Card title="By tag" icon="tag" subtitle="Weakest first. Click a tag to show only its cases.">
@@ -475,7 +553,8 @@ function CompareWith({ id }: { id: string }) {
 
 // Pieces shared by the table row (md+) and the stacked card (phones).
 
-function ResultBadge({ pass }: { pass: boolean }) {
+function ResultBadge({ pass }: { pass: boolean | null }) {
+  if (pass == null) return <Badge tone="neutral" icon="info" title="Has a rubric but ran without a judge, so it is not scored">unjudged</Badge>
   return <Badge tone={pass ? 'ok' : 'bad'} icon={pass ? 'success' : 'error'}>{pass ? 'pass' : 'fail'}</Badge>
 }
 
@@ -519,10 +598,16 @@ function CaseAgents({ c }: { c: EvalCase }) {
   )
 }
 
-function CaseReasons({ reasons }: { reasons: string[] | undefined }) {
-  return reasons?.length
-    ? <ul className="m-0 flex list-disc flex-col gap-0.5 pl-4 text-[13px] leading-snug text-foreground marker:text-muted-foreground">{reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
-    : <None />
+function CaseReasons({ c }: { c: EvalCase }) {
+  const reasons = c.reasons
+  if (!reasons?.length && !c.codes?.length && !c.file) return <None />
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <CaseCodes codes={c.codes} />
+      {!!reasons?.length && <ul className="m-0 flex list-disc flex-col gap-0.5 pl-4 text-[13px] leading-snug text-foreground marker:text-muted-foreground">{reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>}
+      <FileScoreLine file={c.file} />
+    </div>
+  )
 }
 
 function CaseAnswer({ answer, open, onToggle }: { answer: string; open: boolean; onToggle: () => void }) {
@@ -544,7 +629,7 @@ function RunLink({ qid }: { qid: number | null }) {
 }
 
 function CaseRow({ c, open, onToggle }: { c: EvalCase; open: boolean; onToggle: () => void }) {
-  const tone = c.pass ? 'hover:bg-subtle/60' : 'bg-destructive/[0.04] hover:bg-destructive/[0.07]'
+  const tone = c.pass !== false ? 'hover:bg-subtle/60' : 'bg-destructive/[0.04] hover:bg-destructive/[0.07]'
   return (
     <>
       <TableRow className={cn('border-border align-top', tone, open && hasExtras(c) && 'border-b-0')}>
@@ -557,13 +642,13 @@ function CaseRow({ c, open, onToggle }: { c: EvalCase; open: boolean; onToggle: 
           </div>
         </TableCell>
         <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseAgents c={c} /></TableCell>
-        <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseReasons reasons={c.reasons} /></TableCell>
+        <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseReasons c={c} /></TableCell>
         <TableCell className={cn(CELL, 'align-top whitespace-normal')}><CaseAnswer answer={c.answer ?? ''} open={open} onToggle={onToggle} /></TableCell>
         <TableCell className={cn(CELL, 'align-top text-right text-[13px] tabular-nums text-muted-foreground')}><CaseTime c={c} /></TableCell>
         <TableCell className={cn(CELL, 'align-top text-right')}><RunLink qid={c.qid} /></TableCell>
       </TableRow>
       {open && hasExtras(c) && (
-        <TableRow className={cn('border-border hover:bg-transparent', !c.pass && 'bg-destructive/[0.04] hover:bg-destructive/[0.04]')}>
+        <TableRow className={cn('border-border hover:bg-transparent', c.pass === false && 'bg-destructive/[0.04] hover:bg-destructive/[0.04]')}>
           <TableCell colSpan={7} className={cn(CELL, 'whitespace-normal pt-0 pb-4')}>
             <div className="rounded-md border border-border bg-surface p-3 sm:p-4"><CaseExtras c={c} /></div>
           </TableCell>
@@ -575,7 +660,7 @@ function CaseRow({ c, open, onToggle }: { c: EvalCase; open: boolean; onToggle: 
 
 function CaseCard({ c, open, onToggle }: { c: EvalCase; open: boolean; onToggle: () => void }) {
   return (
-    <li className={cn('flex flex-col gap-3 px-4 py-3', !c.pass && 'bg-destructive/[0.04]')}>
+    <li className={cn('flex flex-col gap-3 px-4 py-3', c.pass === false && 'bg-destructive/[0.04]')}>
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 flex-col gap-1">
           <span className="text-sm font-medium leading-snug text-foreground [overflow-wrap:anywhere]">{c.query}</span>
@@ -586,12 +671,12 @@ function CaseCard({ c, open, onToggle }: { c: EvalCase; open: boolean; onToggle:
           <RunLink qid={c.qid} />
         </span>
       </div>
-      {(c.flaky || c.over_budget || c.judge || c.judge_error || c.split === 'holdout') && <span className="flex flex-wrap gap-1"><CaseFlags c={c} /></span>}
+      {(c.flaky || c.over_budget || c.judge || c.judge_error || c.split === 'holdout' || (c.pass === false && (c.route_pass === false || c.answer_pass === false))) && <span className="flex flex-wrap gap-1"><CaseFlags c={c} /></span>}
       <dl className="m-0 grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-[13px]">
         <dt className="text-xs text-muted-foreground">Agents</dt>
         <dd className="m-0 min-w-0"><CaseAgents c={c} /></dd>
         <dt className="text-xs text-muted-foreground">Reasons</dt>
-        <dd className="m-0 min-w-0"><CaseReasons reasons={c.reasons} /></dd>
+        <dd className="m-0 min-w-0"><CaseReasons c={c} /></dd>
         <dt className="text-xs text-muted-foreground">Answer</dt>
         <dd className="m-0 min-w-0"><CaseAnswer answer={c.answer ?? ''} open={open} onToggle={onToggle} /></dd>
         <dt className="text-xs text-muted-foreground">Time</dt>

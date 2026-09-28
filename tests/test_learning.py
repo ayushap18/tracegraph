@@ -235,9 +235,9 @@ async def test_compare_evals(client):
     store.save_eval(ev('old', [case('x', True)]))  # scored before jev_tokens existed
     body = await json_of(await client.get('/api/evals/compare?a=ea&b=eb'))
     assert body['a'] == {'eval_id': 'ea', 'engine': 'none', 'examples': False, 'accuracy': 0.6667, 'passed': 2, 'total': 3,
-                         'silent_wrong': 0, 'mean_jev_tokens': 500.0}
+                         'silent_wrong': 0, 'mean_jev_tokens': 500.0, 'suite_sha': None, 'mode': 'full'}
     assert body['b'] == {'eval_id': 'eb', 'engine': 'codex', 'examples': True, 'accuracy': 0.6667, 'passed': 2, 'total': 3,
-                         'silent_wrong': 0, 'mean_jev_tokens': 800.0}
+                         'silent_wrong': 0, 'mean_jev_tokens': 800.0, 'suite_sha': None, 'mode': 'full'}
     assert body['cases'] == [{'id': 'x', 'query': 'q x', 'a_pass': False, 'b_pass': True},
                              {'id': 'y', 'query': 'q y', 'a_pass': True, 'b_pass': True},
                              {'id': 'z', 'query': 'q z', 'a_pass': True, 'b_pass': None},

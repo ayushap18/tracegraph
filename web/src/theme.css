@@ -26,7 +26,7 @@
   --agent-math:#4f7cff; --agent-weather:#1597a9; --agent-time:#8b5cf6; --agent-currency:#1f9d5a;
   --agent-knowledge:#c98a06; --agent-code:#e0582a; --agent-chat:#cf4b97; --agent-research:#0e9594;
   --agent-clarify:#80858f; --agent-blocked:#d93a30; --agent-document:#6371f0; --agent-data:#2a8f82;
-  --agent-report:#a86d24; --agent-run:#c2410c;
+  --agent-report:#a86d24; --agent-run:#c2410c; --agent-unsupported:#9a8558;
   --agent-fallback-0:#7a6cf0; --agent-fallback-1:#3d9970; --agent-fallback-2:#c0587e;
   --agent-fallback-3:#b8860b; --agent-fallback-4:#5a8fa8;
 
@@ -58,7 +58,7 @@
   --agent-math:#7b9dff; --agent-weather:#3cc6d8; --agent-time:#ad8aff; --agent-currency:#42c882;
   --agent-knowledge:#f0b53a; --agent-code:#ff8457; --agent-chat:#ec79b8; --agent-research:#34c7c5;
   --agent-clarify:#a1a6b2; --agent-blocked:#ff6b61; --agent-document:#909bff; --agent-data:#4fc0b0;
-  --agent-report:#d39a4f; --agent-run:#f06a33;
+  --agent-report:#d39a4f; --agent-run:#f06a33; --agent-unsupported:#bfae84;
   --agent-fallback-0:#9c90ff; --agent-fallback-1:#5fbf92; --agent-fallback-2:#e07ea1;
   --agent-fallback-3:#dcac3a; --agent-fallback-4:#7fb0c8;
 }

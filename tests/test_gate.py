@@ -545,12 +545,13 @@ async def test_keyless_step_that_points_back_never_parses_the_earlier_step():
     events = await run(router, 'Convert 100 USD to INR and then convert that amount to EUR')
     plan_ev = next(e for e in events if e['type'] == 'plan')
     assert [s['depends_on'] for s in plan_ev['subtasks']] == [[], ['1.1']]
-    assert seen['currency'] == ['Convert 100 USD to INR']  # the second step never reached the parser with context
-    a = answered(events)['1.2']
-    assert a['agent'] == 'clarify' and 'from?' in a['answer']
+    # the second step never reached the parser with the context: it names the amount the first step worked out
+    # (docs/PLAN-accuracy-v2.md A7), never the context's "100 USD"
+    assert seen['currency'] == ['Convert 100 USD to INR', 'convert 8400.00 INR to EUR']
+    assert routed(events)['1.2']['input'] == 'convert 8400.00 INR to EUR'
     # a step that parses on its own is given its own text: the context's "100 USD" would become its amount and source
     await run(router, 'Convert 100 USD to INR and then convert that amount from EUR to GBP')
-    assert seen['currency'][1:] == ['Convert 100 USD to INR', 'convert that amount from EUR to GBP']
+    assert seen['currency'][2:] == ['Convert 100 USD to INR', 'convert that amount from EUR to GBP']
 
 
 class UnsafeWhen(FakeJev):
@@ -626,3 +627,14 @@ async def test_create_without_a_file_asked_for_goes_to_the_runner_up():
     assert r['agent'] == 'chat' and "can't" in r['reason']
     r = routed(await run(router, 'Make slides about solid-state batteries'))['3.1']
     assert r['agent'] == 'create'
+
+
+@pytest.mark.parametrize('text, places', [
+    ("What's the weather in Trinidad and Tobago?", ['Trinidad and Tobago']),   # s03-trinidad: one country
+    ('time in Bosnia and Herzegovina', ['Bosnia and Herzegovina']),
+    ('weather in Paris and Trinidad and Tobago', ['Paris', 'Trinidad and Tobago']),
+    ('Weather in Vienna and Prague', ['Vienna', 'Prague']),
+])
+def test_a_country_named_with_and_is_one_place(text, places):
+    assert gate.places_in(text) == places
+    assert bool(gate.parse_for('weather', text).unused) is (len(places) > 1)

@@ -1,0 +1,26 @@
+{
+ "single": {
+  "keyless": {"p95_ms": 2000},
+  "cli": {"p95_ms": 30000, "llm_out": 3000},
+  "api": {"p95_ms": 20000, "llm_out": 3000}
+ },
+ "multi_turn": {
+  "keyless": {"p95_ms": 4000},
+  "cli": {"p95_ms": 60000, "llm_out": 6000},
+  "api": {"p95_ms": 40000, "llm_out": 6000}
+ },
+ "file": {
+  "keyless": {"p95_ms": 3000},
+  "cli": {"p95_ms": 60000, "llm_out": 6000},
+  "api": {"p95_ms": 40000, "llm_out": 6000}
+ },
+ "judge": {
+  "keyless": {"p95_ms": 2000},
+  "cli": {"p95_ms": 45000, "llm_out": 4000},
+  "api": {"p95_ms": 30000, "llm_out": 4000}
+ },
+ "create-long": {
+  "cli": {"p95_ms": 240000, "file_tokens": 25000},
+  "api": {"p95_ms": 180000, "file_tokens": 25000}
+ }
+}

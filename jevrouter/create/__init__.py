@@ -3,7 +3,8 @@ PDF, DOCX, PPTX, XLSX or Markdown, then checked against docs/RULES-files.md. See
 from .preview import preview
 from .render import render
 from .rules import RULES, RuleResult, SpecError, verify
-from .spec import DOCSPEC_SCHEMA, FORMATS, detect_format, file_name, from_markdown, from_table, normalize
+from .spec import (DIAGRAMS, DOCSPEC_SCHEMA, FORMATS, detect_format, file_name, from_markdown, from_table, normalize,
+                   strip_internal)
 
 MIME = {
     'pdf': 'application/pdf',
@@ -13,5 +14,5 @@ MIME = {
     'md': 'text/markdown; charset=utf-8',
 }
 
-__all__ = ['DOCSPEC_SCHEMA', 'FORMATS', 'MIME', 'RULES', 'RuleResult', 'SpecError', 'detect_format', 'file_name',
-           'from_markdown', 'from_table', 'normalize', 'preview', 'render', 'verify']
+__all__ = ['DIAGRAMS', 'DOCSPEC_SCHEMA', 'FORMATS', 'MIME', 'RULES', 'RuleResult', 'SpecError', 'detect_format',
+           'file_name', 'from_markdown', 'from_table', 'normalize', 'preview', 'render', 'strip_internal', 'verify']
