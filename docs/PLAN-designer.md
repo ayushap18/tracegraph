@@ -169,6 +169,36 @@ auto-fixes (≤ 3 passes):
 The results are a **design report** (score 0–100 plus notes) stored with the file, shown on the file card, and
 checked by new ruleset entries (D1–D8 in `docs/RULES-files.md`). Thumbnails are served to the UI.
 
+### 3.8 The design agent loop (`studio/agent.py`)
+
+Studio is an agent, not a single pass. For each file it runs a bounded loop:
+
+```
+direct ─► assemble assets ─► lay out ─► render thumbnails ─► QA checks ─┬─► pass: paint the file
+   ▲                                                                   │
+   └──── revise (code fixes, then targeted re-direction) ◄── critique ◄─┘  (≤ 3 rounds, token budget)
+```
+
+1. **Code fixes first** (0 tokens): every QA failure maps to a deterministic fix (shrink, rebalance, compact variant,
+   split, re-crop, swap layout for the next best in the same family).
+2. **Design critic** (optional, vision): when the active engine can read images (Claude Code; the Anthropic API) and
+   the mode is Deep or the user pressed **Polish**, the slide thumbnails (downscaled, contact sheet of 6 per image) go
+   to the model with the design report. It returns structured edits only, never free text:
+   `{"page": 4, "action": "change_layout|emphasize|reduce_text|swap_image|recolor_accent|enlarge_title|add_icon", "arg": …}`.
+   Edits are validated against the layout library and tokens, applied by code, and re-checked by QA. Budget: ≤ 2
+   critic rounds, ≤ 6K tokens in total; engines without vision skip it with a note.
+3. **Free-form hatch** for at most 2 pages per file (the cover, a poster panel, an infographic): the director may mark
+   a page `freeform`. The model then returns a small **shape program**, a JSON list of primitives (`rect`, `ellipse`,
+   `line`, `path`, `text`, `image`, `icon`, `diagram`) in grid units with token colour names, never raw coordinates in
+   points or raw colours. Studio validates it (bounds, overlap, contrast, minimum sizes, only workspace assets), fits the
+   text with real metrics, and paints it natively in PPTX and PDF. If it fails QA twice, the page falls back to the
+   closest library layout. Budget ≤ 2K tokens out per freeform page.
+4. **Stop rules:** QA pass, the round limit, or the token budget, whichever comes first. The design report says which,
+   and lists anything still not ideal.
+
+Every step (direction, assets, layout decisions, QA results, critic edits, fallbacks) is recorded in the workspace
+and summarised in the design report, so a student can see why the file looks the way it does.
+
 ## 4. Student-first features
 
 - **Templates** by task: class presentation, lab report, research poster (A3/A2), revision notes, infographic,
@@ -188,6 +218,7 @@ checked by new ruleset entries (D1–D8 in `docs/RULES-files.md`). Thumbnails ar
 | `POST /api/created/{id}/restyle` `{preset?, fonts?, dark?, template?, layouts?}` | re-layout and re-render from the stored content, 0 tokens |
 | `GET /api/created/{id}/thumbs` | page/slide thumbnails (PNG) from the workspace |
 | `GET /api/created/{id}/design` | the design report and the DesignPlan summary |
+| `POST /api/created/{id}/polish` `{engine?, confirm_cost?}` | one critic round on the stored design (vision engines only), edits applied by code; goes through the cost estimate |
 
 `CreatedFile` gains `design: {preset, fonts, score, notes}`. The file card gets a **Design** panel: thumbnail strip,
 preset picker, font picker with live previews, per-slide layout override, "print version", and the design report.
@@ -196,8 +227,9 @@ preset picker, font picker with live previews, per-slide layout override, "print
 
 1. **Foundations:** `fontTools` dependency, font manager with open-licence downloads and cache, workspace, DesignSystem
    + presets, design.md v2, prompt-word detection (fixes "dark design" today).
-2. **Layout engine + PPTX painter:** the 16 slide layouts, fitting, art director (keyless rules first, then the model
-   call), thumbnails + QA. Presentations are where design matters most for students.
+2. **Layout engine + PPTX painter + agent loop:** the 16 slide layouts, fitting, art director (keyless rules first,
+   then the model call), thumbnails + QA, code fixes, the vision critic and the freeform hatch. Presentations are where
+   design matters most for students.
 3. **PDF page templates + painter**, with embedded subset fonts.
 4. **Icons, illustrations, new diagram kinds, smart crop.**
 5. **DOCX/Markdown styling from the same DesignSystem; XLSX chart palette.**
@@ -213,7 +245,10 @@ preset picker, font picker with live previews, per-slide layout override, "print
   ≥ 2 diagrams, thumbnails shown; restyle to `minimal` costs 0 tokens.
 - Fonts: requesting Poppins downloads it once (OFL recorded) and embeds it in the PDF; "Anthropic Sans" gets an open
   alternative and an honest note; offline, everything falls back to installed fonts without failing.
-- Token budget: art direction ≤ 2K tokens out; restyle and re-layout 0 tokens.
+- Token budget: art direction ≤ 2K tokens out; restyle and re-layout 0 tokens; critic ≤ 6K per file; freeform ≤ 2K
+  out per page.
+- Agent loop: a deliberately cramped deck is fixed by code within 3 rounds; a critic edit that breaks QA is rolled
+  back; a freeform page that fails QA twice falls back to a library layout; engines without vision skip the critic.
 
 ## 8. Risks and limits
 
