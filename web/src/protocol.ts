@@ -543,3 +543,135 @@ export interface RunRecord {
   checkpoints?: CheckpointInfo[]
 }
 export interface DoneEvent { cost?: RunCost | null; file_failed?: boolean; checkpoints?: CheckpointInfo[] }
+
+// ---------- Studio, the design stage (docs/PLAN-designer.md section 9) ----------
+export type DesignPresetId =
+  | 'bold-dark' | 'editorial' | 'minimal' | 'vibrant' | 'pastel' | 'academic' | 'mono' | 'high-legibility'
+export type DesignTemplateId =
+  | 'class-presentation' | 'lab-report' | 'research-poster' | 'revision-notes' | 'infographic' | 'book-report'
+  | 'science-fair'
+export type SlideLayoutId =
+  | 'cover-hero' | 'cover-type' | 'section-divider' | 'title-bullets' | 'image-left-text' | 'image-right-text'
+  | 'full-bleed-image-caption' | 'big-number' | 'stat-cards' | 'quote' | 'two-column' | 'comparison'
+  | 'full-width-diagram' | 'chart-focus' | 'timeline-strip' | 'closing'
+export type PageTemplateId =
+  | 'cover' | 'chapter-opener' | 'text-side-figure' | 'two-column-text' | 'full-figure' | 'pull-quote' | 'key-points'
+  | 'references'
+export type DesignLayoutId = SlideLayoutId | PageTemplateId | 'freeform'
+export type DesignCheckId = 'D1' | 'D2' | 'D3' | 'D4' | 'D5' | 'D6' | 'D7' | 'D8'
+export type DesignStop = 'pass' | 'rounds' | 'budget' | 'deadline' | 'error' | 'keyless'
+export type FontRole = 'display' | 'heading' | 'body' | 'caption' | 'mono'
+export type OpenFontLicence = 'OFL-1.1' | 'Apache-2.0' | 'UFL-1.0'
+
+/** GET /api/design/presets: one preset. Colours are RRGGBB without '#'. */
+export interface DesignPresetInfo {
+  id: DesignPresetId
+  name: string                 // 'Bold dark'
+  description: string          // who it is for
+  dark: boolean
+  families: Partial<Record<FontRole, string>>
+  colors: { bg: string; text: string; accent: string; accent2: string }
+  thumb: string                // '/api/design/presets/<id>/thumb' (PNG)
+}
+export interface DesignTemplateInfo {
+  id: DesignTemplateId
+  name: string
+  description: string
+  format: 'pptx' | 'pdf' | 'docx'
+  preset: DesignPresetId
+  paper: 'a4' | 'letter' | 'a3' | 'a2' | null
+  sequence: DesignLayoutId[]
+  tone: string[]
+}
+/** GET /api/fonts/search: an open-licensed family (never anything else). */
+export interface FontInfo {
+  family: string
+  category: 'sans' | 'serif' | 'mono' | 'display' | 'handwriting'
+  licence: OpenFontLicence
+  source: 'cache' | 'system' | 'fontsource' | 'google-fonts' | 'user' | 'builtin'
+  styles: string[]             // 'regular' | 'bold' | 'italic' | 'bolditalic'
+  installed: boolean           // already in the font cache or on this machine
+  preview: string              // '/api/fonts/preview?family=<family>' (PNG)
+}
+/** A font a designed file uses. */
+export interface DesignFontUse {
+  family: string
+  role: FontRole
+  source: string
+  licence: string              // an OpenFontLicence, 'system', 'user' or 'builtin'
+  embedded: boolean            // PDF subsets only
+  fallback?: string | null     // what PowerPoint/Word shows when the family isn't installed
+  requested?: string | null
+  note?: string | null         // e.g. "Anthropic Sans isn't openly licensed, so this uses Inter, the closest open match"
+}
+/** One visual QA finding (D1-D8). page is 0-based; shown to people as page + 1. */
+export interface DesignQaResult {
+  id: DesignCheckId
+  ok: boolean
+  note: string
+  page: number | null
+  box: string | null
+  value: number | null
+  threshold: number | null
+  fixed: boolean
+}
+export interface DesignCheckSummary { id: DesignCheckId; name: string; ok: boolean; failures: number; note: string }
+/** GET /api/created/{id}/design: the design report stored with the file. */
+export interface DesignReport {
+  version: 1
+  score: number                // 0..100
+  preset: DesignPresetId | 'custom'
+  format: FileFormat
+  fonts: DesignFontUse[]
+  rounds: number
+  stop: DesignStop
+  tokens: Record<string, number> // direct_in, direct_out, critic_in, critic_out, freeform_in, freeform_out
+  checks: DesignCheckSummary[]   // all eight, D1..D8
+  results: DesignQaResult[]      // at most 50 failures
+  layouts: Partial<Record<DesignLayoutId, number>>
+  fallbacks: Array<{ page: number; from: string; to: string; why: string }>
+  critic: { ran: boolean; why: string; edits?: Array<{ page: number; action: string; arg: string | number | null }>; rolled_back?: Array<{ page: number; action: string; arg: string | number | null }> }
+  thumbs: number
+  phases?: DesignPhase[]
+  notes: string[]
+}
+/** Studio's own phase breakdown (CreatedFile.phases keeps FilePhase; Studio's totals are in its 'render' entry). */
+export interface DesignPhase {
+  phase: 'direct' | 'assets' | 'layout' | 'thumbs' | 'qa' | 'fix' | 'critic' | 'freeform' | 'paint'
+  calls: number; llm_in: number; llm_out: number; ms: number
+}
+/** The DesignPlan summary served next to the report (the full plan stays on the server). */
+export interface DesignPlanSummary {
+  preset: DesignPresetId | 'custom'
+  format: FileFormat
+  pages: Array<{ index: number; layout: DesignLayoutId; variant: 'default' | 'compact'; freeform: boolean; section: number | null }>
+  fonts: DesignFontUse[]
+  assets: number
+  score: number | null
+  rounds: number
+  stop: DesignStop | null
+  tokens: Record<string, number>
+}
+/** GET /api/created/{id}/thumbs: one page/slide thumbnail. page is 1-based. */
+export interface Thumb { page: number; url: string; w: number; h: number; layout: DesignLayoutId }
+/** POST /api/created/{id}/restyle: 0 tokens, a new CreatedFile (source 'convert', from_id the original). layouts
+ *  keys are 0-based page indexes as strings. */
+export interface RestyleBody {
+  preset?: DesignPresetId
+  fonts?: Partial<Record<'display' | 'heading' | 'body', string>>
+  dark?: boolean
+  template?: DesignTemplateId
+  layouts?: Record<string, DesignLayoutId>
+  print?: boolean
+}
+/** POST /api/created/{id}/polish: one critic round (vision engines only); goes through the cost estimate. */
+export interface PolishBody { engine?: string; confirm_cost?: boolean }
+/** CreatedFile.design, Studio fields (absent on files made without Studio). When no design file was used, name is
+ *  'preset:<id>', colors are the preset's and confidence is 1. */
+export interface DesignApplied {
+  studio?: boolean
+  preset?: DesignPresetId | 'custom' | null
+  fonts?: DesignFontUse[]
+  score?: number | null
+  thumbs?: number              // how many thumbnails GET /api/created/{id}/thumbs serves
+}

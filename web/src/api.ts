@@ -214,3 +214,32 @@ export const compareOrConfirm = (body: { query: string; engines: string[]; confi
 export const resumeFile = (body: ResumeBody) => postConfirmable<ResumeResponse>('/api/created/resume', body)
 /** Checkpoint summaries of one run's file steps. */
 export const runCheckpoints = (qid: number) => get<{ checkpoints: CheckpointInfo[] }>(`/api/runs/${qid}/checkpoints`)
+
+// ---------- Studio, the design stage (docs/PLAN-designer.md section 9) ----------
+import type {
+  DesignPlanSummary, DesignPresetInfo, DesignReport, DesignTemplateInfo, FontInfo, PolishBody, RestyleBody, Thumb,
+} from './protocol'
+
+const createdPath = (f: Pick<CreatedFile, 'id' | 'sandbox'>, what: string) =>
+  f.sandbox ? `/api/sandbox/${enc(f.sandbox)}/created/${enc(f.id)}/${what}` : `/api/created/${enc(f.id)}/${what}`
+
+/** Presets and student templates for the Design panel's pickers. */
+export const listDesignPresets = () =>
+  get<{ presets: DesignPresetInfo[]; templates: DesignTemplateInfo[] }>('/api/design/presets')
+/** Open-licensed font families; an empty q gives a curated list. offline: only cached/installed fonts were searched. */
+export const searchFonts = (q: string, limit = 20) =>
+  get<{ fonts: FontInfo[]; offline: boolean }>(`/api/fonts/search?q=${enc(q)}&limit=${limit}`)
+export const fontPreviewUrl = (family: string, text?: string) =>
+  `/api/fonts/preview?family=${enc(family)}` + (text ? `&text=${enc(text)}` : '')
+/** Page/slide thumbnails from the file's workspace; [] (with a reason) for files made without Studio. */
+export const createdThumbs = (f: Pick<CreatedFile, 'id' | 'sandbox'>) =>
+  get<{ thumbs: Thumb[]; reason?: string }>(createdPath(f, 'thumbs'))
+/** The design report and a summary of the DesignPlan; both null for files made without Studio. */
+export const createdDesign = (f: Pick<CreatedFile, 'id' | 'sandbox'>) =>
+  get<{ report: DesignReport | null; plan: DesignPlanSummary | null }>(createdPath(f, 'design'))
+/** Re-layout and re-render from the stored content at 0 tokens; returns the new file. */
+export const restyleCreated = (f: Pick<CreatedFile, 'id' | 'sandbox'>, body: RestyleBody) =>
+  post<CreatedFile>(createdPath(f, 'restyle'), body)
+/** One critic round on the stored design; a costly polish comes back asking to confirm (409). */
+export const polishCreated = (f: Pick<CreatedFile, 'id' | 'sandbox'>, body: PolishBody = {}) =>
+  postConfirmable<CreatedFile>(createdPath(f, 'polish'), body)

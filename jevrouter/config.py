@@ -140,6 +140,31 @@ def cost_confirm_on() -> bool:
 def lean_long_files_on() -> bool:
     return env_flag('TG_LEAN_LONG_FILES', LEAN_LONG_FILES)
 
+
+# Studio, the design stage (docs/PLAN-designer.md section 9). TG_STUDIO picks the formats it designs: unset or empty ->
+# STUDIO_DEFAULT; '0'/'off'/'false'/'no' -> none; '1'/'on'/'true'/'yes' -> STUDIO_ON; else a comma list of formats
+# ('pptx,pdf,docx'). Read on every file. Phase 0: off by default; STUDIO_DEFAULT becomes STUDIO_ON once L+Q land.
+STUDIO_DEFAULT = ''
+STUDIO_ON = ('pptx', 'pdf')
+STUDIO_ROUNDS = 3                 # agent loop rounds (layout -> QA -> fix)
+STUDIO_DIRECT_TOKENS = 2000       # art direction, tokens out
+STUDIO_CRITIC_ROUNDS = 2
+STUDIO_CRITIC_TOKENS = 6000       # critic, tokens in + out per file
+STUDIO_FREEFORM_PAGES = 2
+STUDIO_FREEFORM_TOKENS = 2000     # tokens out per freeform page
+STUDIO_TIME_BUDGET = 60.0         # seconds the design stage may take before it paints what it has
+
+
+def studio_formats() -> frozenset:
+    """The formats Studio designs now (TG_STUDIO, see above)."""
+    raw = os.environ.get('TG_STUDIO')
+    v = (STUDIO_DEFAULT if raw is None or not raw.strip() else raw).strip().lower()
+    if not v or v in ('0', 'off', 'false', 'no'):
+        return frozenset()
+    if v in ('1', 'on', 'true', 'yes'):
+        return frozenset(STUDIO_ON)
+    return frozenset(p.strip() for p in v.split(',') if p.strip() in ('pdf', 'docx', 'pptx', 'xlsx', 'md'))
+
 SAMPLES = [
     "What's 18% of 2450?", '(45 * 12) / 7 + 3^2', 'square root of 1764',
     'Will it rain in Mumbai tomorrow?', "What's the weather in Tokyo right now?", 'Is it cold in Oslo today?',
