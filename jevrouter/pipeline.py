@@ -22,7 +22,7 @@ from .agents import create as create_agent
 from .agents.llm import COMMON
 from .agents.tools import sql_agent, sql_in
 from .config import (AGENTS, BLOCK_AT, DEEP_MIN_OK, DEP_CONTEXT_CHARS, EASY_AT, FORCED_MIN, GUARDS, HARD_AT, HISTORY,
-                     KEYLESS, MAX_QUERY_CHARS, MAX_SUBTASKS, PRICES, REPORT, RESEARCH, RUN, RUN_TIMEOUT, SAMPLES, SQL_AGENT,
+                     KEYLESS, LONG_RUN_TIMEOUT, MAX_QUERY_CHARS, MAX_SUBTASKS, PRICES, REPORT, RESEARCH, RUN, RUN_TIMEOUT, SAMPLES, SQL_AGENT,
                      STRONGEST, env_flag)
 from .create.brief import Brief, merge as brief_merge, parse_brief
 from .engines.auto import Steered
@@ -182,6 +182,9 @@ class Router:
         self.tasks: set[asyncio.Task] = set()
         self.evals: dict[str, asyncio.Task] = {}  # eval_id -> running eval (jevrouter/evals.py)
         self.run_timeout = float(os.environ.get('TG_RUN_TIMEOUT', RUN_TIMEOUT))
+        # A long document (a 12-page PDF: research, an outline, section batches on a CLI that runs two at a time) takes
+        # minutes by design; it gets its own deadline so the plain-question one stays tight.
+        self.long_run_timeout = float(os.environ.get('TG_LONG_RUN_TIMEOUT', LONG_RUN_TIMEOUT))
         # Sandbox: qid -> sandbox id for runs in flight, their scratch stats, and each sandbox's memory (never on disk).
         self.sandbox: dict[int, str] = {}
         self.sandbox_stats: dict[int, dict] = {}
@@ -326,6 +329,17 @@ class Router:
         # history fills in completion order; replay wants qid order, with in-flight runs included
         records = sorted([*self.history, *(r for q, r in self.inflight.items() if q not in self.sandbox)], key=lambda r: r['qid'])
         return {'type': 'hello', **self.config(), 'history': records[-HISTORY:]}
+
+    def deadline(self, query: str, engine) -> float:
+        """Seconds a run may take: the long-document deadline when an engine will write a long or illustrated file."""
+        if engine is None:
+            return self.run_timeout
+        from .create.brief import asks_more, parse_brief
+        try:
+            long_doc = asks_more(parse_brief(query))
+        except Exception:
+            long_doc = False
+        return max(self.run_timeout, self.long_run_timeout) if long_doc else self.run_timeout
 
     def stats_for(self, qid: int) -> dict:
         """The stats a run counts towards: the global ones, or a throwaway copy for a sandbox run."""
@@ -481,8 +495,9 @@ class Router:
             self.store.save_run(rec)
         stats = self.stats_for(qid)
         emit = self.bus.emit
+        deadline = self.deadline(query, engine)
         try:
-            async with asyncio.timeout(self.run_timeout):
+            async with asyncio.timeout(deadline):
                 status = await self._handle(query, source, qid, t0, rec, engine, extras)
         except asyncio.CancelledError:
             # Cancelling the task already cancelled every agent under it (and killed any CLI child); report and finish.
@@ -493,7 +508,7 @@ class Router:
             status = 'timeout'
             stats['errors'] += 1
             self.unfinished(qid, rec, 'timed out')
-            rec['error'] = f'The run timed out after {self.run_timeout:.0f}s.'
+            rec['error'] = f'The run timed out after {deadline:.0f}s.'
             emit('error', qid=qid, tid=None, message=rec['error'])
         except Exception as e:
             # Keep the browser's run from hanging: whatever broke, the query still ends with done.

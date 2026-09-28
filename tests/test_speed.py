@@ -477,3 +477,13 @@ async def test_knowledge_wikipedia_fallback_skips_disambiguation(monkeypatch):
         return {'type': 'disambiguation', 'extract': 'Mercury may refer to:'}
     monkeypatch.setattr(tools, 'get_json', fake_get_json)
     assert not (await tools.agent_knowledge('Mercury', None)).ok
+
+
+def test_a_long_document_run_gets_the_long_deadline():
+    from jevrouter.pipeline import Router
+    r = Router(FakeJev())
+    engine = object()
+    assert r.deadline('Make a 12-13 page PDF on the history of AI with diagrams', engine) == r.long_run_timeout
+    assert r.deadline('Make a 12-13 page PDF on the history of AI with diagrams', None) == r.run_timeout  # keyless
+    assert r.deadline('What time is it in Tokyo?', engine) == r.run_timeout
+    assert r.long_run_timeout >= r.run_timeout

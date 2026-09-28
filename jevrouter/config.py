@@ -54,6 +54,7 @@ MAX_QUERY_CHARS = 4000
 MAX_SUBTASKS = 4
 HISTORY = 60
 RUN_TIMEOUT = 300.0  # seconds; TG_RUN_TIMEOUT overrides
+LONG_RUN_TIMEOUT = 900.0  # seconds for runs that write a long document with an engine; TG_LONG_RUN_TIMEOUT overrides
 
 # Routing that learns (docs/PLAN-learning.md). A saved subtask is shaky, and shows in the review queue, below these.
 REVIEW_CONFIDENCE = 0.6
