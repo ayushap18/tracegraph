@@ -297,6 +297,11 @@ class Store:
         try:
             self.created_path(fid).unlink(missing_ok=True)
         except ValueError:
+            return found
+        try:  # its Studio design workspace goes with it (docs/PLAN-designer.md 3.6); never fails the delete
+            from .studio import workspace
+            workspace.drop(fid)
+        except Exception:
             pass
         return found
 

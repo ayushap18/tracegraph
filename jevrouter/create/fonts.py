@@ -1,5 +1,6 @@
 """The body font a file uses (docs/PLAN-accuracy-v2.md C6): TRACEGRAPH_BODY_FONT, then an installed system font that
-matches the request, then the theme's built-in font.
+matches the request, then an open-licensed family Studio's font manager has cached (studio/fonts.py; this module is the
+legacy adapter over it and never downloads), then the theme's built-in font.
 
 A PDF embeds the TrueType font it uses (subset). Word, PowerPoint and Excel files only name a font: they show it where it
 is installed. The note says so plainly whenever a requested font is not what the file uses, and makes no claim about the
@@ -149,6 +150,21 @@ def builtin(fmt: str, theme=None, category: str | None = None) -> str | None:
     return CATEGORY_OFFICE.get(category or '', 'Georgia' if theme == 'warm' else 'Calibri')
 
 
+def studio_cached(name: str) -> tuple[str, str, str | None, str | None] | None:
+    """(family, regular, bold, italic) TrueType paths of an open-licensed family Studio's font manager has already
+    downloaded (studio/fonts.py, data/cache/fonts), or None. No network: a font is only ever downloaded by Studio."""
+    try:
+        from ..studio import fonts as studio_fonts
+        res = studio_fonts.resolve_local(name)
+    except Exception:
+        return None
+    if res is None or res.source != 'cache' or not res.embeddable:
+        return None
+    faces = res.faces
+    path = lambda s: faces[s].path if s in faces and faces[s].path.lower().endswith('.ttf') else None  # noqa: E731
+    return res.family, faces['regular'].path, path('bold'), path('italic')
+
+
 def resolve(requested: str | None, fmt: str, theme=None, stack=None, category: str | None = None) -> FontChoice:
     """The font a file in `fmt` uses for body text, and a plain note when it is not the one requested. Precedence:
     the font the request names, then the design's stack (`stack`, or the theme dict's `font_stack`), then
@@ -177,6 +193,9 @@ def resolve(requested: str | None, fmt: str, theme=None, stack=None, category: s
             if found and found.get('regular'):
                 return FontChoice(req, display(req), found['regular'], found.get('bold'), found.get('italic'), True,
                                   None)
+            cached = studio_cached(req)
+            if cached is not None:
+                return FontChoice(req, cached[0], cached[1], cached[2], cached[3], True, None)
             if std:
                 return FontChoice(req, std, None, None, None, False, None)
             return FontChoice(req, fallback, None, None, None, False,
@@ -217,6 +236,10 @@ def _from_stack(stack: list[str], fmt: str, theme, category: str | None) -> Font
             if found and found.get('regular'):
                 used = FontChoice(None, display(name) if name.islower() else name, found['regular'],
                                   found.get('bold'), found.get('italic'), True, None)
+                break
+            cached = studio_cached(name)
+            if cached is not None:
+                used = FontChoice(None, cached[0], cached[1], cached[2], cached[3], True, None)
                 break
         if used is None and env:
             used = FontChoice(None, env[3], env[0], env[1], env[2], True, None)

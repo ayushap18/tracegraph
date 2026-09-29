@@ -18,7 +18,7 @@ class Brief:
     images: bool = False                   # images|photos|pictures|figures|illustrations
     image_source: str | None = None        # 'web' when "from the web|online|sources"
     diagrams: bool = False                 # diagram(s)|flowchart|timeline|tree|hierarchy|chart(s) (charts also stay charts)
-    diagram_kinds: list[str] = field(default_factory=list)   # subset of ('timeline','tree','flow')
+    diagram_kinds: list[str] = field(default_factory=list)   # subset of WRITABLE_KINDS
     words: int | None = None               # "2000 words"
     capped: bool = False                   # pages or slides above MAX_PAGES/MAX_SLIDES were capped
     design: str | None = None              # the design file's name, set by agents/create.make (FileBrief.design);
@@ -28,8 +28,12 @@ class Brief:
 MAX_PAGES = 40
 MAX_SLIDES = 40
 WORDS_PER_PAGE = 420   # A4, 10.5 pt, 2 cm margins, mixed prose/tables; measured start value (2741 step-1 spec: 1,889 words -> 5 pages ~ 380/page with 4 tables), recalibrated by C3's loop
+# longer names first where one contains another ("helvetica neue" before "helvetica")
 KNOWN_FONTS = ('anthropic sans', 'anthropic serif', 'inter', 'roboto', 'open sans', 'lato', 'source sans', 'noto sans',
-               'helvetica', 'arial', 'times new roman', 'georgia', 'garamond', 'calibri', 'ibm plex sans', 'dejavu sans')
+               'helvetica neue', 'helvetica', 'arial', 'times new roman', 'georgia', 'garamond', 'calibri',
+               'ibm plex sans', 'dejavu sans', 'poppins', 'lexend', 'atkinson hyperlegible', 'playfair display',
+               'merriweather', 'jetbrains mono', 'space grotesk', 'source serif', 'dm sans', 'work sans', 'sf pro',
+               'segoe ui')
 DIAGRAM_KINDS = ('timeline', 'tree', 'flow')
 
 NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven',
@@ -47,7 +51,10 @@ WORDS = re.compile(r'\b(\d{1,2},\d{3}|\d{3,5})[\s-]*words?\b', re.I)
 # Themes. `create_agent.THEME` uses these too, so the brief and the create agent read a request the same way.
 MONO = re.compile(r'\bblack[\s-]*(?:and|&|n)?[\s-]*white\b|\bb\s*&\s*w\b|\bb/w\b|\bmono(?:chrome|chromatic)?\b(?!\s*font)|'
                   r'\bgr[ae]y[\s-]?scale\b|\bno\s+colou?rs?\b', re.I)
-DARK = re.compile(r'\bdark\s+(?:theme|mode|style|background|slides|colou?rs?)\b|\bin\s+dark\b', re.I)
+# "a dark design", "dark slides", "dark-themed", "in dark" (run 2808 asked for "a dark design" and got white slides)
+DARK = re.compile(r'\bdark\s+(?:design|theme|mode|style|look|feel|'
+                  r'aesthetic|palette|scheme|background|backgrounds|slides?|deck|presentation|version|colou?rs?|'
+                  r'tones?|ui)\b|\bdark[\s-]+(?:themed|styled|coloured|colored)\b|\bin\s+dark\b', re.I)
 WARM = re.compile(r'\bwarm\s+(?:theme|style|colou?rs?|tones?)\b', re.I)
 THEMES = {'mono': MONO, 'dark': DARK, 'warm': WARM}
 
@@ -62,6 +69,41 @@ KIND_WORDS = {
                        r'\borg(?:anisation|anization)?\s+charts?\b', re.I),
     'flow': re.compile(r'\bflow\s?charts?\b|\bflow\s+diagrams?\b|\bprocess\s+diagrams?\b|\bworkflow\s+diagrams?\b', re.I),
 }
+# The Studio diagram kinds (docs/PLAN-designer.md 3.4) named in a request, read by `studio_kinds`. The writer's schema
+# (a generic diagram block) and the long-document prompts offer them, so `diagram_kinds` holds them too, except
+# `labelled`: its picture comes only from code, so a model can't write one. WRITES_AS is the legacy kind each one can
+# be written as (kept for callers that only know timeline, tree and flow).
+STUDIO_DIAGRAM_KINDS = ('cycle', 'venn', 'pyramid', 'matrix', 'mindmap', 'process', 'comparison', 'labelled',
+                        'stat-cards', 'scatter')
+STUDIO_KIND_WORDS = {
+    'cycle': re.compile(r'\b(?:life|water|carbon|nitrogen|rock|business|product|cell)\s+cycles?\b|\bcycle\s+diagrams?\b|'
+                        r'\bcyclical\b|\bcircular\s+(?:diagram|flow|process)s?\b', re.I),
+    'venn': re.compile(r'\bvenn(?:\s+diagrams?)?\b|\boverlapping\s+circles\b', re.I),
+    'pyramid': re.compile(r'\bpyramid\s+(?:diagram|chart|graphic)s?\b|\b(?:food|energy|population|needs)\s+pyramids?\b|'
+                          r'\bhierarchy\s+of\s+needs\b', re.I),
+    'matrix': re.compile(r'\b(?:2|two)\s*(?:x|by|×)\s*(?:2|two)\b|\bquadrant\s+(?:chart|diagram|matrix)s?\b|'
+                         r'\bswot(?:\s+analysis)?\b|\bpriority\s+matrix\b', re.I),
+    'mindmap': re.compile(r'\bmind\s?maps?\b|\bconcept\s+maps?\b|\bspider\s+diagrams?\b', re.I),
+    'process': re.compile(r'\bprocess\s+(?:arrows?|steps?|diagrams?)\b|\bstep[\s-]by[\s-]step\s+(?:diagram|graphic)s?\b|'
+                          r'\bchevrons?\b', re.I),
+    'comparison': re.compile(r'\bcomparison\s+(?:cards?|table|diagram|chart)s?\b|\bpros\s+(?:and|&)\s+cons\b|'
+                             r'\bside[\s-]by[\s-]side\b', re.I),
+    'labelled': re.compile(r'\blabell?ed\s+(?:diagram|figure|picture|image|photo|drawing)s?\b|'
+                           r'\bannotated\s+(?:diagram|figure|picture|image|photo)s?\b', re.I),
+    'stat-cards': re.compile(r'\b(?:stat(?:istic)?s?|kpi|number|figure)\s+cards?\b|\bkey\s+(?:stats|statistics|numbers|'
+                             r'figures)\b|\bbig\s+numbers?\b', re.I),
+    'scatter': re.compile(r'\bscatter\s*(?:plots?|graphs?|charts?|diagrams?)?\b|\bcorrelation\s+(?:plot|graph)s?\b',
+                          re.I),
+}
+WRITES_AS = {'cycle': 'flow', 'process': 'flow', 'mindmap': 'tree', 'pyramid': 'tree'}
+WRITABLE_KINDS = DIAGRAM_KINDS + tuple(k for k in STUDIO_DIAGRAM_KINDS if k != 'labelled')
+
+
+def studio_kinds(text: str) -> list[str]:
+    """The Studio diagram kinds a request names ("a venn diagram", "a SWOT", "a labelled diagram of a cell"), in
+    STUDIO_DIAGRAM_KINDS order; no LLM."""
+    t = ' '.join(str(text or '').split())
+    return [k for k in STUDIO_DIAGRAM_KINDS if STUDIO_KIND_WORDS[k].search(t)]
 # Images and diagrams count only when asked for as content of the file ("with images", "add 3 diagrams", "a flowchart
 # of the login", "images from the web"), not when they are the topic ("a pdf about graph theory", "put these sales
 # figures in a pdf", "a summary of the image processing answer").
@@ -195,7 +237,13 @@ def parse_brief(text: str) -> Brief:
     slides, capped_s = _count(SLIDES, t, MAX_SLIDES)
     images = asked_for(IMAGES, t)
     diagrams = asked_for(DIAGRAMS, t)
-    kinds = [k for k in DIAGRAM_KINDS if KIND_WORDS[k].search(t)]
+    # a Studio kind is asked for by its own name; its words don't also ask for a legacy kind ("a mind map" is a
+    # mindmap, not a tree as well)
+    studio = [k for k in studio_kinds(t) if k in WRITABLE_KINDS] if diagrams else []
+    rest = t
+    for k in studio:
+        rest = STUDIO_KIND_WORDS[k].sub(' ', rest)
+    kinds = [k for k in DIAGRAM_KINDS if KIND_WORDS[k].search(rest)] + studio
     if diagrams and len(kinds) < 2 and MANY_DIAGRAMS.search(t):
         # "multiple diagrams" names no kind: pick the ones most documents can use, so the writer is asked for two
         kinds += [k for k in DIAGRAM_KINDS if k not in kinds][:2 - len(kinds)]
@@ -259,7 +307,7 @@ def from_dict(d: dict | None) -> 'Brief | None':
     for k in ('pages', 'slides'):
         if known.get(k):
             known[k] = tuple(known[k])
-    known['diagram_kinds'] = list(known.get('diagram_kinds') or [])
+    known['diagram_kinds'] = [k for k in known.get('diagram_kinds') or [] if k in WRITABLE_KINDS]
     return Brief(**known)
 
 
@@ -279,7 +327,8 @@ def describe(brief: 'Brief', fmt: str | None = None) -> list[str]:
         n = diagrams_min(brief)
         kinds = ', '.join(brief.diagram_kinds)
         out.append(f'Include at least {n} diagram{"s" if n > 1 else ""}' + (f': {kinds}' if kinds else
-                                                                            ' (timeline, tree or flow) or chart'))
+                                                                            ' (for example a timeline, flow, cycle '
+                                                                            'or comparison) or chart'))
     if brief.images:
         out.append('Include 4-6 figures: give each a Wikimedia Commons search query and caption')
     if brief.theme == 'mono':

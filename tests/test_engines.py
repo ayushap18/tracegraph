@@ -372,3 +372,59 @@ async def test_auto_warms_the_engine_that_takes_over():
     await auto.stream(system='s', prompt='p')
     await asyncio.gather(*auto.tasks)
     assert warmed == [{'system': 'plan', 'effort': 'low'}]
+
+
+class SeeingStub(Stub):
+    supports_vision = True
+
+    def __init__(self, name, **kw):
+        super().__init__(name, **kw)
+        self.images = []
+
+    async def stream(self, **kw):
+        self.images.append(kw.get('images'))
+        return await super().stream(**kw)
+
+
+async def test_auto_vision_follows_a_healthy_engine_that_can_see_and_routes_images_to_it():
+    """Studio's critic and Polish through Auto: supports_vision is true only while the chain has a healthy engine that
+    reads images, and a call with images goes to it even when a blind engine leads (or is preferred first)."""
+    import time
+    from jevrouter.engines import AutoEngine
+    from jevrouter.engines.auto import Steered
+    from jevrouter.studio import critic
+    agy, claude = Stub('agy'), SeeingStub('claude-code')
+    auto = AutoEngine({'agy': agy, 'claude-code': claude}, order=['agy', 'claude-code'])
+    assert auto.lead() is agy and auto.supports_vision and critic.can_see(auto) and auto.seer() is claude
+    r = await auto.stream(system='s', prompt='p', images=[b'png'])
+    assert r.engine == 'claude-code' and claude.images == [[b'png']] and agy.calls == 0
+    r = await Steered(auto, 'agy').stream(system='s', prompt='p', images=[b'png'])
+    assert r.engine == 'claude-code' and agy.calls == 0
+    assert (await auto.stream(system='s', prompt='p')).engine == 'agy' and claude.images[-1] == [b'png']  # text: lead
+    # the only engine that can see is cooling down after a failure: Auto can't see now
+    auto.cooling['claude-code'] = (time.monotonic() + 60, 'usage limit')
+    assert not auto.supports_vision and not critic.can_see(auto)
+    auto.cooling.clear()
+    assert auto.supports_vision
+    # no engine that can see at all: no vision, and an image call fails instead of reaching a blind engine
+    blind = AutoEngine({'agy': Stub('agy'), 'codex': Stub('codex')})
+    assert not blind.supports_vision and blind.seer() is None
+    with pytest.raises(EngineError, match='read images'):
+        await blind.stream(system='s', prompt='p', images=[b'png'])
+    assert blind.engines['agy'].calls == blind.engines['codex'].calls == 0
+
+
+async def test_the_critic_through_auto_reaches_the_seeing_engine():
+    from jevrouter.engines import AutoEngine, Reply
+    from jevrouter.studio import critic
+
+    class Critic(SeeingStub):
+        async def stream(self, **kw):
+            self.images.append(kw.get('images'))
+            return Reply('{"edits": []}', 900, 20)
+    agy, claude = Stub('agy'), Critic('claude-code')
+    auto = AutoEngine({'agy': agy, 'claude-code': claude}, order=['agy', 'claude-code'])
+    from jevrouter.studio.plan import DesignPlan
+    plan = DesignPlan(file_id='f', format='pptx', preset='minimal', system={}, direction={}, pages=[])
+    got = await critic.critique(plan, {'checks': []}, [b'sheet'], auto)
+    assert claude.images == [[b'sheet']] and agy.calls == 0 and got.llm_in == 900

@@ -1313,7 +1313,9 @@ async def test_the_2750_replay_builds_a_12_slide_deck():
     notes = ' '.join([*(r['note'] for r in made.file['rules'] if r['id'] == 'S1' and not r['ok']), *made.caveats])
     assert re.search(r'\b7\b', notes), (made.file['rules'], made.caveats)
     assert made.llm_in > 0 and made.file['tokens'] == made.llm_in + made.llm_out
-    assert len(eng.calls) <= 4   # outline, two batches and at most one call that rewrites section 7
+    writer = [c for c in eng.calls if not c['prompt'].startswith('Plan the layout')]   # Studio's art direction
+    assert len(writer) <= 4   # outline, two batches and at most one call that rewrites section 7
+    assert len(eng.calls) - len(writer) <= 1   # and at most one design call
     text = ' '.join(sh.text_frame.text for sl in prs.slides for sh in sl.shapes if sh.has_text_frame)
     assert 'Smartphones arrive' in text and 'Before mobile phones' in text and 'What comes next' in text
     try:

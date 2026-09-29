@@ -31,6 +31,13 @@ SHORT = ('Artificial intelligence is the study of machines that perform tasks ne
 
 
 @pytest.fixture(autouse=True)
+def legacy_renderer(monkeypatch):
+    """These tests pin the standard renderer's behaviour (page and slide counts, calls to stub engines), so Studio is
+    off here; tests/test_studio_api.py covers the same paths with Studio on."""
+    monkeypatch.setenv('TG_STUDIO', 'off')
+
+
+@pytest.fixture(autouse=True)
 def no_system_fonts(monkeypatch, tmp_path):
     """Font lookups see no installed fonts and no TRACEGRAPH_BODY_FONT, so results don't depend on the machine; images
     go to a temporary asset cache and every host resolves to a public address."""
@@ -468,7 +475,7 @@ async def test_a_single_checkpoint_rebuilds_at_no_cost():
 
 
 async def test_the_fit_loop_notes_a_rule_it_hits_and_still_builds(monkeypatch):
-    def broken(spec, fmt):
+    def broken(spec, fmt, **kw):
         raise cf.SpecError('S2', 'The spec has no content.')
     monkeypatch.setattr(longdoc, 'measure', broken)
     made = await ca.make(ca.Job('a 12 page PDF on AI', brief=parse_brief('a 12 page PDF on AI')), LongStub(seed=2),
@@ -543,3 +550,97 @@ async def test_attachments_keep_a_share_of_the_writer_context():
     assert len(ctx) <= longdoc.LONG_CONTEXT_CHARS
     assert ctx.count('n') >= 0.25 * longdoc.LONG_CONTEXT_CHARS - 100
     assert ctx.count('r') <= 0.6 * longdoc.LONG_CONTEXT_CHARS + 10
+
+
+async def test_the_design_stage_tokens_add_to_the_writers(monkeypatch):
+    """finish()'s own calls (Studio's art direction, critic, freeform pages) add to the long writer's tokens in
+    Made.llm_in/llm_out, the render phase and the file's tokens; they never replace them."""
+    real = ca.finish
+
+    async def finish(*a, **kw):
+        out = await real(*a, **kw)
+        out.llm_in, out.llm_out = out.llm_in + 700, out.llm_out + 300
+        for p in out.phases:
+            if p['phase'] == 'render':
+                p['calls'], p['llm_in'], p['llm_out'] = p['calls'] + 1, p['llm_in'] + 700, p['llm_out'] + 300
+        return out
+    monkeypatch.setattr(ca, 'finish', finish)
+    eng = LongStub(seed=1)
+    job = ca.Job('12-13 page PDF on AI', deps=[('Research AI', SHORT)], brief=parse_brief('12-13 page PDF on AI'))
+    made = await ca.make(job, eng, None)
+    assert made.ok
+    writer = [p for p in made.phases if p['phase'] != 'render']
+    render = next(p for p in made.phases if p['phase'] == 'render')
+    assert render['calls'] >= 1 and render['llm_in'] >= 700 and render['llm_out'] >= 300
+    assert made.llm_in == sum(p['llm_in'] for p in made.phases) >= sum(p['llm_in'] for p in writer) + 700
+    assert made.llm_out == sum(p['llm_out'] for p in made.phases) >= sum(p['llm_out'] for p in writer) + 300
+    assert made.file['tokens'] == made.llm_in + made.llm_out
+
+
+def test_every_diagram_kind_the_brief_can_ask_for_has_prompt_words():
+    from jevrouter.create.brief import WRITABLE_KINDS
+    for kind in WRITABLE_KINDS:
+        assert kind in longdoc.KIND_TEXT and kind in longdoc.KIND_WORDS, kind
+    brief = parse_brief('a 10 slide deck with a venn diagram, a mind map and a timeline')
+    assert brief.diagram_kinds == ['timeline', 'venn', 'mindmap']
+    parts = [longdoc.Part('Intro', 1, 100, []), longdoc.Part('History of the idea', 1, 100, []),
+             longdoc.Part('Comparing the two', 1, 100, []), longdoc.Part('Key concepts overview', 1, 100, [])]
+    longdoc.assign(parts, brief)
+    asked = ' '.join(longdoc.asks(p, True) for p in parts)
+    assert 'kind venn' in asked and 'kind mindmap' in asked and 'a timeline block' in asked
+    assert longdoc.asks(longdoc.Part('X', 1, 100, [], diagrams=['hexagon']), True).endswith(
+        f'Include {longdoc.KIND_TEXT["any"]}.')
+
+
+# ---------- the same paths with Studio on (docs/PLAN-designer.md 9.12) ----------
+
+
+@pytest.fixture
+def studio_on(monkeypatch, tmp_path):
+    from jevrouter.studio import workspace
+    monkeypatch.setenv('TG_STUDIO', 'pptx,pdf')
+    monkeypatch.setattr(workspace, 'DESIGN_DIR', tmp_path / 'design')
+    monkeypatch.setattr(workspace, 'SANDBOX_DIR', tmp_path / 'sandbox', raising=False)
+
+
+async def test_with_studio_the_fit_loop_counts_studio_pages(studio_on):
+    """Studio starts sections on new pages and sets type larger than the standard renderer, so the fit loop measures
+    with Studio's own layout (keyless) and a 12-13 page PDF is 12-13 pages as painted."""
+    eng = LongStub(seed=1)
+    job = ca.Job('12-13 page PDF on AI', deps=[('Research AI', SHORT)], brief=parse_brief('12-13 page PDF on AI'))
+    made = await ca.make(job, eng, None)
+    assert made.ok and made.file['design']['studio'] is True
+    assert 12 <= pdf_pages(made) == made.file['pages'] <= 13, made.file['pages']
+    assert rules(made)['V5']['ok']
+    assert not any(c.startswith('Studio designed') for c in made.caveats)   # a note for the answer, not a caveat
+    assert 'Studio designed' in made.answer
+    assert made.file['tokens'] == made.llm_in + made.llm_out == sum(p['llm_in'] + p['llm_out'] for p in made.phases)
+
+
+async def test_with_studio_a_deck_keeps_the_slide_count_asked_for(studio_on):
+    """The 2750 deck (12 slides asked, 11 sections): Studio's closing slide would make 13, so there is none."""
+    made = await ca.make(job_2750(), Deck2750(), None)
+    assert made.ok and made.file['format'] == 'pptx' and made.file['design']['studio'] is True
+    assert made.file['slides'] == 12 and rules(made)['V5']['ok'], made.file['slides']
+    from jevrouter.studio import workspace
+    plan = workspace.open_workspace(made.file['id']).load_plan()
+    assert len(plan.pages) == 12 and plan.pages[-1].layout != 'closing'
+
+
+def test_count_pages_and_the_closing_slide(studio_on):
+    from jevrouter.create.brief import Brief
+    from jevrouter.studio import agent as studio_agent
+    spec = {'title': 'Tea', 'sections': [{'heading': f'Part {i}', 'level': 1, 'blocks': [
+        {'type': 'bullets', 'items': [f'Point {i}a', f'Point {i}b']}]} for i in range(1, 8)]}
+    norm, _ = cf.normalize(spec, 'pptx')
+    assert studio_agent.count_pages(norm, 'pptx') == 9                               # cover, 7 parts, closing
+    assert studio_agent.count_pages(norm, 'pptx', brief=Brief(slides=(8, 8))) == 8   # no room for the closing slide
+    assert studio_agent.count_pages(norm, 'pptx', brief=Brief(slides=(9, 10))) == 9  # room: it stays
+
+
+async def test_with_studio_put_that_in_a_pdf_still_costs_no_tokens(studio_on):
+    eng = LongStub()
+    job = ca.Job('put that in a pdf', deps=[('Research AI', SHORT)], brief=parse_brief('put that in a pdf'))
+    made = await ca.make(job, eng, None)
+    assert made.ok and made.file['source'] == 'answer' and made.file['design']['studio'] is True
+    assert made.file['tokens'] == 0 and made.llm_in == made.llm_out == 0 and eng.calls == []

@@ -101,14 +101,18 @@ class AutoEngine(Engine):
             return (not self.ready(e, now), rate_band, speed, i)
         return [e for _, e in sorted(enumerate(engines), key=key)]
 
-    def fit(self, web=False, exec=False) -> list[Engine]:
+    def fit(self, web=False, exec=False, vision=False) -> list[Engine]:
+        if vision:  # a call with images goes only to engines that read them (Studio's design critic); no fallback
+            return [e for e in self.usable() if getattr(e, 'supports_vision', False) and (not web or e.supports_web)
+                    and (not exec or e.supports_exec)]
         fit = [e for e in self.usable() if (not web or e.supports_web) and (not exec or e.supports_exec)]
         return fit or (self.usable() if web else [])  # nothing can search: answering without the web beats failing
 
-    def chain(self, web=False, exec=False, first: str | None = None) -> list[Engine]:
+    def chain(self, web=False, exec=False, first: str | None = None, vision=False) -> list[Engine]:
         """Engines to try for one call, in health-aware order; cooling or blocked ones last. `first` (a backend's name)
-        goes to the front when it can take the call and is ready (difficulty routing, A5)."""
-        out = self.ranked(self.fit(web, exec))
+        goes to the front when it can take the call and is ready (difficulty routing, A5). vision: only engines that
+        can read images (a call with images=...)."""
+        out = self.ranked(self.fit(web, exec, vision))
         lead = next((e for e in out if e.name == first), None)
         if lead is not None and self.ready(lead):
             out = [lead] + [e for e in out if e is not lead]
@@ -144,6 +148,16 @@ class AutoEngine(Engine):
     def supports_exec(self):
         return any(e.supports_exec for e in self.usable())
 
+    def seer(self) -> Engine | None:
+        """The healthy backend, in health-aware order, that can read images (Studio's critic and Polish), or None."""
+        now = time.monotonic()
+        return next((e for e in self.ranked(self.fit(vision=True)) if self.healthy(e, now=now)), None)
+
+    @property
+    def supports_vision(self):
+        """True only while the chain has a healthy engine that can read images; a call with images goes to it."""
+        return self.seer() is not None
+
     def available(self):
         if self.usable():
             return True, ''
@@ -170,11 +184,17 @@ class AutoEngine(Engine):
         return max(HEDGE_MIN, p90 / 1000 if p90 is not None else HEDGE_UNKNOWN)
 
     async def stream(self, *, system, prompt, effort='medium', emit_delta=None, max_tokens=2048, web=False, schema=None,
-                     exec=False, first: str | None = None):
-        queue = self.chain(web, exec, first)
+                     exec=False, first: str | None = None, images=None):
+        vision = bool(images)
+        queue = self.chain(web, exec, first, vision)
+        if vision:  # healthy vision engines first; one that is cooling down is still tried, last
+            now = time.monotonic()
+            queue = [e for e in queue if self.healthy(e, now=now)] + [e for e in queue if not self.healthy(e, now=now)]
         if not queue:
-            raise EngineError(self.available()[1])
+            raise EngineError('no engine that can read images is set up' if vision else self.available()[1])
         call = dict(system=system, prompt=prompt, effort=effort, max_tokens=max_tokens, web=web, schema=schema, exec=exec)
+        if vision:
+            call['images'] = list(images)
         hedge = env_flag('TG_HEDGE')
         failures = []
 

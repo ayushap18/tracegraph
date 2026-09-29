@@ -21,11 +21,26 @@ def first_url(content: list) -> str | None:
     return None
 
 
+def image_blocks(images) -> list[dict]:
+    """PNG bytes as Messages API image blocks (base64)."""
+    import base64
+    return [{'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png',
+                                         'data': base64.b64encode(png).decode('ascii')}} for png in images or ()]
+
+
+def user_content(prompt: str, images=None):
+    """The user turn: the plain prompt, or the images followed by the prompt as one text block."""
+    if not images:
+        return prompt
+    return [*image_blocks(images), {'type': 'text', 'text': prompt}]
+
+
 class AnthropicEngine(Engine):
     name = 'anthropic'
     label = 'Anthropic API'
     billing = 'api'
     supports_web = True
+    supports_vision = True
 
     def __init__(self, client=None):
         self.client = client
@@ -42,13 +57,14 @@ class AnthropicEngine(Engine):
         return self.client
 
     async def stream(self, *, system, prompt, effort='medium', emit_delta=None, max_tokens=2048, web=False, schema=None,
-                     exec=False):
+                     exec=False, images=None):
         import anthropic
         output_config = {'effort': effort}
         if schema:
             output_config['format'] = {'type': 'json_schema', 'schema': schema}
         kwargs = dict(model=MODEL, max_tokens=max_tokens, thinking={'type': 'adaptive'}, output_config=output_config,
-                      betas=BETAS, fallbacks='default', system=system, messages=[{'role': 'user', 'content': prompt}])
+                      betas=BETAS, fallbacks='default', system=system,
+                      messages=[{'role': 'user', 'content': user_content(prompt, images)}])
         if web:
             kwargs['tools'] = [WEB_SEARCH]
         parts = []

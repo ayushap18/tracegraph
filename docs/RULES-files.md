@@ -84,6 +84,27 @@ A file is refused only when nothing in it can be shown (S2), the reply is too la
 | A3 | Charts carry a text title, and a one-line summary of what they show appears next to them. | warn | yes |
 | A4 | Colour is never the only way information is shown; theme colours meet 4.5:1 contrast for text. | fix | yes |
 
+## 7. Design (Studio's visual QA)
+
+Files laid out by the design stage (docs/PLAN-designer.md, on when `TG_STUDIO` names the format) carry a design report.
+These rules are read from it: one result each, shown on the file card. Files made without the design stage have none.
+The design stage fixes what it can by code first (shrink, rebalance, compact variant, split, re-crop, swap layout,
+snap to the grid), so a failure here is what was still not ideal after its last round.
+
+| ID | Rule | Severity | Enforced |
+|---|---|---|---|
+| D1 | Overflow: no text is taller than its box (0.5 pt of slack) and no line is wider than its box. | warn | yes |
+| D2 | Overlap: no two boxes overlap by more than 1 square point, unless the upper one is meant to sit on top (text on an overlay, art behind type). | warn | yes |
+| D3 | Readability: text is at least the minimum size (slides 18 pt, captions 12 pt; print 10 pt, captions 8 pt) and meets 4.5:1 contrast (3:1 for large text), measured against the photo under it too. | warn | yes |
+| D4 | Density: a slide holds at most 40 words of bullets or 60 of prose, and 25 to 60 percent of each page is white space (15 to 60 percent in print). | warn | yes |
+| D5 | Balance: the visual weight of a page sits in its middle third both ways (asymmetric layouts, covers and freeform pages are skipped). | warn | yes |
+| D6 | Consistency: text sizes are on the type scale, text left edges sit on grid columns, and the file uses one image treatment. | warn | yes |
+| D7 | Variety: no layout is used on more than 3 slides in a row, and a deck of 8 or more slides uses at least 4 layouts. | warn | yes |
+| D8 | Images: no picture is enlarged more than 1.5 times (at 96 dpi on slides, 150 dpi in print) and its focal point stays inside the crop. | warn | yes |
+
+When the design stage fails, or the file it painted fails a block rule above, the file is made with the standard
+layout instead and the answer says so: a file is never lost to the design stage.
+
 ## Changing the rules
 
 A new rule gets the next ID in its group, a severity and a test in `tests/test_create_rules.py`. A rule is never

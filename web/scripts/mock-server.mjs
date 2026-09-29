@@ -13,6 +13,7 @@ import { extname, join, normalize, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import { estimateFor, robustFixtures } from './fixtures/files-robust.mjs'
+import { FONTS, PAGE_TEMPLATES, PRESETS, SLIDE_LAYOUTS, TEMPLATES, fontPreviewSvg, presetThumbSvg, studioDesign, studioFixtures, thumbSvg } from './fixtures/studio.mjs'
 
 const PORT = +(process.argv.find(a => /^\d+$/.test(a)) || process.env.PORT || 8777)
 const QUIET = process.argv.includes('--quiet')
@@ -49,10 +50,10 @@ const SAMPLES = ["What's 18% of 2450?", 'weather in Paris and convert 100 EUR to
 const PRICES = { jev_in: 0.042, claude_in: 5, claude_out: 25 }
 
 const ENGINES = [
-  { name: 'claude-code', label: 'Claude Code', billing: 'subscription', web: true, available: true, why: '' },
-  { name: 'codex', label: 'Codex', billing: 'subscription', web: true, available: true, why: '' },
-  { name: 'agy', label: 'Antigravity', billing: 'subscription', web: false, available: false, why: 'agy CLI not found on PATH' },
-  { name: 'anthropic', label: 'Anthropic API', billing: 'api', web: true, available: true, why: '' },
+  { name: 'claude-code', label: 'Claude Code', billing: 'subscription', web: true, available: true, why: '', vision: true },
+  { name: 'codex', label: 'Codex', billing: 'subscription', web: true, available: true, why: '', vision: false },
+  { name: 'agy', label: 'Antigravity', billing: 'subscription', web: false, available: false, why: 'agy CLI not found on PATH', vision: false },
+  { name: 'anthropic', label: 'Anthropic API', billing: 'api', web: true, available: true, why: '', vision: true },
 ]
 let activeEngine = null // null = keyless
 
@@ -292,7 +293,87 @@ function seedRobust() {
   for (const r of fx.runs) records.set(r.qid, r)
   for (const [fid, pv] of Object.entries(fx.previews)) previews.set(fid, pv)
   nextQid = Math.max(nextQid, ...records.keys()) + 1
+  seedStudio()
 }
+
+// docs/PLAN-designer.md: Studio files (a dark deck, a lab report PDF), a file made without Studio and one with no stored
+// spec. `created` holds every created file the mock knows (GET /api/created), `designs` their thumbnails and reports.
+const created = new Map() // id -> CreatedFile
+const designs = new Map() // id -> studioDesign(...) (+ nospec)
+let studioDesignOf = null
+function seedStudio() {
+  const fx = studioFixtures(nextQid, now() - 1800)
+  sessions.set(fx.session.id, fx.session)
+  records.set(fx.run.qid, fx.run)
+  for (const f of fx.files) created.set(f.id, f)
+  for (const [fid, d] of Object.entries(fx.designs)) designs.set(fid, d)
+  studioDesignOf = fx.designOf
+  previews.set('cf_studio_deck', { kind: 'outline', slides: 12, items: fx.designs.cf_studio_deck.titles.map(text => ({ level: 1, text })) })
+  nextQid = Math.max(nextQid, ...records.keys()) + 1
+  // every other fixture file joins the Files page too
+  for (const r of records.values()) for (const t of r.tasks ?? []) for (const f of t.created_files ?? []) if (!created.has(f.id)) created.set(f.id, f)
+}
+
+/** POST .../restyle: a new file made from the stored design, 0 tokens. Returns [status, body]. */
+function restyle(fid, b) {
+  const src = created.get(fid), d = designs.get(fid)
+  if (!src) return [404, { error: 'No such file.' }]
+  if (!b || typeof b !== 'object' || !Object.keys(b).length) return [400, { error: 'Pick at least one change to restyle.' }]
+  if (b.preset != null && !PRESETS.some(p => p.id === b.preset)) return [400, { error: `Unknown preset '${b.preset}'.` }]
+  if (b.template != null && !TEMPLATES.some(t => t.id === b.template)) return [400, { error: `Unknown template '${b.template}'.` }]
+  for (const fam of Object.values(b.fonts ?? {})) {
+    if (!FONTS.some(f => f.family === fam)) return [400, { error: `${fam} isn't an openly licensed font, so it can't be used.` }]
+  }
+  const pool = src.format === 'pptx' ? SLIDE_LAYOUTS : PAGE_TEMPLATES
+  for (const l of Object.values(b.layouts ?? {})) if (!pool.includes(l) && l !== 'freeform') return [400, { error: `Unknown layout '${l}'.` }]
+  if (!d || d.nospec) return [409, { error: 'This file has no stored content, so it cannot be restyled. Ask for the file again to get a restylable copy.' }]
+  const tpl = b.template ? TEMPLATES.find(t => t.id === b.template) : null
+  const preset = b.print ? 'mono' : b.preset ?? tpl?.preset ?? d.preset
+  const layouts = d.layouts.map((l, i) => b.layouts?.[String(i)] ?? l)
+  const fonts = d.report.fonts.map(f => (b.fonts?.[f.role] ? { ...f, family: b.fonts[f.role], note: null, requested: null } : f))
+  if (b.fonts?.display && !fonts.some(f => f.role === 'display')) fonts.push({ family: b.fonts.display, role: 'display', source: 'fontsource', licence: 'OFL-1.1', embedded: src.format === 'pdf', fallback: null })
+  const nd = studioDesign({ format: src.format, preset, dark: b.dark ?? null, layouts, titles: d.titles, fonts,
+    notes: [`Restyled with ${PRESETS.find(p => p.id === preset).name}${b.dark != null ? (b.dark ? ', dark' : ', light') : ''}${b.print ? ' as a print version' : ''}. No model tokens were used.`],
+    stop: 'keyless', tokens: { direct_in: 0, direct_out: 0, critic_in: 0, critic_out: 0, freeform_in: 0, freeform_out: 0 } })
+  const nid = 'cf_' + id(5)
+  const suffix = b.print ? 'print' : preset
+  const nf = { ...src, id: nid, name: src.name.replace(/(\.\w+)$/, `-${suffix}$1`), created: now(), tokens: 0, source: 'convert', from_id: fid, role: undefined,
+    rules: [], theme: preset === 'bold-dark' || b.dark ? 'dark' : preset === 'mono' ? 'mono' : 'clean', design: studioDesignOf(nd), cost: null, partial: null }
+  created.set(nid, nf); designs.set(nid, nd)
+  return [200, nf]
+}
+
+/** POST .../polish: one critic round, vision engines only, confirm first. */
+function polish(fid, b) {
+  const src = created.get(fid), d = designs.get(fid)
+  if (!src) return [404, { error: 'No such file.' }]
+  const name = b.engine ?? activeEngine
+  const e = name ? engineInfo(name) : null
+  if (!e) return [400, { error: 'Polish needs an engine that can look at images. Keyless mode cannot.' }]
+  if (!e.available) return [503, { error: `${e.label} is not available: ${e.why}` }]
+  if (!e.vision) return [400, { error: `${e.label} can't read images, so it can't polish a design.` }]
+  if (!d || d.nospec) return [409, { error: 'This file has no design plan to polish.' }]
+  if (b.confirm_cost !== true) {
+    const estimate = { version: 1, calls: 1, tokens_in: 4200, tokens_out: 600, seconds: 25, range: { calls: [1, 2], tokens_in: [3000, 5200], tokens_out: [300, 800], seconds: [15, 45] },
+      engine: e.name, engine_label: e.label, billing: e.billing, dollars: e.billing === 'api' ? [0.02, 0.05] : null, keyless: false, long_file: false, needs_confirmation: true,
+      reasons: [{ code: 'design', text: `The design critic looks at ${Math.ceil(d.layouts.length / 6)} contact sheet${d.layouts.length > 6 ? 's' : ''} of your slides and suggests fixes, which are applied by code.` }],
+      breakdown: [{ phase: 'critic', engine: e.name, calls: 1, tokens_in: 4200, tokens_out: 600, seconds: 25, optional: false }],
+      deadline_s: 300, cheaper: [], summary: `Polish needs about 1 model call on ${e.label}: roughly 4,800 tokens and 15 to 45 seconds.` }
+    return [409, { error: 'Polish needs one model call. Confirm to go ahead.', needs_confirmation: true, estimate }]
+  }
+  const fixed = {} // the critic fixed the one failing check
+  const nd = studioDesign({ format: src.format, preset: d.preset, dark: d.dark, layouts: d.layouts.map((l, i) => (i === 8 && l === 'two-column' ? 'title-bullets' : l)), titles: d.titles,
+    fonts: d.report.fonts, fails: fixed, notes: ['Polish applied 2 fixes: slide 9 was shortened and its title enlarged.'], stop: 'pass', rounds: 1,
+    critic: { ran: true, why: `Polish on ${e.label}`, edits: [{ page: 9, action: 'reduce_text', arg: 36 }, { page: 9, action: 'enlarge_title', arg: 1 }], rolled_back: [] },
+    tokens: { direct_in: 0, direct_out: 0, critic_in: 4100, critic_out: 520, freeform_in: 0, freeform_out: 0 } })
+  const nid = 'cf_' + id(5)
+  const nf = { ...src, id: nid, name: src.name.replace(/(\.\w+)$/, '-polished$1'), created: now(), tokens: 4620, source: 'convert', from_id: fid, role: undefined,
+    rules: [], design: studioDesignOf(nd), cost: null, partial: null }
+  created.set(nid, nf); designs.set(nid, nd)
+  return [200, nf]
+}
+const svg = (res, s) => { res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'no-cache' }); res.end(s) }
+
 // Cost preflight: chat, sandbox, "you" and compare runs over the threshold get 409 until the body says confirm_cost: true.
 const COST_SOURCES = ['chat', 'sandbox', 'you', 'compare']
 const needsConfirm = (b, q) => COST_SOURCES.includes(b.source ?? 'you') && b.confirm_cost !== true && b.engine !== 'none'
@@ -467,6 +548,56 @@ const server = http.createServer(async (req, res) => {
   if ((m = /^\/api\/runs\/(\d+)\/checkpoints$/.exec(p)) && M === 'GET') {
     const r = records.get(+m[1])
     return r ? json(res, 200, { checkpoints: r.checkpoints ?? [] }) : json(res, 404, { error: 'unknown run' })
+  }
+
+  // ---------- Studio and created files (docs/PLAN-designer.md 9.9); sandbox paths share the handlers ----------
+  if (M === 'GET' && p === '/api/design/presets') { await sleep(250); return json(res, 200, { presets: PRESETS, templates: TEMPLATES }) }
+  if ((m = /^\/api\/design\/presets\/([\w-]+)\/thumb$/.exec(p)) && M === 'GET') {
+    return PRESETS.some(x => x.id === m[1]) ? svg(res, presetThumbSvg(m[1])) : json(res, 404, { error: 'unknown preset' })
+  }
+  if (M === 'GET' && p === '/api/fonts/search') {
+    const q = (url.searchParams.get('q') ?? '').trim(), limit = +(url.searchParams.get('limit') ?? 20)
+    if (q.length > 64 || !(limit >= 1 && limit <= 50)) return json(res, 400, { error: 'bad q or limit' })
+    await sleep(200 + Math.random() * 200)
+    if (q.toLowerCase() === 'fail') return json(res, 500, { error: 'The font index could not be read.' })
+    const offline = q.toLowerCase() === 'offline'
+    const list = offline ? FONTS.filter(f => f.installed) : FONTS.filter(f => !q || f.family.toLowerCase().includes(q.toLowerCase()) || f.category === q.toLowerCase())
+    return json(res, 200, { fonts: list.slice(0, limit), offline })
+  }
+  if (M === 'GET' && p === '/api/fonts/preview') {
+    const fam = url.searchParams.get('family') ?? ''
+    return FONTS.some(f => f.family === fam) ? svg(res, fontPreviewSvg(fam, url.searchParams.get('text') || undefined)) : json(res, 404, { error: 'font not found' })
+  }
+  if (M === 'GET' && p === '/api/created') {
+    const limit = +(url.searchParams.get('limit') || 50), before = +(url.searchParams.get('before') || Infinity)
+    return json(res, 200, { files: [...created.values()].filter(f => f.created < before).sort((a, b) => b.created - a.created).slice(0, limit) })
+  }
+  if ((m = /^(?:\/api\/sandbox\/[\w-]+)?\/api\/created\/([\w-]+)(?:\/(thumbs|design|restyle|polish|convert|download)|\/thumbs\/(\d+)\.png)?$/.exec(p)) && m[1] !== 'resume') {
+    const fid = m[1], what = m[2] ?? (m[3] ? 'thumb' : ''), f = created.get(fid), d = designs.get(fid)
+    if (!f) return json(res, 404, { error: 'No such file.' })
+    if (M === 'GET' && !what) return json(res, 200, f)
+    if (M === 'DELETE' && !what) { created.delete(fid); designs.delete(fid); return json(res, 200, { ok: true }) }
+    if (M === 'GET' && what === 'download') { res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${f.name}"` }); return res.end('mock file') }
+    if (M === 'GET' && what === 'thumbs') {
+      await sleep(350)
+      if (!d) return json(res, 200, { thumbs: [], reason: f.format === 'pptx' || f.format === 'pdf' ? 'This file was made before the design stage, so it has no thumbnails.' : `${f.format.toUpperCase()} files flow like text, so they have no page thumbnails.` })
+      return json(res, 200, { thumbs: d.layouts.map((layout, i) => ({ page: i + 1, url: `${p.replace(/\/thumbs$/, '')}/thumbs/${i + 1}.png`, w: d.w, h: d.h, layout })) })
+    }
+    if (M === 'GET' && what === 'thumb') {
+      const n = +m[3]
+      if (!d || n < 1 || n > d.layouts.length) return json(res, 404, { error: 'no such thumbnail' })
+      await sleep(80 + n * 40)
+      return svg(res, thumbSvg({ layout: d.layouts[n - 1], page: n, preset: d.preset, dark: d.dark, w: d.w, h: d.h, title: d.titles[n - 1] ?? '' }))
+    }
+    if (M === 'GET' && what === 'design') { await sleep(300); return json(res, 200, { report: d?.report ?? null, plan: d?.plan ?? null }) }
+    if (M === 'POST' && what === 'restyle') { const b = await body(req); await sleep(900); const [code, out] = restyle(fid, b); return json(res, code, out) }
+    if (M === 'POST' && what === 'polish') { const b = (await body(req)) || {}; await sleep(b.confirm_cost ? 1600 : 250); const [code, out] = polish(fid, b); return json(res, code, out) }
+    if (M === 'POST' && what === 'convert') {
+      const b = (await body(req)) || {}
+      const nf = { ...f, id: 'cf_' + id(5), name: f.name.replace(/\.\w+$/, '.' + b.format), format: b.format, created: now(), tokens: 0, source: 'convert', from_id: fid, design: null }
+      created.set(nf.id, nf)
+      return json(res, 200, nf)
+    }
   }
 
   // ---------- runs ----------

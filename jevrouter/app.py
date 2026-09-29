@@ -20,8 +20,10 @@ from . import estimate as estimate_mod
 from . import evals as evals_mod
 from . import judge as judge_mod
 from . import labels as labels_mod
-from .config import (AGENTS, COST_SOURCES, PRICES, DIST, GROUP_MAX, GUARDS, LEGACY_PAGE, MAX_QUERY_CHARS, MODES, REPORT,
-                     RESEARCH, RUN, STYLES, cost_confirm_on)
+from .config import (AGENTS, COST_SOURCES, FONT_LIMIT_MAX, FONT_PREVIEW_CHARS, FONT_QUERY_CHARS, PRICES, DIST, GROUP_MAX,
+                     GUARDS, LEGACY_PAGE, MAX_QUERY_CHARS, MODES, REPORT, RESEARCH, RUN, STUDIO_CRITIC_OUT,
+                     STUDIO_CRITIC_PROMPT_TOKENS, STUDIO_GRACE, STUDIO_SHEET_PAGES, STUDIO_SHEET_TOKENS,
+                     STUDIO_TIME_BUDGET, STYLES, cost_confirm_on)
 from .engines import EngineError, catalog, choose
 from .engines.health import pct, unblock
 from .agents import create as maker
@@ -944,8 +946,10 @@ async def convert_created(request):
         if meta['format'] == fmt:
             raise Bad(f'{meta["name"]} is already {fmt}', 409)
         spec = store.created_spec(meta['id'])
-        new, spec, data = await asyncio.to_thread(maker.build, spec, fmt, source='convert', tokens=0,
-                                                  from_id=meta['id'], extra=maker.carried(meta))
+        # with TG_STUDIO on for the format the design stage lays it out keyless (0 tokens), seeded from the source
+        # file's workspace (docs/PLAN-designer.md 9.10); off, this is build() exactly
+        new, spec, data, _ = await maker.build_designed(spec, fmt, source='convert', tokens=0, from_id=meta['id'],
+                                                        extra=maker.carried(meta), seed_from=meta['id'])
     except Bad as e:
         return err(str(e), e.status)
     except create_mod.SpecError as e:
@@ -985,6 +989,450 @@ async def preview_sandbox_created(request):
     except Bad as e:
         return err(str(e), e.status)
     return await preview_of(meta, data)
+
+
+# ---------- Studio: presets, fonts, thumbnails, the design report, restyle and polish (docs/PLAN-designer.md 9.9) ----------
+# Every /api/created/{fid}/... route here also exists as /api/sandbox/{id}/created/{fid}/... for sandbox files, whose
+# design workspace lives in the sandbox's temp dir. Failures inside Studio are honest statuses, never a bare 500.
+
+RESTYLE_KEYS = ('preset', 'fonts', 'dark', 'template', 'layouts', 'print')
+FONT_ROLES = ('display', 'heading', 'body')
+NOT_DESIGNED = 'This file was made without the design stage, so it has no thumbnails.'
+NO_VISION = ("Polish needs an engine that can read images (Claude Code or the Anthropic API); {what} can't, so the "
+             "design was not changed.")
+
+
+def png_response(data: bytes, cache: str = 'private, max-age=300') -> web.Response:
+    return web.Response(body=data, headers={'Content-Type': 'image/png', 'X-Content-Type-Options': 'nosniff',
+                                            'Cache-Control': cache})
+
+
+def png_size(data: bytes) -> tuple[int, int]:
+    """(width, height) from a PNG's IHDR chunk; (0, 0) when it isn't one."""
+    if len(data) >= 24 and data[:8] == b'\x89PNG\r\n\x1a\n' and data[12:16] == b'IHDR':
+        return int.from_bytes(data[16:20], 'big'), int.from_bytes(data[20:24], 'big')
+    return 0, 0
+
+
+async def design_presets(request):
+    """GET /api/design/presets: every preset (with its thumbnail URL) and every student template."""
+    from .studio import presets
+
+    def listing():
+        return ([p.to_dict() for p in presets.list_presets()], [t.to_dict() for t in presets.list_templates()])
+    try:
+        ps, ts = await asyncio.to_thread(listing)
+    except Exception as e:
+        return err(f'The design presets could not be listed ({type(e).__name__}).', 503)
+    return web.json_response({'presets': ps, 'templates': ts})
+
+
+async def design_preset_thumb(request):
+    """GET /api/design/presets/{id}/thumb: a sample cover slide in the preset (PNG)."""
+    from .studio import presets, thumbs
+    pid = request.match_info['id']
+    if pid not in presets.PRESETS:
+        return err('no such preset', 404)
+    try:
+        data = await asyncio.to_thread(thumbs.preset_thumb, pid)
+    except Exception as e:
+        return err(f'The preview of {pid} could not be drawn ({type(e).__name__}).', 503)
+    return png_response(data, 'public, max-age=86400')
+
+
+async def fonts_search(request):
+    """GET /api/fonts/search?q=&limit=20: open-licensed families only (an empty q lists the curated ones)."""
+    from .studio import fonts
+    q = request.query.get('q', '')
+    if len(q) > FONT_QUERY_CHARS:
+        return err(f'q is at most {FONT_QUERY_CHARS} characters')
+    raw = request.query.get('limit', '')
+    try:
+        limit = int(raw) if raw.strip() else 20
+    except ValueError:
+        return err('limit must be a whole number')
+    if not 1 <= limit <= FONT_LIMIT_MAX:
+        return err(f'limit must be 1 to {FONT_LIMIT_MAX}')
+    try:
+        found, offline = await fonts.search(q.strip(), request.app[HTTP], limit)
+    except Exception:  # search never raises by contract; if it does, it is offline with nothing found
+        found, offline = [], True
+    out = [f.to_dict() if hasattr(f, 'to_dict') else dict(f) for f in found or []]
+    out = [f for f in out if f.get('licence') in fonts.LICENCES_OK][:limit]  # never a font that isn't open
+    return web.json_response({'fonts': out, 'offline': bool(offline)})
+
+
+async def font_preview(request):
+    """GET /api/fonts/preview?family=&text=: a PNG sample of a cached or installed open family."""
+    from .studio import fonts
+    family = request.query.get('family', '').strip()
+    text = request.query.get('text')
+    if not family or len(family) > FONT_QUERY_CHARS:
+        return err(f'family must be 1 to {FONT_QUERY_CHARS} characters')
+    if text is not None and len(text) > FONT_PREVIEW_CHARS:
+        return err(f'text is at most {FONT_PREVIEW_CHARS} characters')
+    try:
+        data = await asyncio.to_thread(fonts.preview_png, family, text) if text else \
+            await asyncio.to_thread(fonts.preview_png, family)
+    except Exception:
+        data = None
+    if not data:
+        return err(f'{family} is not cached or installed here, or is not openly licensed.', 404)
+    return png_response(data, 'public, max-age=86400')
+
+
+def held_created(request) -> tuple[dict, dict | None, str | None]:
+    """(CreatedFile, its stored spec or None, sandbox id or None) for a stored file or, on a /api/sandbox/{id}/ route,
+    a sandbox file. Raises Bad 404 when there is no such file."""
+    if 'id' in request.match_info:
+        meta, spec, _ = sandbox_created(request)
+        return meta, spec, request.match_info['id']
+    store, meta = stored_created(request)
+    return meta, store.created_spec(meta['id']), None
+
+
+def created_base(meta: dict, sid: str | None) -> str:
+    return f'/api/sandbox/{sid}/created/{meta["id"]}' if sid else f'/api/created/{meta["id"]}'
+
+
+def designed(meta: dict) -> bool:
+    return bool((meta.get('design') or {}).get('studio'))
+
+
+def open_ws(fid: str, sid: str | None):
+    from .studio import workspace
+    return workspace.open_workspace(fid, sandbox=sid)
+
+
+def load_design(fid: str, sid: str | None, *, plan=True, report=False, thumbs=False) -> dict:
+    """What a file's workspace holds, read in a thread: {ws, plan, report, thumbs}. Missing pieces are None/[]."""
+    ws = open_ws(fid, sid)
+    out = {'ws': ws, 'plan': None, 'report': None, 'thumbs': []}
+    if not ws.exists():
+        return out
+    if plan:
+        out['plan'] = ws.load_plan()
+    if report:
+        out['report'] = ws.load_report()
+    if thumbs:
+        out['thumbs'] = list(ws.thumbs())
+    return out
+
+
+def plan_summary(plan) -> dict | None:
+    """DesignPlanSummary (web/src/protocol.ts): the plan without its boxes."""
+    if plan is None:
+        return None
+    import dataclasses
+    return {'preset': plan.preset, 'format': plan.format,
+            'pages': [{'index': p.index, 'layout': p.layout, 'variant': p.variant, 'freeform': p.freeform,
+                       'section': p.section} for p in plan.pages],
+            'fonts': [dataclasses.asdict(f) for f in plan.fonts], 'assets': len(plan.assets), 'score': plan.score,
+            'rounds': plan.rounds, 'stop': plan.stop, 'tokens': dict(plan.tokens or {})}
+
+
+async def created_thumbs(request):
+    """GET .../created/{fid}/thumbs: {thumbs: Thumb[], reason?}; [] and a reason for a file made without Studio."""
+    try:
+        meta, _, sid = held_created(request)
+    except Bad as e:
+        return err(str(e), e.status)
+    if not designed(meta):
+        return web.json_response({'thumbs': [], 'reason': NOT_DESIGNED})
+    try:
+        got = await asyncio.to_thread(load_design, meta['id'], sid, thumbs=True)
+    except Exception:
+        return web.json_response({'thumbs': [], 'reason': 'The design workspace of this file could not be read.'})
+    if not got['thumbs']:
+        return web.json_response({'thumbs': [], 'reason': 'No thumbnails are stored for this file (design workspaces '
+                                                          'are kept for 14 days).'})
+    pages = got['plan'].pages if got['plan'] is not None else []
+    base, out = created_base(meta, sid), []
+    for i, path in enumerate(got['thumbs']):
+        try:
+            with open(path, 'rb') as fh:
+                w, h = png_size(fh.read(24))
+        except OSError:
+            continue
+        out.append({'page': i + 1, 'url': f'{base}/thumbs/{i + 1}.png', 'w': w, 'h': h,
+                    'layout': pages[i].layout if i < len(pages) else 'freeform'})
+    return web.json_response({'thumbs': out})
+
+
+async def created_thumb(request):
+    """GET .../created/{fid}/thumbs/{n}.png: one thumbnail, n 1-based."""
+    try:
+        meta, _, sid = held_created(request)
+        n = int(request.match_info['n'])
+        if not designed(meta) or n < 1:
+            raise Bad('no such thumbnail', 404)
+        got = await asyncio.to_thread(load_design, meta['id'], sid, plan=False, thumbs=True)
+        if n > len(got['thumbs']):
+            raise Bad('no such thumbnail', 404)
+        data = await asyncio.to_thread(Path(got['thumbs'][n - 1]).read_bytes)
+    except Bad as e:
+        return err(str(e), e.status)
+    except Exception:
+        return err('no such thumbnail', 404)
+    return png_response(data)
+
+
+async def created_design(request):
+    """GET .../created/{fid}/design: {report: DesignReport | null, plan: DesignPlanSummary | null}."""
+    try:
+        meta, _, sid = held_created(request)
+    except Bad as e:
+        return err(str(e), e.status)
+    if not designed(meta):
+        return web.json_response({'report': None, 'plan': None})
+    try:
+        got = await asyncio.to_thread(load_design, meta['id'], sid, report=True)
+    except Exception:
+        return web.json_response({'report': None, 'plan': None})
+    return web.json_response({'report': got['report'], 'plan': plan_summary(got['plan'])})
+
+
+def restyle_options(body: dict, fmt: str, plan=None):
+    """RestyleBody -> studio RestyleOptions (raises Bad 400): known presets, templates and layouts for the format, open
+    fonts only, and at least one change."""
+    from .studio import fonts as studio_fonts
+    from .studio.library import PAGE_TEMPLATES, SLIDE_LAYOUTS
+    from .studio.plan import RestyleOptions
+    from .studio.presets import PRESETS, TEMPLATES
+    if unknown := [k for k in body if k not in RESTYLE_KEYS]:
+        raise Bad(f'unknown field {unknown[0][:40]!r}; send preset, fonts, dark, template, layouts or print')
+    given = {k: v for k, v in body.items() if v is not None and v != {} and v is not False}
+    if not given:
+        raise Bad('Say what to change: a preset, fonts, dark, a template, page layouts or the print version.')
+    preset, template, dark = body.get('preset'), body.get('template'), body.get('dark')
+    if preset is not None and preset not in PRESETS:
+        raise Bad(f'unknown preset {str(preset)[:40]!r}; use one of {", ".join(PRESETS)}')
+    if template is not None and template not in TEMPLATES:
+        raise Bad(f'unknown template {str(template)[:40]!r}; use one of {", ".join(TEMPLATES)}')
+    if dark is not None and not isinstance(dark, bool):
+        raise Bad('dark must be true or false')
+    if body.get('print') is not None and not isinstance(body.get('print'), bool):
+        raise Bad('print must be true or false')
+    fonts = body.get('fonts')
+    if fonts is not None:
+        if not isinstance(fonts, dict) or any(k not in FONT_ROLES for k in fonts):
+            raise Bad('fonts must map display, heading or body to a font family')
+        for role, fam in fonts.items():
+            if not isinstance(fam, str) or not fam.strip() or len(fam) > FONT_QUERY_CHARS:
+                raise Bad(f'the {role} font must be a family name of 1 to {FONT_QUERY_CHARS} characters')
+            try:
+                alt = studio_fonts.alternative(fam.strip())
+            except Exception:
+                alt = None
+            if alt is not None:
+                raise Bad(f"{fam.strip()} isn't openly licensed, so it can't be used; {alt[0]} is the closest open "
+                          f"match.")
+        fonts = {k: v.strip() for k, v in fonts.items()} or None
+    layouts = body.get('layouts')
+    if layouts is not None:
+        allowed = SLIDE_LAYOUTS if fmt == 'pptx' else PAGE_TEMPLATES
+        if not isinstance(layouts, dict):
+            raise Bad('layouts must map page numbers (0-based, as text) to layout ids')
+        pages = len(plan.pages) if plan is not None else None
+        out = {}
+        for k, v in layouts.items():
+            if not (isinstance(k, str) and k.isdigit() and len(k) <= 3):
+                raise Bad(f'layout page {str(k)[:12]!r} must be a 0-based page number')
+            if pages is not None and int(k) >= pages:
+                raise Bad(f'page {int(k) + 1} is not in this file ({pages} pages)')
+            if v not in allowed:
+                raise Bad(f'unknown layout {str(v)[:40]!r} for a {fmt} file')
+            out[int(k)] = v
+        layouts = out or None
+    return RestyleOptions(preset=preset, fonts=fonts, dark=dark, template=template, layouts=layouts,
+                          print_version=bool(body.get('print')))
+
+
+def keep_created(router, sid: str | None, meta: dict, spec: dict, data: bytes) -> dict:
+    """Store a file an endpoint made: in the store, or in its sandbox's memory only."""
+    if sid:
+        meta = {**meta, 'sandbox': sid}
+        mem = router.sandboxes.get(sid)
+        if mem is None:
+            raise Bad('no such file', 404)
+        mem.add_created(meta, spec, data)
+    else:
+        router.store.add_created(meta, spec, data)
+    return meta
+
+
+def drop_ws(fid: str | None, sid: str | None):
+    if not fid:
+        return
+    try:
+        open_ws(fid, sid).delete()
+    except Exception:
+        pass
+
+
+async def restyle_created(request):
+    """POST .../created/{fid}/restyle (RestyleBody): the stored content re-laid out and re-painted with another preset,
+    fonts, dark or light, template or per-page layouts, at 0 tokens; a new CreatedFile (source convert, from_id)."""
+    from .studio import agent as studio_agent
+    from .studio.plan import PAINTED
+    router = request.app[ROUTER]
+    body = await read_json(request)
+    tmp, new_id, sid = None, uuid.uuid4().hex[:12], None
+    try:
+        meta, spec, sid = held_created(request)
+        fmt = meta['format']
+        if spec is None:
+            raise Bad('This file has no stored content to restyle.', 409)
+        got = await asyncio.to_thread(load_design, meta['id'], sid) if designed(meta) else {'plan': None, 'ws': None}
+        opts = restyle_options(body, fmt, got['plan'])
+        if fmt not in PAINTED:
+            raise Bad('Restyle lays out PowerPoint and PDF files. Convert this file to one of them first (0 tokens).')
+        norm, _ = await asyncio.to_thread(create_mod.normalize, spec, fmt)
+        src = got['ws']
+        if got['plan'] is None:
+            # made without the design stage: design it first (keyless, 0 tokens), then restyle that design
+            from .studio.presets import template as template_of
+            tmp = uuid.uuid4().hex[:12]
+            preset = opts.preset or (getattr(template_of(opts.template), 'preset', None) if opts.template else None)
+            await asyncio.wait_for(studio_agent.design(norm, fmt, file_id=tmp, request='', engine=None, http=None,
+                                                       mode='quick', sandbox=sid, preset=preset),
+                                   timeout=STUDIO_TIME_BUDGET + STUDIO_GRACE)
+            src = open_ws(tmp, sid)
+        result = await asyncio.to_thread(studio_agent.restyle, norm, fmt, src, opts, file_id=new_id)
+        if getattr(result, 'painted_bytes', None) is None:
+            raise RuntimeError('nothing was painted')
+        new, spec, data = await asyncio.to_thread(maker.build, spec, fmt, source='convert', tokens=0,
+                                                  from_id=meta['id'], extra=maker.carried(meta), studio=result,
+                                                  file_id=new_id)
+        new = keep_created(router, sid, new, spec, data)
+    except Bad as e:
+        drop_ws(new_id, sid)
+        return err(str(e), e.status)
+    except create_mod.SpecError as e:
+        drop_ws(new_id, sid)
+        return web.json_response({'error': f'Rule {e.rule_id} blocked it: {e.message}', 'rule': e.rule_id}, status=422)
+    except Exception as e:  # the design stage failed: an honest 422, and the original file is untouched
+        drop_ws(new_id, sid)
+        why = 'it took too long' if isinstance(e, asyncio.TimeoutError) else f'{type(e).__name__}: {str(e)[:160]}'
+        return web.json_response({'error': f'The file could not be restyled ({why}).', 'rule': 'V1'}, status=422)
+    finally:
+        drop_ws(tmp, sid)
+    return web.json_response(new)
+
+
+def polish_engine(router, name):
+    """The engine a Polish uses: the named one or the active one. Auto stays Auto while its chain has a healthy
+    engine that can read images (it routes the image call there); otherwise the first available one that can.
+    Raises Bad: 400 unknown or unable to read images (keyless included), 503 unavailable."""
+    from .studio.critic import can_see
+    if name is not None and not isinstance(name, str):
+        raise Bad('engine must be an engine name')
+    if name == 'none':
+        raise Bad(NO_VISION.format(what='keyless mode'))
+    engine = router.engine if name is None else router.engines.get(name)
+    if name is not None and engine is None:
+        raise Bad(f'unknown engine {name[:40]!r}')
+    if engine is None:
+        raise Bad(NO_VISION.format(what='keyless mode'))
+    if hasattr(engine, 'chain') and not can_see(engine):
+        seeing = [e for e in engine.chain() if can_see(e)]
+        if not seeing:
+            raise Bad(NO_VISION.format(what='none of the engines Auto can use'))
+        engine = next((e for e in seeing if e.available()[0]), seeing[0])
+    elif not can_see(engine):
+        raise Bad(NO_VISION.format(what=getattr(engine, 'label', engine.name)))
+    ok, why = engine.available()
+    if not ok:
+        raise Bad(f'{engine.label} is not available: {why}', 503)
+    return engine
+
+
+def polish_estimate(router, engine, plan, meta: dict):
+    """What one critic call costs: the contact sheets (6 pages each) and the design report in, the edits out."""
+    import math
+    seer = engine.seer() if callable(getattr(engine, 'seer', None)) else None
+    view = router.engine_view(seer or engine)   # on Auto, the backend the image call goes to
+    sheets = max(1, math.ceil(len(plan.pages or []) / STUDIO_SHEET_PAGES))
+    calls = [estimate_mod.price('critic', view, prompt=STUDIO_CRITIC_PROMPT_TOKENS, ctx=sheets * STUDIO_SHEET_TOKENS,
+                                base_out=STUDIO_CRITIC_OUT)]
+    return estimate_mod.finish(calls, None, view, router.deadline(meta.get('title') or '', engine), [], False, PRICES,
+                               what=meta['format'])
+
+
+async def polish_created(request):
+    """POST .../created/{fid}/polish (PolishBody): one critic round on the stored design with a vision engine, edits
+    applied by code and QA re-run; priced and guarded like /ask (409 needs_confirmation). A new CreatedFile."""
+    from .engines import EngineRefusal
+    from .studio import agent as studio_agent
+    router = request.app[ROUTER]
+    body = await read_json(request)
+    new_id, sid = uuid.uuid4().hex[:12], None
+    try:
+        meta, spec, sid = held_created(request)
+        if unknown := [k for k in body if k not in ('engine', 'confirm_cost')]:
+            raise Bad(f'unknown field {unknown[0][:40]!r}; send engine or confirm_cost')
+        if 'confirm_cost' in body and not isinstance(body['confirm_cost'], bool):
+            raise Bad('confirm_cost must be true or false')
+        if spec is None:
+            raise Bad('This file has no stored content to polish.', 409)
+        got = await asyncio.to_thread(load_design, meta['id'], sid) if designed(meta) else {'plan': None}
+        if got['plan'] is None:
+            raise Bad('This file has no design plan to polish. Restyle it first to lay it out (0 tokens).', 409)
+        engine = polish_engine(router, body.get('engine'))
+        est = polish_estimate(router, engine, got['plan'], meta)
+    except Bad as e:
+        return err(str(e), e.status)
+    if (resp := cost_guard(body, 'sandbox' if sid else 'chat', est)) is not None:
+        return resp
+    fmt = meta['format']
+    try:
+        norm, _ = await asyncio.to_thread(create_mod.normalize, spec, fmt)
+        budget = STUDIO_TIME_BUDGET + STUDIO_GRACE
+        result = await asyncio.wait_for(studio_agent.polish(norm, fmt, got['ws'], engine, file_id=new_id,
+                                                            deadline=time.monotonic() + STUDIO_TIME_BUDGET),
+                                        timeout=budget)
+        if getattr(result, 'painted_bytes', None) is None:
+            raise RuntimeError('nothing was painted')
+        used = maker.studio_usage(result)
+        new, spec, data = await asyncio.to_thread(maker.build, spec, fmt, source='convert',
+                                                  tokens=used['llm_in'] + used['llm_out'], from_id=meta['id'],
+                                                  extra=maker.carried(meta), studio=result, file_id=new_id)
+        new = keep_created(router, sid, new, spec, data)
+    except ValueError as e:
+        drop_ws(new_id, sid)
+        if str(e) == 'no-vision':
+            return err(NO_VISION.format(what=getattr(engine, 'label', 'this engine')))
+        if isinstance(e, create_mod.SpecError):
+            return web.json_response({'error': f'Rule {e.rule_id} blocked it: {e.message}', 'rule': e.rule_id},
+                                     status=422)
+        return web.json_response({'error': f'The design could not be polished ({str(e)[:160]}).', 'rule': 'V1'},
+                                 status=422)
+    except LookupError:
+        drop_ws(new_id, sid)
+        return err('This file has no design plan to polish. Restyle it first to lay it out (0 tokens).', 409)
+    except (EngineError, EngineRefusal) as e:
+        drop_ws(new_id, sid)
+        return err(f'{engine.label} could not polish the design ({str(getattr(e, "why", "") or e)[:160]}).', 503)
+    except Bad as e:
+        drop_ws(new_id, sid)
+        return err(str(e), e.status)
+    except Exception as e:
+        drop_ws(new_id, sid)
+        why = 'it took too long' if isinstance(e, asyncio.TimeoutError) else f'{type(e).__name__}: {str(e)[:160]}'
+        return web.json_response({'error': f'The design could not be polished ({why}).', 'rule': 'V1'}, status=422)
+    if not sid and (used['llm_in'] or used['llm_out']):
+        router.usage(None, {'claude_in': used['llm_in'], 'claude_out': used['llm_out']})
+    return web.json_response(new)
+
+
+def prune_design_caches():
+    """Startup: the font cache and design workspaces back under their caps and TTL (docs/PLAN-designer.md 3.3, 3.6)."""
+    for mod, fn in (('fonts', 'prune'), ('workspace', 'prune')):
+        try:
+            module = __import__(f'jevrouter.studio.{mod}', fromlist=[fn])
+            getattr(module, fn)()
+        except Exception:
+            pass
 
 
 # ---------- compare ----------
@@ -1349,6 +1797,8 @@ def create_app(router_factory=None) -> web.Application:
             app[ROUTER] = Router(AsyncTypeSafeClient(), app[HTTP], choose(engines, store.get_setting('engine')),
                                  engines=engines, store=store)
             app[WARMUP] = asyncio.create_task(warm_up(app[ROUTER].engine))
+            # the font cache and design workspaces back under their caps (never for a test's router factory)
+            background(asyncio.to_thread(prune_design_caches))
         app[AUTOPILOT] = asyncio.create_task(app[ROUTER].autopilot())
         app[SWEEPER] = asyncio.create_task(app[ROUTER].sweeper())
 
@@ -1395,6 +1845,17 @@ def create_app(router_factory=None) -> web.Application:
         web.get('/api/rules', list_rules),
         web.get('/api/sandbox/{id}/created/{fid}/download', download_sandbox_created),
         web.get('/api/sandbox/{id}/created/{fid}/preview', preview_sandbox_created),
+        # Studio (docs/PLAN-designer.md 9.9)
+        web.get('/api/design/presets', design_presets), web.get('/api/design/presets/{id}/thumb', design_preset_thumb),
+        web.get('/api/fonts/search', fonts_search), web.get('/api/fonts/preview', font_preview),
+        web.get('/api/created/{fid}/thumbs', created_thumbs), web.get(r'/api/created/{fid}/thumbs/{n:\d+}.png', created_thumb),
+        web.get('/api/created/{fid}/design', created_design), web.post('/api/created/{fid}/restyle', restyle_created),
+        web.post('/api/created/{fid}/polish', polish_created),
+        web.get('/api/sandbox/{id}/created/{fid}/thumbs', created_thumbs),
+        web.get(r'/api/sandbox/{id}/created/{fid}/thumbs/{n:\d+}.png', created_thumb),
+        web.get('/api/sandbox/{id}/created/{fid}/design', created_design),
+        web.post('/api/sandbox/{id}/created/{fid}/restyle', restyle_created),
+        web.post('/api/sandbox/{id}/created/{fid}/polish', polish_created),
         web.post('/api/compare', compare), web.get('/api/compare/{id}', get_compare),
         web.post('/api/evals/run', run_eval), web.get('/api/evals', list_evals),
         web.get('/api/evals/compare', compare_evals), web.get('/api/evals/{id}', get_eval),

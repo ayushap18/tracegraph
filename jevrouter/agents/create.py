@@ -12,6 +12,7 @@ earlier step's answer is copied only when the brief asks for no more than that, 
 file goes to the long-document writer (create/longdoc.py). What the file could not honour comes back as caveats.
 """
 import asyncio
+import contextvars
 import csv
 import dataclasses
 import io
@@ -23,7 +24,7 @@ from typing import Callable
 
 from .. import create as cf
 from ..config import (BLOCK_AT, CREATE_CONTEXT_CHARS, CREATE_MAX_TOKENS, CREATE_SAFETY_CHARS, CREATE_SAFETY_CHUNKS,
-                      CREATE_TABLE_ROWS)
+                      CREATE_TABLE_ROWS, STUDIO_GRACE, STUDIO_TIME_BUDGET)
 from ..create import brief as brief_mod
 from ..create import design as design_mod
 from ..create.brief import Brief, asks_more, diagrams_min, parse_brief
@@ -77,9 +78,11 @@ LEAD_ASK = re.compile(r"^(?:what(?:'s| is| are| was| were)?|who(?:'s| is| was| w
 
 SYSTEM = ('Do not use tools. You write the content of one downloadable file as JSON matching the schema: a title, a '
           'subtitle (may be empty) and sections, each with a heading, a level (1 to 3), blocks (paragraph, bullets, '
-          'table, chart, quote, code, and the diagrams timeline, tree and flow) and notes (may be empty). Write content '
-          'only: no styling, fonts, colours, layout, HTML or Markdown syntax. Draw a timeline, hierarchy or process as a '
-          'timeline, tree or flow block, never as text or code. Use only facts from the request, the context and the '
+          'table, chart, quote, code, the diagrams timeline, tree and flow, and a diagram block whose kind is cycle, '
+          'venn, pyramid, matrix, mindmap, process, comparison, stat-cards or scatter, with the unused fields empty) '
+          'and notes (may be empty). Write content only: no styling, fonts, colours, layout, HTML or Markdown syntax. '
+          'Draw a timeline, hierarchy, process, cycle, overlap or comparison as a diagram block, never as text or '
+          'code. Use only facts from the request, the context and the '
           'attached data given here, and never ask for anything to be fetched; a figure block (a Wikimedia Commons '
           'search query and a caption) is the only way to ask for a picture, and only when the request asks for images. '
           'Numbers in tables and charts are numbers. {shape}')
@@ -117,6 +120,7 @@ class Job:
     tally: object | None = None                        # longdoc.Tally shared by every call this job makes
     design: dict | None = None                         # the spec['design'] make() parsed (set by make)
     design_notes: list[str] = field(default_factory=list)  # what could not be done with the design (set by make)
+    sandbox: str | None = None                         # the sandbox a sandbox run's files live in (Studio workspace)
 
 
 @dataclass
@@ -152,18 +156,29 @@ def shape_of(meta: dict) -> str:
 
 def build(spec: dict, fmt: str, *, source: str, tokens: int = 0, qid: int | None = None, from_id: str | None = None,
           extra: list | tuple = (), brief: Brief | None = None, credits: list | tuple = (),
-          role: str | None = None) -> tuple[dict, dict, bytes]:
+          role: str | None = None, studio=None, file_id: str | None = None) -> tuple[dict, dict, bytes]:
     """(CreatedFile, the spec to store, the bytes). Blocking (rendering is CPU work), so callers use a thread. Raises
     SpecError when a block rule fails. With a brief, the file is also checked against it (V5-V9) and the meta says
-    how it met it (docs/PLAN-accuracy-v2.md C8)."""
+    how it met it (docs/PLAN-accuracy-v2.md C8).
+
+    studio: a studio DesignResult (docs/PLAN-designer.md 9.10). With painted_bytes those are the file (render_safe is
+    skipped) and verify() still checks them, plus D1-D8 from the design report; without, the file renders as today and
+    the report's checks still apply. file_id: the id finish() gave the design stage (default: a new one)."""
     norm, results = cf.normalize(spec, fmt)
-    data, laid = cf.render_safe(spec, fmt)  # the renderer's own ladder (V11): a section that cannot be laid out is left out
-    checks = cf.verify(spec, fmt, data, brief=brief, extra=[*laid, *extra])  # checked against what was drawn
+    painted = getattr(studio, 'painted_bytes', None) if studio is not None else None
+    report = getattr(studio, 'report', None) if studio is not None else None
+    if painted is not None:
+        data = bytes(painted)
+        laid = [cf.RuleResult('V11', 'fix', True, 'every section laid out by the design stage')]
+    else:
+        data, laid = cf.render_safe(spec, fmt)  # the renderer's own ladder (V11): a section that cannot be laid out is left out
+    checks = cf.verify(spec, fmt, data, brief=brief, extra=[*laid, *extra],  # checked against what was drawn
+                       design_report=report if isinstance(report, dict) else None)
     try:
         pv = cf.preview(fmt, data)
     except Exception:
         pv = {}
-    meta = {'id': uuid.uuid4().hex[:12], 'name': cf.file_name(norm['title'], fmt), 'format': fmt, 'size': len(data),
+    meta = {'id': file_id or uuid.uuid4().hex[:12], 'name': cf.file_name(norm['title'], fmt), 'format': fmt, 'size': len(data),
             'created': time.time(), 'qid': qid, 'title': norm['title'], 'pages': pv.get('pages'),
             'slides': pv.get('slides'), 'sheets': [s['name'] for s in pv['sheets']] if pv.get('kind') == 'sheets' else None,
             'tokens': int(tokens), 'source': source, 'from_id': from_id,
@@ -178,15 +193,212 @@ def build(spec: dict, fmt: str, *, source: str, tokens: int = 0, qid: int | None
         meta['design'] = design_applied(design, theme, choice, fmt, bool(norm.get('font')))
     else:
         choice = fonts.resolve(norm.get('font'), fmt, theme=norm['theme'])
+    if studio is not None:
+        meta['design'] = studio_design(studio, meta.get('design'))
     meta.update({'theme': norm['theme'], 'font_used': choice.used or None,
                  'diagrams': sum(b['type'] in cf.DIAGRAMS for b in blocks),
                  'images': sum(b['type'] == 'image' for b in blocks) if fmt in ('pdf', 'docx', 'pptx') else 0,
                  'credits': [c.to_dict() if hasattr(c, 'to_dict') else dict(c) for c in credits]})
+    if painted is not None:  # the preset's legacy theme name (V8 and older clients read it) and the body font it uses
+        meta['theme'] = studio_theme(studio, norm['theme'])
+        meta['font_used'] = studio_font(studio) or meta['font_used']
     if brief is not None:
         meta['brief'] = brief_mod.to_dict(brief)
     if role:
         meta['role'] = role
     return meta, spec, data
+
+
+# ---------- Studio, the design stage (docs/PLAN-designer.md 9.10) ----------
+
+# what make() knows of the run, for finish() wherever it is called from (the long writer too)
+STUDIO_RUN: contextvars.ContextVar[dict | None] = contextvars.ContextVar('studio_run', default=None)
+DESIGN_ROLES = ('bg', 'surface', 'text', 'heading', 'muted', 'accent', 'border', 'header_bg', 'header_text', 'stripe',
+                'code_bg')
+_UNSET = object()
+
+
+def studio_on(fmt: str | None) -> bool:
+    """TG_STUDIO designs this format (studio.enabled, the only check). False when Studio can't even be imported."""
+    if not fmt:
+        return False
+    try:
+        from .. import studio
+        return bool(studio.enabled(fmt))
+    except Exception:
+        return False
+
+
+def _plan_of(result):
+    return getattr(result, 'plan', None)
+
+
+def studio_theme(result, default: str) -> str:
+    """CreatedFile.theme for a designed file: the legacy theme of its preset (presets.THEME_OF)."""
+    try:
+        from ..studio.presets import THEME_OF
+        return THEME_OF.get(getattr(_plan_of(result), 'preset', None), default)
+    except Exception:
+        return default
+
+
+def studio_font(result) -> str | None:
+    plan = _plan_of(result)
+    for f in getattr(plan, 'fonts', None) or []:
+        if getattr(f, 'role', None) == 'body' and getattr(f, 'family', None):
+            return f.family
+    return None
+
+
+def _meta_design(result) -> dict:
+    """studio.agent.meta_design(result) (or the result's own copy); a minimal one from the plan if that fails."""
+    got = getattr(result, 'meta_design', None)
+    if not isinstance(got, dict):
+        try:
+            from ..studio import agent as studio_agent
+            got = studio_agent.meta_design(result)
+        except Exception:
+            got = None
+    if isinstance(got, dict):
+        return dict(got)
+    plan, report = _plan_of(result), getattr(result, 'report', None) or {}
+    return {'studio': True, 'preset': getattr(plan, 'preset', None),
+            'fonts': [dataclasses.asdict(f) if dataclasses.is_dataclass(f) else dict(f)
+                      for f in getattr(plan, 'fonts', None) or []],
+            'score': getattr(plan, 'score', None), 'notes': [],
+            'thumbs': int(report.get('thumbs') or 0) if isinstance(report, dict) else 0}
+
+
+def studio_design(result, base: dict | None) -> dict:
+    """CreatedFile.design for a designed file: the design file's DesignApplied (when one was used) with Studio's
+    fields merged in (studio, preset, fonts, score, thumbs). Without a design file, name is 'preset:<id>', colors are
+    the preset's roles and confidence is 1 (docs/PLAN-designer.md 9.9)."""
+    extra = _meta_design(result)
+    plan = _plan_of(result)
+    if base is None:
+        system = getattr(plan, 'system', None) or {}
+        colors = {k: str(v) for k, v in (system.get('colors') or {}).items() if k in DESIGN_ROLES and v}
+        fams = system.get('families') or {}
+        used = {getattr(f, 'role', None): getattr(f, 'family', None) for f in getattr(plan, 'fonts', None) or []}
+        base = {'name': f'preset:{extra.get("preset") or getattr(plan, "preset", None) or "custom"}', 'colors': colors,
+                'palette': [str(c) for c in system.get('chart_palette') or []],
+                'heading_font': None, 'body_font': None,
+                'fonts_used': {'heading': used.get('heading') or fams.get('heading') or None,
+                               'body': used.get('body') or fams.get('body') or None},
+                'nudged': [], 'notes': [], 'confidence': 1}
+    notes = list(dict.fromkeys([*(base.get('notes') or []), *(extra.get('notes') or [])]))
+    return {**base, **extra, 'studio': True, 'notes': notes}
+
+
+def studio_usage(result) -> dict:
+    """{calls, llm_in, llm_out, ms} of a DesignResult's phases."""
+    out = {'calls': 0, 'llm_in': 0, 'llm_out': 0, 'ms': 0}
+    for p in getattr(result, 'phases', None) or []:
+        if isinstance(p, dict):
+            for k in out:
+                v = p.get(k)
+                out[k] += int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+    return out
+
+
+def fell_back_caveat(why: str) -> str:
+    why = ' '.join(str(why or '').split())[:140].rstrip('.') or 'an unexpected error'
+    return f'The design stage failed ({why}), so the file uses the standard layout.'
+
+
+def drop_workspace(file_id: str | None, sandbox: str | None = None):
+    """Forget a design workspace that no file uses (the design stage fell back). Never raises."""
+    if not file_id:
+        return
+    try:
+        from ..studio import workspace
+        workspace.open_workspace(file_id, sandbox=sandbox).delete()
+    except Exception:
+        pass
+
+
+async def design_file(spec: dict, fmt: str, *, file_id: str, brief=None, request: str = '', engine=None, http=None,
+                      mode: str = 'balanced', sandbox: str | None = None, deadline: float | None = None
+                      ) -> tuple[object | None, str | None, int]:
+    """(DesignResult or None, the fell-back caveat or None, ms) for one file: studio.agent.design on the normalized
+    spec, bounded by the time budget. Any failure, or nothing painted for a painted format, is (None, caveat): the
+    caller renders with the legacy renderer and a file is never lost to Studio."""
+    t0 = time.perf_counter()
+    ms = lambda: round((time.perf_counter() - t0) * 1000)  # noqa: E731
+    try:
+        from .. import studio
+        from ..studio.plan import PAINTED
+        norm, _ = await asyncio.to_thread(cf.normalize, spec, fmt)
+        tokens_src = design_mod.clean_design(spec.get('design'))
+        budget = STUDIO_TIME_BUDGET + STUDIO_GRACE
+        if deadline is not None:
+            budget = max(1.0, min(budget, deadline - time.monotonic()))
+        result = await asyncio.wait_for(studio.agent.design(
+            norm, fmt, file_id=file_id, brief=brief, request=request or '', tokens_src=tokens_src or None,
+            engine=engine, http=http, mode=mode or 'balanced', sandbox=sandbox, deadline=deadline), timeout=budget)
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError:
+        drop_workspace(file_id, sandbox)
+        return None, fell_back_caveat('it ran out of time'), ms()
+    except cf.SpecError:  # the legacy build will name the rule
+        drop_workspace(file_id, sandbox)
+        return None, None, ms()
+    except Exception as e:
+        drop_workspace(file_id, sandbox)
+        return None, fell_back_caveat(f'{type(e).__name__}: {e}' if str(e) else type(e).__name__), ms()
+    if getattr(result, 'fell_back', False) or (fmt in PAINTED and getattr(result, 'painted_bytes', None) is None):
+        drop_workspace(file_id, sandbox)
+        why = next(iter(getattr(result, 'caveats', None) or []), None) or 'nothing was painted'
+        return None, (why if str(why).startswith('The design stage failed') else fell_back_caveat(why)), ms()
+    return result, None, ms()
+
+
+async def build_designed(spec: dict, fmt: str, *, source: str, tokens: int = 0, from_id: str | None = None,
+                         extra: list | tuple = (), brief: Brief | None = None, credits: list | tuple = (),
+                         role: str | None = None, engine=None, mode: str = 'balanced', http=None, request: str = '',
+                         sandbox: str | None = None, deadline: float | None = None, seed_from: str | None = None
+                         ) -> tuple[dict, dict, bytes, dict]:
+    """build() with the design stage in front when TG_STUDIO designs the format: (CreatedFile, spec, bytes, {usage,
+    notes, caveats}). The file id is made first so Studio's workspace is the file's. A conversion (source 'convert')
+    is designed keyless; seed_from names a file whose workspace seeds this one (Workspace.copy_to: fonts, images and
+    measurements are reused). A design failure, or a painted file that fails a block rule, falls back to the standard
+    renderer with one caveat. Raises SpecError like build()."""
+    file_id = uuid.uuid4().hex[:12]
+    got = {'usage': studio_usage(None), 'notes': [], 'caveats': []}
+    designed = None
+    if studio_on(fmt):
+        if source != 'llm' or not tokens:
+            engine = None   # a file made at 0 tokens (an answer, a table, a conversion, a rebuild) is designed keyless
+        if seed_from:
+            try:
+                from ..studio import workspace
+                src = workspace.open_workspace(seed_from, sandbox=sandbox)
+                if src.exists():
+                    await asyncio.to_thread(src.copy_to, file_id)
+            except Exception:
+                pass
+        designed, fell, _ = await design_file(spec, fmt, file_id=file_id, brief=brief, request=request, engine=engine,
+                                              http=http, mode=mode, sandbox=sandbox, deadline=deadline)
+        if fell:
+            got['caveats'].append(fell)
+        if designed is not None:
+            got['usage'] = studio_usage(designed)
+            got['notes'] += [n for n in getattr(designed, 'notes', None) or [] if n]
+            got['caveats'] += [c for c in getattr(designed, 'caveats', None) or [] if c]
+    tokens = int(tokens) + got['usage']['llm_in'] + got['usage']['llm_out']
+    kw = dict(source=source, tokens=tokens, from_id=from_id, extra=extra, brief=brief, credits=credits, role=role,
+              file_id=file_id)
+    try:
+        meta, spec, data = await asyncio.to_thread(build, spec, fmt, studio=designed, **kw)
+    except cf.SpecError as e:
+        if designed is None or getattr(designed, 'painted_bytes', None) is None:
+            raise
+        # the painted file failed a block rule: the standard renderer makes it instead (a file is never lost to Studio)
+        drop_workspace(file_id, sandbox)
+        got['caveats'].append(fell_back_caveat(f'its file failed rule {e.rule_id}: {e.message}'))
+        meta, spec, data = await asyncio.to_thread(build, spec, fmt, **kw)
+    return meta, spec, data, got
 
 
 def merged_rules(results) -> list[dict]:
@@ -234,9 +446,11 @@ def answer_for(meta: dict, notes: list[str], brief: Brief | None = None) -> str:
     return '\n\n'.join([lines[0], *notes, *lines[1:]])
 
 
-def caveats_for(meta: dict, brief: Brief | None, spec: dict | None = None, extra: list[str] = ()) -> list[str]:
+def caveats_for(meta: dict, brief: Brief | None, spec: dict | None = None, extra: list[str] = (),
+                info: list[str] | tuple = ()) -> list[str]:
     """What the file could not honour, in plain words (C8): failed brief checks, the font and asset notes passed in
-    `extra`, and notes the writer left in the spec that admit something was not done."""
+    `extra`, and notes the writer left in the spec that admit something was not done. `info` are notes that only say
+    what was done (Studio's "designed 12 slides in the minimal style"): they stay in the answer, never caveats."""
     out = [c for c in extra if c]
     failed = {r['id']: r for r in meta.get('rules') or [] if not r['ok'] and r['id'] in ('V5', 'V6', 'V7', 'V8', 'V9',
                                                                                              'V10')}
@@ -250,7 +464,7 @@ def caveats_for(meta: dict, brief: Brief | None, spec: dict | None = None, extra
         out.append(f'the file is not fully in the theme asked for ({failed["V8"]["note"]})')
     if 'V9' in failed:
         out.append(failed['V9']['note'].replace(' drawn, asked for at least', ' drawn; asked for at least'))
-    out += list((meta.get('design') or {}).get('notes') or [])
+    out += [n for n in (meta.get('design') or {}).get('notes') or [] if n not in info]
     if 'V10' in failed and failed['V10'].get('note'):
         out.append(failed['V10']['note'])
     for sec in (spec or {}).get('sections') or []:
@@ -399,6 +613,9 @@ async def make(job: Job, engine=None, jev=None, mode: str = 'balanced') -> Made:
     from ..create.longdoc import Tally
     if job.tally is None:
         job.tally = Tally()
+    # what finish() hands the design stage, wherever it is called from (docs/PLAN-designer.md 9.10)
+    token = STUDIO_RUN.set({'engine': engine, 'mode': mode, 'http': job.http, 'request': job.request,
+                            'sandbox': job.sandbox, 'deadline': job.deadline})
     try:
         return await _make(job, engine, jev, mode)
     except asyncio.CancelledError:
@@ -411,6 +628,8 @@ async def make(job: Job, engine=None, jev=None, mode: str = 'balanced') -> Made:
             msg = f'No file was made: something went wrong while building it ({type(e).__name__}: {str(e)[:120]}).'
         used = (job.tally.engine or getattr(engine, 'name', None) or 'keyless') if tin or tout else 'keyless'
         return Made(msg, False, used, tin, tout, phases=list(job.tally.phases.values()), checkpoint=job.tally.state)
+    finally:
+        STUDIO_RUN.reset(token)
 
 
 def pick_design(job: Job, design_docs: list, req: str, theme: str | None) -> tuple[dict | None, list[str]]:
@@ -897,7 +1116,8 @@ async def from_engine(job: Job, engine, jev, fmt: str | None, theme: str | None,
     out = await finish(spec, fmt, jev, source='llm', tokens=s['llm_in'] + s['llm_out'], notes=notes, brief=brief,
                        theme=theme, role=job.role, credits=credits, caveats=caveats, design=job.design,
                        design_notes=job.design_notes, extra=fixed)
-    out.engine, out.llm_in, out.llm_out, out.effort = s['engine'], s['llm_in'], s['llm_out'], effort
+    # the design stage's own calls (art direction) are finish()'s llm_in/llm_out: added, not replaced
+    out.engine, out.llm_in, out.llm_out, out.effort = s['engine'], s['llm_in'] + out.llm_in, s['llm_out'] + out.llm_out, effort
     out.phases = [*s['phases'], *([phase] if phase else []), *out.phases]
     out.repairs, out.reply = repairs, raw[:200_000]
     if out.file is not None:
@@ -945,10 +1165,17 @@ async def write_long(job: Job, engine, jev, fmt: str | None, brief: Brief, mode:
 async def finish(spec: dict, fmt: str, jev, *, source: str, tokens: int = 0, from_id: str | None = None,
                  notes: list[str] = (), extra: list = (), brief: Brief | None = None, theme: str | None = None,
                  role: str | None = None, credits: list = (), caveats: list[str] = (),
-                 short_from: str | None = None, design: dict | None = None, design_notes: list[str] = ()) -> Made:
+                 short_from: str | None = None, design: dict | None = None, design_notes: list[str] = (),
+                 engine=_UNSET, mode: str | None = None, http=_UNSET, request: str | None = None,
+                 sandbox=_UNSET, deadline=_UNSET) -> Made:
     """X4 (unless this is a conversion of a spec that passed it: jev None), then normalize -> render -> verify. The
     brief's theme and font and the design go into the spec, the brief checks run, and what could not be honoured
-    becomes caveats. An explicit theme word wins over a design the stored spec carries."""
+    becomes caveats. An explicit theme word wins over a design the stored spec carries.
+
+    When TG_STUDIO designs the format, the design stage runs after X4 (docs/PLAN-designer.md 9.10): the file id is
+    made first, studio.agent.design lays out and paints the file, and build() verifies the painted bytes. Any failure
+    falls back to the standard renderer with a caveat. engine, mode, http, request, sandbox and deadline default to
+    what make() set for the run; a conversion (source 'convert') is designed keyless, at 0 tokens."""
     extra, jev_tokens, notes, caveats = list(extra), 0, list(notes), [*caveats, *(design_notes or [])]
     if design:
         spec['design'] = design
@@ -985,13 +1212,21 @@ async def finish(spec: dict, fmt: str, jev, *, source: str, tokens: int = 0, fro
                         jev_tokens=jev_tokens)
         extra.append(cf.RuleResult('X4', 'block', True, f'Jev unsafe score {score:.0%}' +
                                    (f' (highest of {len(pieces)} parts)' if len(pieces) > 1 else '')))
+    run = STUDIO_RUN.get() or {}
+    pick = lambda v, k: run.get(k) if v is _UNSET else v  # noqa: E731
     t0 = time.perf_counter()
     try:
-        meta, spec, data = await asyncio.to_thread(build, spec, fmt, source=source, tokens=tokens, from_id=from_id,
-                                                   extra=extra, brief=brief, credits=credits, role=role)
+        meta, spec, data, got = await build_designed(
+            spec, fmt, source=source, tokens=tokens, from_id=from_id, extra=extra, brief=brief, credits=credits,
+            role=role, engine=pick(engine, 'engine'), mode=mode or run.get('mode') or 'balanced', http=pick(http, 'http'),
+            request=request if request is not None else run.get('request') or '', sandbox=pick(sandbox, 'sandbox'),
+            deadline=pick(deadline, 'deadline'))
     except cf.SpecError as e:
         return Made(f'No file was made. Rule {e.rule_id} blocked it: {e.message}', False, jev_tokens=jev_tokens)
     render_ms = round((time.perf_counter() - t0) * 1000)
+    usage = got['usage']
+    notes += got['notes']
+    caveats += got['caveats']
     if short_from and brief is not None:
         caveats.insert(0, short_caveat(brief, meta, short_from))
     if credits:
@@ -1013,9 +1248,14 @@ async def finish(spec: dict, fmt: str, jev, *, source: str, tokens: int = 0, fro
         meta_rules = [r for r in meta['rules'] if r['id'] != 'V5']
     else:
         meta_rules = meta['rules']
-    found = caveats_for({**meta, 'rules': meta_rules}, brief, spec, caveats)
+    found = caveats_for({**meta, 'rules': meta_rules}, brief, spec, caveats, info=got['notes'])
     made = Made(answer_for(meta, notes, brief), True, jev_tokens=jev_tokens, file=meta, spec=spec, data=data,
-                caveats=found)
-    made.phases = [{'phase': 'render', 'calls': 0, 'llm_in': 0, 'llm_out': 0, 'ms': render_ms}]
+                caveats=found, llm_in=usage['llm_in'], llm_out=usage['llm_out'])
+    if usage['calls'] or usage['llm_in'] or usage['llm_out']:
+        made.engine = getattr(pick(engine, 'engine'), 'name', None) or 'keyless'
+    # Studio's calls, tokens and time are the render entry's (FilePhase keeps its names; DesignReport.phases has
+    # the breakdown)
+    made.phases = [{'phase': 'render', 'calls': usage['calls'], 'llm_in': usage['llm_in'], 'llm_out': usage['llm_out'],
+                    'ms': render_ms}]
     meta['phases'] = made.phases
     return made

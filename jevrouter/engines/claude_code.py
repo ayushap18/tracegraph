@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 from .base import EngineError, EngineRefusal, Reply, first_url_in
-from .cli import CliEngine, Parser
+from .cli import CliEngine, Parser, run
 
 EFFORT = {'low': 'low', 'medium': 'medium', 'high': 'high'}
 
@@ -60,6 +60,9 @@ class ClaudeCodeEngine(CliEngine):
     binary = 'claude'
     bin_env = 'TG_CLAUDE_BIN'
     supports_web = True
+    # Images go in through the CLI's stream-json input, as base64 image blocks in the user message (the same message
+    # shape the Messages API takes), so no file on disk and no Read tool is needed.
+    supports_vision = True
     # Without these the CLI would bill a pay-per-token key instead of the subscription.
     drop_env = ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN')
     login_hint = 'run `claude` once and sign in'
@@ -73,6 +76,29 @@ class ClaudeCodeEngine(CliEngine):
     def persistent(self, *, system, prompt, effort, web, schema):
         # The system prompt is a flag, so each distinct one (planner, merger, each agent) gets its own warm process.
         line = json.dumps({'type': 'user', 'message': {'role': 'user', 'content': prompt}}) + '\n'
+        return self.flags(system, effort, web, schema) + ['--input-format', 'stream-json'], line
+
+    async def stream(self, *, system, prompt, effort='medium', emit_delta=None, max_tokens=2048, web=False, schema=None,
+                     exec=False, images=None):
+        if not images:
+            return await super().stream(system=system, prompt=prompt, effort=effort, emit_delta=emit_delta,
+                                        max_tokens=max_tokens, web=web, schema=schema, exec=exec)
+        # A call with images starts its own process and leaves the warm pool to text calls: image calls are rare (the
+        # design critic, Polish), so they are not worth a pre-started process.
+        ok, why = self.available()
+        if not ok:
+            raise EngineError(why)
+        args, line = self.with_images(system=system, prompt=prompt, effort=effort, web=web, schema=schema,
+                                      images=images)
+        async with self.sem:
+            return await run(self.path, args, line, self.parser(), emit_delta, env=self.env(), cwd=self.cwd(),
+                             timeout=self.timeout, login_hint=self.login_hint)
+
+    def with_images(self, *, system, prompt, effort, web, schema, images):
+        """(argv, one stream-json stdin line) for a prompt with PNG images before it."""
+        from .anthropic_api import user_content
+        message = {'role': 'user', 'content': user_content(prompt, images)}
+        line = json.dumps({'type': 'user', 'message': message}) + '\n'
         return self.flags(system, effort, web, schema) + ['--input-format', 'stream-json'], line
 
     def flags(self, system, effort, web, schema):

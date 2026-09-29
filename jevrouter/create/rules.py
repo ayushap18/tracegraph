@@ -31,7 +31,7 @@ class SpecError(ValueError):
 
 
 _GROUPS = {'S': 'Content spec', 'L': 'Size limits', 'F': 'Structure and style', 'X': 'Safety',
-           'V': 'Verification', 'A': 'Accessibility'}
+           'V': 'Verification', 'A': 'Accessibility', 'D': 'Design'}
 
 
 def _rule(rid: str, severity: str | None, text: str) -> dict:
@@ -121,7 +121,25 @@ RULES: list[dict] = [
     _rule('A2', 'fix', 'Tables have a header row marked as a header.'),
     _rule('A3', 'warn', 'Charts carry a text title, and a one-line summary of what they show appears next to them.'),
     _rule('A4', 'fix', 'Colour is never the only way information is shown; theme colours meet 4.5:1 contrast for text.'),
+    # docs/PLAN-designer.md 9.8: Studio's visual QA, read from the design report of a designed file (absent otherwise)
+    _rule('D1', 'warn', 'Overflow: no text is taller than its box (0.5 pt of slack) and no line is wider than its box.'),
+    _rule('D2', 'warn', 'Overlap: no two boxes overlap by more than 1 square point, unless the upper one is meant to sit '
+                        'on top (text on an overlay, art behind type).'),
+    _rule('D3', 'warn', 'Readability: text is at least the minimum size (slides 18 pt, captions 12 pt; print 10 pt, '
+                        'captions 8 pt) and meets 4.5:1 contrast (3:1 for large text), measured against the photo under '
+                        'it too.'),
+    _rule('D4', 'warn', 'Density: a slide holds at most 40 words of bullets or 60 of prose, and 25 to 60 percent of each '
+                        'page is white space (15 to 60 percent in print).'),
+    _rule('D5', 'warn', 'Balance: the visual weight of a page sits in its middle third both ways (asymmetric layouts, '
+                        'covers and freeform pages are skipped).'),
+    _rule('D6', 'warn', 'Consistency: text sizes are on the type scale, text left edges sit on grid columns, and the file '
+                        'uses one image treatment.'),
+    _rule('D7', 'warn', 'Variety: no layout is used on more than 3 slides in a row, and a deck of 8 or more slides uses at '
+                        'least 4 layouts.'),
+    _rule('D8', 'warn', 'Images: no picture is enlarged more than 1.5 times (at 96 dpi on slides, 150 dpi in print) and '
+                        'its focal point stays inside the crop.'),
 ]
+DESIGN_RULES = ('D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8')
 
 
 # ---------- verify ----------
@@ -427,13 +445,43 @@ def _lost_chars(spec: dict, fonts) -> tuple[int, int, str]:
     return lost, total, ''.join(examples)
 
 
-def verify(spec: dict, fmt: str, data: bytes, brief=None, extra=()) -> list[RuleResult]:
+def _planned_pages(report: dict | None) -> int:
+    """The pages or slides a Studio design report says were laid out (the sum of its layout counts); 0 without one."""
+    if not isinstance(report, dict) or not isinstance(report.get('layouts'), dict):
+        return 0
+    return sum(v for v in report['layouts'].values() if isinstance(v, int) and not isinstance(v, bool) and v > 0)
+
+
+def design_checks(report: dict | None) -> list[RuleResult]:
+    """D1-D8 from a Studio design report (docs/PLAN-designer.md 9.8): one warn RuleResult per check, in D1..D8 order;
+    [] for a file made without Studio (no report). A check the report does not list counts as passed."""
+    if not isinstance(report, dict):
+        return []
+    by = {c.get('id'): c for c in report.get('checks') or [] if isinstance(c, dict)}
+    out = []
+    for rid in DESIGN_RULES:
+        c = by.get(rid)
+        if c is None:
+            out.append(RuleResult(rid, 'warn', True, 'not checked'))
+            continue
+        ok = bool(c.get('ok'))
+        n = c.get('failures') if isinstance(c.get('failures'), int) else 0
+        note = ' '.join(str(c.get('note') or '').split())[:200]
+        if not ok:
+            head = f'{n} issue{"" if n == 1 else "s"}' if n else 'failed'
+            note = f'{head}: {note}' if note else head
+        out.append(RuleResult(rid, 'warn', ok, note or 'passed'))
+    return out
+
+
+def verify(spec: dict, fmt: str, data: bytes, brief=None, extra=(), design_report: dict | None = None) -> list[RuleResult]:
     """Reopen the rendered file and check it. Raises SpecError for V1 (does not reopen), L4 (too big), X1 (active
     content) and X6 (an image not from the asset cache, or without a credit); everything else comes back as one
     RuleResult per rule. With the request's brief (create/brief.py) the file is also checked against it (V5-V9), and
     with a design in the spec against the design (V10). `extra` takes the results render_safe (V11) and the create
     agent (V12) made: when render_safe drew some sections as plain text or left them out, the file is checked against
-    what was drawn. They are not repeated in the list returned."""
+    what was drawn. They are not repeated in the list returned. With a Studio design report (a designed file), its QA
+    checks come back as D1-D8 (design_checks)."""
     from . import themes
     from .render import (_Fonts, body_font, chart_summary, safe_formula, sheet_name, sheet_theme, theme_for,
                          theme_name, xlsx_plan)
@@ -545,13 +593,16 @@ def verify(spec: dict, fmt: str, data: bytes, brief=None, extra=()) -> list[Rule
         out.append(RuleResult('A2', 'fix', all(info['header_marked']), 'every table has a marked header row'
                               if all(info['header_marked']) else 'a table has no marked header row'))
     elif fmt == 'pptx':
-        want = 1 + len(sections)
+        # a designed deck has the slides its plan laid out (covers, dividers, splits and a closing slide included)
+        planned = _planned_pages(design_report)
+        want = planned if planned else 1 + len(sections)
         out.append(RuleResult('V3', 'warn', len(info['slides']) == want, f'{len(info["slides"])} slides for {want}'))
         n, xml = _count_charts(data, 'ppt')
         out.append(RuleResult('V4', 'warn', n == len(charts), f'{n} native charts for {len(charts)}'))
         w, h = info['size']
         notes_ok = all(not s.get('notes') or info['notes'][i + 1].strip() for i, s in enumerate(sections)
-                       if i + 1 < len(info['notes']))
+                       if i + 1 < len(info['notes'])) if not planned else \
+            not any(s.get('notes') for s in sections) or any(n.strip() for n in info['notes'])
         ok = abs(w / h - 16 / 9) < 0.01 and _norm(info['slides'][0]) == _norm(spec['title']) and notes_ok
         out.append(RuleResult('F3', 'fix', ok, '16:9, title slide, one slide per section, notes kept' if ok else
                               'slide size, title slide or notes are off'))
@@ -567,7 +618,11 @@ def verify(spec: dict, fmt: str, data: bytes, brief=None, extra=()) -> list[Rule
                               'formulas in the chart data: ' + ', '.join(f[:40] for f in formulas[:3])))
         out.append(RuleResult('X3', 'fix', not external, 'no external references' if not external else
                               'external references in ' + ', '.join(external[:3])))
-        titled = all(_norm(t) == _norm(s['heading']) for t, s in zip(info['slides'][1:], sections))
+        if planned:  # every section heading is the real title of a slide somewhere in the designed deck
+            titles = {_norm(t) for t in info['slides']}
+            titled = all(_norm(s['heading']) in titles for s in sections if s['heading'])
+        else:
+            titled = all(_norm(t) == _norm(s['heading']) for t, s in zip(info['slides'][1:], sections))
         out.append(RuleResult('A1', 'fix', titled, 'every slide has a real title' if titled else
                               'a slide title does not match its section'))
         out.append(RuleResult('A2', 'fix', all(info['tables_first_row']), 'table header rows marked'))
@@ -662,6 +717,7 @@ def verify(spec: dict, fmt: str, data: bytes, brief=None, extra=()) -> list[Rule
         out.append(_x6(fmt, data, images, embedded))
     if brief is not None:
         out += _brief_checks(spec, fmt, info, brief, theme, drawn, charts, embedded, data)
+    out += design_checks(design_report)
     return out
 
 

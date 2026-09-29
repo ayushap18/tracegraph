@@ -34,3 +34,12 @@ def no_cost_confirm(monkeypatch):
     """The cost guard (docs/PLAN-files-robust.md 5.4) is off for existing tests, so a costly-looking run still starts;
     tests of the guard turn it on with TG_COST_CONFIRM=1. Auto's lean long writer keeps its default."""
     monkeypatch.setenv('TG_COST_CONFIRM', '0')
+
+
+@pytest.fixture(autouse=True)
+def design_workspaces(tmp_path, monkeypatch):
+    """Studio is on by default for PowerPoint and PDF, so any test that makes one lays it out in a design workspace:
+    those go under the test's tmp_path, never the real data/cache/design (or the shared sandbox folder)."""
+    from jevrouter.studio import workspace
+    monkeypatch.setattr(workspace, 'DESIGN_DIR', tmp_path / 'design')
+    monkeypatch.setattr(workspace, 'SANDBOX_DIR', tmp_path / 'design-sandbox')

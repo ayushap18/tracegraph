@@ -143,8 +143,8 @@ def lean_long_files_on() -> bool:
 
 # Studio, the design stage (docs/PLAN-designer.md section 9). TG_STUDIO picks the formats it designs: unset or empty ->
 # STUDIO_DEFAULT; '0'/'off'/'false'/'no' -> none; '1'/'on'/'true'/'yes' -> STUDIO_ON; else a comma list of formats
-# ('pptx,pdf,docx'). Read on every file. Phase 0: off by default; STUDIO_DEFAULT becomes STUDIO_ON once L+Q land.
-STUDIO_DEFAULT = ''
+# ('pptx,pdf,docx'). Read on every file. On by default for slides and PDFs (the painted formats).
+STUDIO_DEFAULT = 'pptx,pdf'
 STUDIO_ON = ('pptx', 'pdf')
 STUDIO_ROUNDS = 3                 # agent loop rounds (layout -> QA -> fix)
 STUDIO_DIRECT_TOKENS = 2000       # art direction, tokens out
@@ -153,6 +153,18 @@ STUDIO_CRITIC_TOKENS = 6000       # critic, tokens in + out per file
 STUDIO_FREEFORM_PAGES = 2
 STUDIO_FREEFORM_TOKENS = 2000     # tokens out per freeform page
 STUDIO_TIME_BUDGET = 60.0         # seconds the design stage may take before it paints what it has
+# The integration's own limits (builder I): the create agent stops waiting for the design stage after the time budget
+# plus STUDIO_GRACE seconds and falls back to the standard layout; the font API's input limits (docs/PLAN-designer.md
+# 9.9); what one Polish critic call is priced at before the cost guard sees it (a contact sheet of 6 pages is one
+# image, about STUDIO_SHEET_TOKENS tokens in).
+STUDIO_GRACE = 30.0
+FONT_QUERY_CHARS = 64
+FONT_LIMIT_MAX = 50
+FONT_PREVIEW_CHARS = 60
+STUDIO_SHEET_PAGES = 6
+STUDIO_SHEET_TOKENS = 1_600
+STUDIO_CRITIC_PROMPT_TOKENS = 1_500   # system prompt, schema and the design report
+STUDIO_CRITIC_OUT = 600               # the edits JSON
 
 
 def studio_formats() -> frozenset:

@@ -18,10 +18,12 @@ from .rules import RuleResult, SpecError
 FORMATS = ('pdf', 'docx', 'pptx', 'xlsx', 'md')
 EXTENSIONS = {f: '.' + f for f in FORMATS}
 # timeline, tree and flow are native diagrams; a figure is a web image the create agent looks up (create/assets.py) and
-# turns into the internal `image` block, which the model can never write (strip_internal)
+# turns into the internal `image` block, which the model can never write (strip_internal). The Studio diagram kinds
+# (docs/PLAN-designer.md 9.4: cycle, venn, pyramid, matrix, mindmap, process, comparison, labelled, stat-cards,
+# scatter) are read and repaired like the others; `labelled` points at an asset-cache image, so only code writes one.
 BLOCKS = ('paragraph', 'bullets', 'table', 'chart', 'quote', 'code', 'timeline', 'tree', 'flow', 'figure', 'page_break',
-          'image')
-DIAGRAMS = diagram.KINDS
+          'image', *diagram.NEW_KINDS)
+DIAGRAMS = diagram.ALL_KINDS
 CHART_KINDS = ('bar', 'line', 'pie')
 CHART_ALIASES = {'column': 'bar', 'columns': 'bar', 'bars': 'bar', 'histogram': 'bar', 'area': 'line', 'lines': 'line',
                  'scatter': 'line', 'donut': 'pie', 'doughnut': 'pie'}
@@ -51,6 +53,19 @@ def _obj(props: dict) -> dict:
 _STR = {'type': 'string'}
 _STRS = {'type': 'array', 'items': _STR}
 _CELL = {'anyOf': [_STR, {'type': 'number'}, {'type': 'null'}, _obj({'formula': _STR})]}
+_NUM = {'anyOf': [{'type': 'number'}, {'type': 'null'}]}
+# The Studio kinds a model can write (all of diagram.NEW_KINDS but `labelled`, whose picture only code adds), as one
+# generic block so the strict schema stays small: `items` carry what each kind needs and the rest are left empty.
+# cycle, pyramid: items[].label (a pyramid top first). venn, matrix, comparison: items[] are the sets, quadrants or
+# columns, each a label and its items (venn's `shared` is the overlap; matrix's axes are x_label, y_label). mindmap:
+# items[].label and parent (the label of the item it hangs from; empty for the centre idea). process: label and
+# detail. stat-cards: value and label. scatter: x, y and label, with x_label, y_label. _generic_diagram reads it back.
+DIAGRAM_WRITABLE = tuple(k for k in diagram.NEW_KINDS if k != 'labelled')
+_DIAGRAM_BLOCK = _obj({
+    'type': {'type': 'string', 'enum': ['diagram']}, 'kind': {'type': 'string', 'enum': list(DIAGRAM_WRITABLE)},
+    'title': _STR, 'items': {'type': 'array', 'items': _obj({
+        'label': _STR, 'detail': _STR, 'parent': _STR, 'value': _STR, 'x': _NUM, 'y': _NUM, 'items': _STRS})},
+    'shared': _STRS, 'x_label': _STR, 'y_label': _STR})
 DOCSPEC_SCHEMA = _obj({
     'title': _STR, 'subtitle': _STR,
     'sections': {'type': 'array', 'items': _obj({
@@ -73,6 +88,7 @@ DOCSPEC_SCHEMA = _obj({
             _obj({'type': {'type': 'string', 'enum': ['flow']}, 'title': _STR,
                   'nodes': {'type': 'array', 'items': _obj({'id': _STR, 'label': _STR})},
                   'edges': {'type': 'array', 'items': _obj({'from': _STR, 'to': _STR, 'label': _STR})}}),
+            _DIAGRAM_BLOCK,
             _obj({'type': {'type': 'string', 'enum': ['figure']}, 'query': _STR, 'caption': _STR}),
             _obj({'type': {'type': 'string', 'enum': ['page_break']}}),
         ]}},
@@ -86,10 +102,20 @@ KEYS = {'spec': ('title', 'subtitle', 'format', 'theme', 'paper', 'font', 'desig
         'table': ('type', 'title', 'columns', 'rows', 'formats'), 'chart': ('type', 'kind', 'title', 'labels', 'series'),
         'quote': ('type', 'text', 'by'), 'code': ('type', 'lang', 'text'), 'timeline': ('type', 'title', 'events'),
         'tree': ('type', 'title', 'nodes'), 'flow': ('type', 'title', 'nodes', 'edges'),
-        'figure': ('type', 'query', 'caption'), 'page_break': ('type',), 'image': ('type', 'asset', 'caption', 'credit')}
+        'figure': ('type', 'query', 'caption'), 'page_break': ('type',), 'image': ('type', 'asset', 'caption', 'credit'),
+        'cycle': ('type', 'title', 'steps'), 'venn': ('type', 'title', 'sets', 'shared'),
+        'pyramid': ('type', 'title', 'levels'), 'matrix': ('type', 'title', 'x_axis', 'y_axis', 'quadrants'),
+        'mindmap': ('type', 'title', 'nodes'), 'process': ('type', 'title', 'steps'),
+        'comparison': ('type', 'title', 'columns'), 'labelled': ('type', 'title', 'image', 'callouts'),
+        'stat-cards': ('type', 'title', 'stats'), 'scatter': ('type', 'title', 'x_label', 'y_label', 'points')}
+# the list each Studio diagram kind needs (repair reads other spellings into it; _check_block requires a list)
+DIAGRAM_LISTS = {'cycle': 'steps', 'venn': 'sets', 'pyramid': 'levels', 'matrix': 'quadrants', 'mindmap': 'nodes',
+                 'process': 'steps', 'comparison': 'columns', 'labelled': 'callouts', 'stat-cards': 'stats',
+                 'scatter': 'points'}
 REQUIRED = {'paragraph': ('text',), 'bullets': ('items',), 'table': ('columns', 'rows'),
             'chart': ('labels', 'series'), 'quote': ('text',), 'code': ('text',), 'timeline': ('events',),
-            'tree': ('nodes',), 'flow': ('nodes',), 'figure': (), 'page_break': (), 'image': ('asset',)}
+            'tree': ('nodes',), 'flow': ('nodes',), 'figure': (), 'page_break': (), 'image': ('asset',),
+            **{k: (v,) for k, v in DIAGRAM_LISTS.items()}}
 MAX_FIGURE_QUERY, MAX_CAPTION, MAX_CREDIT = 100, 200, 400
 ASSET_ID = re.compile(r'^[0-9a-f]{64}$')
 # S7: a spec asks for nothing outside itself; keys like these mean "go and fetch".
@@ -427,7 +453,7 @@ def _check_block(b, where) -> str:
     if missing:
         raise SpecError('S1', f'{where} ({t}) is missing {", ".join(missing)}.')
     lists = {'bullets': ('items',), 'table': ('columns', 'rows'), 'chart': ('labels', 'series'), 'timeline': ('events',),
-             'tree': ('nodes',), 'flow': ('nodes',)}.get(t, ())
+             'tree': ('nodes',), 'flow': ('nodes',), **{k: (v,) for k, v in DIAGRAM_LISTS.items()}}.get(t, ())
     for k in lists:
         if not isinstance(b[k], list):
             raise SpecError('S1', f'{where} ({t}): {k} must be a list.')
@@ -610,11 +636,24 @@ def strip_internal(spec):
         return spec
     spec = {k: v for k, v in spec.items() if k not in ('font', 'design', 'format')}
     if isinstance(spec.get('sections'), list):
-        spec['sections'] = [{**s, 'blocks': [b for b in s['blocks'] if not (isinstance(b, dict) and
-                                                                             b.get('type') == 'image' and 'asset' in b)]}
+        spec['sections'] = [{**s, 'blocks': [_no_asset(b) for b in s['blocks'] if not (isinstance(b, dict) and
+                                                                                       b.get('type') == 'image' and
+                                                                                       'asset' in b)]}
                             if isinstance(s, dict) and isinstance(s.get('blocks'), list) else s
                             for s in spec['sections']]
     return spec
+
+
+def _no_asset(b):
+    """A model's labelled figure loses its picture id (only code resolves pictures; normalize then keeps its callouts
+    as a list)."""
+    if isinstance(b, dict) and _labelled_type(b.get('type')) and 'image' in b:
+        return {k: v for k, v in b.items() if k != 'image'}
+    return b
+
+
+def _labelled_type(t) -> bool:
+    return isinstance(t, str) and _TYPE_ALIASES.get(re.sub(r'[\s-]+', '_', t.strip().lower())) == 'labelled'
 
 
 def _fix_levels(sections: list, res: dict, fmt: str):
@@ -780,6 +819,21 @@ _TYPE_ALIASES = {
     **dict.fromkeys(('heading', 'header', 'h1', 'h2', 'h3', 'h4', 'subheading', 'title'), 'heading'),
     'timeline': 'timeline', 'tree': 'tree', 'hierarchy': 'tree', 'org_chart': 'tree', 'flow': 'flow',
     'flowchart': 'flow', 'process': 'flow', 'diagram': 'diagram',
+    # the Studio kinds; "process" and "matrix" keep meaning a flow and a table unless the block has the new kind's
+    # fields (steps without arrows, quadrants), and "scatter" stays a line chart unless it has points (_coerce)
+    **dict.fromkeys(('cycle', 'cycle_diagram', 'life_cycle', 'lifecycle', 'loop', 'circular_flow'), 'cycle'),
+    **dict.fromkeys(('venn', 'venn_diagram', 'overlap'), 'venn'),
+    **dict.fromkeys(('pyramid', 'pyramid_diagram', 'hierarchy_pyramid', 'triangle'), 'pyramid'),
+    **dict.fromkeys(('quadrant', 'quadrants', '2x2', 'two_by_two', 'matrix_2x2', 'swot', 'quadrant_chart'), 'matrix'),
+    **dict.fromkeys(('mindmap', 'mind_map', 'concept_map', 'spider_diagram', 'spidergram'), 'mindmap'),
+    **dict.fromkeys(('process_arrows', 'process_diagram', 'stages', 'chevrons'), 'process'),
+    **dict.fromkeys(('comparison', 'compare', 'versus', 'vs', 'pros_cons', 'pros_and_cons', 'comparison_cards'),
+                    'comparison'),
+    **dict.fromkeys(('labelled', 'labeled', 'labelled_figure', 'labeled_figure', 'labelled_diagram',
+                     'labeled_diagram', 'annotated_image', 'callouts'), 'labelled'),
+    **dict.fromkeys(('stat_cards', 'stats', 'statistics', 'stat', 'kpi', 'kpis', 'key_figures', 'big_numbers',
+                     'figures_cards', 'numbers'), 'stat-cards'),
+    **dict.fromkeys(('scatter_plot', 'scatterplot', 'scatter_chart', 'scatter_graph'), 'scatter'),
 }
 # a salvaged block's text leaves these out: they name how to draw, not what to say
 _SALVAGE_SKIP = {'type', 'kind', 'lang', 'ordered', 'level', 'id', 'parent', 'from', 'to', 'formats', 'asset', 'credit',
@@ -893,6 +947,8 @@ def _strip_fetch(d, where, log: _Log, top: bool = False):
     """S7: link, image and path keys removed in place (table cells are content and are left alone)."""
     if isinstance(d, dict):
         for k in [k for k in d if k.lower() in FETCH_KEYS]:
+            if k == 'image' and _labelled_type(d.get('type')) and isinstance(d[k], str) and ASSET_ID.match(d[k].lower()):
+                continue   # a labelled figure's picture is a local asset-cache id (code wrote it), not an address
             del d[k]
             log.add('S7', 'link or image addresses in {w} were removed; nothing is fetched',
                     'link or image addresses in {w} were removed; nothing is fetched', where)
@@ -1150,8 +1206,160 @@ def _edges(raw) -> list[dict]:
     return out
 
 
+def _group_list(v) -> list:
+    """Sets, quadrants or columns however written: a list of {label, items}, a {label: items} dict, or text."""
+    if isinstance(v, dict):
+        if any(k in v for k in ('label', 'items', 'name', 'title')):
+            v = [v]
+        else:
+            v = [{'label': str(k), 'items': x} for k, x in v.items()]
+    if isinstance(v, str):
+        v = _split_items(v)
+    out = []
+    for g in v if isinstance(v, list) else []:
+        if isinstance(g, dict):
+            label = _text(_first(g, 'label', 'name', 'title', 'heading', 'text')[1])
+            items = _first(g, 'items', 'points', 'members', 'list', 'values', 'bullets')[1]
+            if isinstance(items, str):
+                items = _split_items(items)
+            elif isinstance(items, dict):
+                items = [f'{k}: {_text(x)}' for k, x in items.items()]
+            out.append({'label': label, 'items': [_text(x) for x in items] if isinstance(items, list) else []})
+        elif isinstance(g, (list, tuple)) and g:
+            out.append({'label': _text(g[0]), 'items': [_text(x) for x in g[1:]]})
+        elif _text(g).strip():
+            out.append({'label': _text(g), 'items': []})
+    return out
+
+
+def _texts(v) -> list:
+    if isinstance(v, str):
+        return _split_items(v)
+    if isinstance(v, dict):
+        return [f'{k}: {_text(x)}' if _text(x) else str(k) for k, x in v.items()]
+    return [x if isinstance(x, dict) else _text(x) for x in v] if isinstance(v, list) else []
+
+
+def _generic_diagram(b: dict, kind: str) -> dict:
+    """The schema's generic diagram block (DOCSPEC_SCHEMA's _DIAGRAM_BLOCK: kind, items[{label, detail, parent, value,
+    x, y, items}], shared, x_label, y_label) in the kind's own fields, so the readers below see the usual shape. A
+    block that already uses the kind's own list is returned as it is."""
+    items = b.get('items')
+    own = DIAGRAM_LISTS.get(kind)
+    if not isinstance(items, list) or not any(isinstance(x, dict) for x in items) or (own and b.get(own)):
+        return b
+    rows = [x for x in items if isinstance(x, dict)]
+    lab = lambda x: _text(x.get('label'))  # noqa: E731
+    out = {'type': kind, 'title': b.get('title')}
+    if kind in ('cycle', 'pyramid'):
+        out['steps' if kind == 'cycle' else 'levels'] = [lab(x) for x in rows]
+    elif kind in ('venn', 'matrix', 'comparison'):
+        out[DIAGRAM_LISTS[kind]] = [{'label': lab(x), 'items': [_text(i) for i in x.get('items') or []
+                                                                if _text(i).strip()]} for x in rows]
+        if kind == 'venn':
+            out['shared'] = b.get('shared') or []
+        if kind == 'matrix':
+            out['x_axis'], out['y_axis'] = _text(b.get('x_label')), _text(b.get('y_label'))
+    elif kind == 'mindmap':
+        out['nodes'] = [{'id': lab(x), 'label': lab(x), 'parent': _text(x.get('parent'))} for x in rows]
+    elif kind == 'process':
+        out['steps'] = [{'label': lab(x), 'detail': _text(x.get('detail'))} for x in rows]
+    elif kind == 'stat-cards':
+        out['stats'] = [{'value': _text(x.get('value')) or _text(x.get('x')), 'label': lab(x) or _text(x.get('detail'))}
+                        for x in rows]
+    elif kind == 'scatter':
+        out['points'] = [{'x': x.get('x'), 'y': x.get('y'), 'label': lab(x)} for x in rows]
+        out['x_label'], out['y_label'] = b.get('x_label'), b.get('y_label')
+    else:
+        return b
+    return out
+
+
+def _studio_diagram(b: dict, kind: str, title: str) -> dict:
+    """A Studio diagram kind as the model wrote it, in the DocSpec shape (diagram.clean_block then checks limits)."""
+    b = _generic_diagram(b, kind)
+    out = {'type': kind, 'title': title}
+    if kind in ('cycle', 'pyramid'):
+        _, v = _first(b, 'steps' if kind == 'cycle' else 'levels', 'items', 'stages', 'levels', 'steps', 'tiers',
+                      'layers', 'nodes', 'events')
+        out['steps' if kind == 'cycle' else 'levels'] = [_text(x) for x in _texts(v)]
+    elif kind in ('venn', 'matrix', 'comparison'):
+        key = {'venn': 'sets', 'matrix': 'quadrants', 'comparison': 'columns'}[kind]
+        _, v = _first(b, key, 'sets', 'circles', 'groups', 'quadrants', 'cells', 'columns', 'sides', 'options',
+                      'items')
+        out[key] = _group_list(v)
+        if kind == 'venn':
+            out['shared'] = [_text(x) for x in _texts(_first(b, 'shared', 'overlap', 'both', 'common',
+                                                             'intersection', 'all')[1])]
+        if kind == 'matrix':
+            out['x_axis'] = _text(_first(b, 'x_axis', 'x_label', 'horizontal', 'xAxis')[1])
+            out['y_axis'] = _text(_first(b, 'y_axis', 'y_label', 'vertical', 'yAxis')[1])
+    elif kind == 'mindmap':
+        used: set = set()
+        _, v = _first(b, 'nodes', 'branches', 'children', 'items', 'ideas')
+        nodes = _nodes(v if v is not None else [], used)
+        centre = _text(_first(b, 'root', 'center', 'centre', 'topic', 'central')[1])
+        if centre.strip():
+            rid = _slug(centre, used)
+            nodes = [{'id': rid, 'label': centre, 'parent': ''}] + [
+                {**n, 'parent': n['parent'] or rid} for n in nodes]
+        out['nodes'] = nodes
+    elif kind == 'process':
+        _, v = _first(b, 'steps', 'stages', 'items', 'nodes', 'phases')
+        steps = []
+        for x in _texts(v):
+            if isinstance(x, dict):
+                steps.append({'label': _text(_first(x, 'label', 'title', 'name', 'step', 'text')[1]),
+                              'detail': _text(_first(x, 'detail', 'description', 'details', 'text', 'body')[1])
+                              if any(x.get(k) for k in ('label', 'title', 'name', 'step')) else ''})
+            else:
+                steps.append(x)
+        out['steps'] = steps
+    elif kind == 'labelled':
+        _, img = _first(b, 'image', 'asset')
+        out['image'] = img if isinstance(img, str) else ''
+        _, v = _first(b, 'callouts', 'labels', 'annotations', 'points', 'markers')
+        calls = []
+        for c in v if isinstance(v, list) else []:
+            if isinstance(c, dict):
+                calls.append({'label': _text(_first(c, 'label', 'text', 'name', 'title')[1]),
+                              'x': _first(c, 'x', 'left', 'across')[1], 'y': _first(c, 'y', 'top', 'down')[1]})
+            elif isinstance(c, (list, tuple)) and len(c) >= 3:
+                calls.append({'label': _text(c[0]), 'x': c[1], 'y': c[2]})
+            elif _text(c).strip():
+                calls.append({'label': _text(c), 'x': None, 'y': None})
+        out['callouts'] = calls
+    elif kind == 'stat-cards':
+        _, v = _first(b, 'stats', 'items', 'cards', 'figures', 'numbers', 'values', 'kpis')
+        stats = []
+        for x in _texts(v):
+            if isinstance(x, dict):
+                val = _first(x, 'value', 'number', 'stat', 'figure', 'amount')[1]
+                stats.append({'value': val if isinstance(val, (int, float)) and not isinstance(val, bool) else _text(val),
+                              'label': _text(_first(x, 'label', 'text', 'name', 'title', 'description')[1]),
+                              'icon': _text(x.get('icon'))})
+            else:
+                stats.append(x)
+        out['stats'] = stats
+    else:   # scatter
+        _, v = _first(b, 'points', 'data', 'values', 'items')
+        pts = []
+        for p in v if isinstance(v, list) else []:
+            if isinstance(p, dict):
+                pts.append({'x': _first(p, 'x', 'X')[1], 'y': _first(p, 'y', 'Y')[1],
+                            'label': _text(_first(p, 'label', 'name', 'text')[1])})
+            else:
+                pts.append(p)
+        out['points'] = pts
+        out['x_label'] = _text(_first(b, 'x_label', 'x_axis', 'xlabel', 'xAxis', 'x_title')[1])
+        out['y_label'] = _text(_first(b, 'y_label', 'y_axis', 'ylabel', 'yAxis', 'y_title')[1])
+    return out
+
+
 def _diagram(b: dict, kind: str, ctx) -> dict:
     title = _text(b.get('title') or b.get('caption') or b.get('name'))
+    if kind in diagram.NEW_KINDS:
+        return _studio_diagram(b, kind, title)
     if kind == 'timeline':
         _, events = _first(b, 'events', 'items', 'milestones', 'entries', 'dates', 'steps')
         if isinstance(events, dict):
@@ -1178,9 +1386,23 @@ def _diagram(b: dict, kind: str, ctx) -> dict:
     return {'type': 'flow', 'title': title, 'nodes': nodes, 'edges': edges}
 
 
+def _infer_studio(b: dict) -> str | None:
+    """A Studio diagram kind from fields only it uses."""
+    for key, kind in (('quadrants', 'matrix'), ('sets', 'venn'), ('levels', 'pyramid'), ('callouts', 'labelled'),
+                      ('stats', 'stat-cards')):
+        if isinstance(b.get(key), (list, dict)) and b.get(key):
+            return kind
+    pts = b.get('points')
+    if isinstance(pts, list) and pts and all(isinstance(p, dict) and 'x' in p and 'y' in p for p in pts):
+        return 'scatter'
+    return None
+
+
 def _infer(b: dict) -> str | None:
     """A block's type from its keys, first match wins."""
     has = lambda *ks: any(b.get(k) is not None for k in ks)  # noqa: E731
+    if _infer_studio({'points': b.get('points')}) and not has('items', 'bullets'):
+        return 'scatter'
     if has('items', 'points', 'bullets'):
         return 'bullets'
     if has('rows', 'columns', 'headers'):
@@ -1189,6 +1411,9 @@ def _infer(b: dict) -> str | None:
         return 'chart'
     if has('events', 'milestones'):
         return 'timeline'
+    new = _infer_studio(b)
+    if new:
+        return new
     if has('edges'):
         return 'flow'
     if has('nodes'):
@@ -1203,6 +1428,32 @@ def _infer(b: dict) -> str | None:
     if has('query', 'caption', 'alt'):
         return 'figure'
     return None
+
+
+_STUDIO_KIND_ALIAS = {'stat': 'stat-cards', 'stats': 'stat-cards', 'labeled': 'labelled', 'mind-map': 'mindmap',
+                      'quadrant': 'matrix', '2x2': 'matrix', 'scatter-plot': 'scatter', 'venn-diagram': 'venn'}
+
+
+def _studio_kind(t: str, kind: str, b: dict) -> str:
+    """The words "process", "matrix" and "scatter" name a Studio kind only when the block has that kind's fields;
+    otherwise they keep today's meaning (a flow, a table, a line chart)."""
+    if t == 'process' and not any(b.get(k) is not None for k in ('edges', 'nodes', 'connections', 'arrows')) and \
+            b.get('steps') is not None:
+        return 'process'
+    if kind == 'process' and any(b.get(k) is not None for k in ('edges', 'connections', 'arrows')):
+        return 'flow'
+    if t == 'matrix' and b.get('quadrants') is not None and not any(b.get(k) is not None for k in ('rows', 'columns')):
+        return 'matrix'
+    if kind == 'matrix' and not any(b.get(k) is not None for k in ('quadrants', 'cells', 'items')) and \
+            any(b.get(k) is not None for k in ('rows', 'columns')):
+        return 'table'
+    pts = b.get('points')
+    if t == 'scatter' and isinstance(pts, list) and pts and all(isinstance(p, (dict, list, tuple)) for p in pts):
+        return 'scatter'
+    if kind == 'scatter' and not (isinstance(pts, list) and pts) and \
+            any(b.get(k) is not None for k in ('series', 'labels')):
+        return 'chart'
+    return kind
 
 
 class _Ctx:
@@ -1256,17 +1507,20 @@ def _coerce(b, ctx: _Ctx) -> list[dict]:
     if t == 'image' and 'asset' in b:
         return [b]  # an internal image block (code wrote it); normalize checks it against the asset cache (X6)
     kind = _TYPE_ALIASES.get(t)
+    if kind is not None:
+        kind = _studio_kind(t, kind, b)
     if kind is None:
         kind = _infer(b)
         if kind is None:
             raise ValueError('unknown block')
         ctx.flag('infer')
-    elif t != kind and not (t in CHART_KINDS or t in ('ordered', 'diagram')):
+    elif t != kind and t.replace('_', '-') != kind and not (t in CHART_KINDS or t in ('ordered', 'diagram')):
         ctx.flag('alias')
     if kind == 'diagram':
-        k = str(b.get('kind') or '').lower()
-        kind = k if k in diagram.KINDS else 'timeline' if b.get('events') is not None else 'flow' \
-            if b.get('edges') is not None else _infer({'nodes': b.get('nodes')}) or 'flow'
+        k = re.sub(r'[\s_]+', '-', str(b.get('kind') or '').strip().lower())
+        k = _STUDIO_KIND_ALIAS.get(k, k)
+        kind = k if k in diagram.ALL_KINDS else 'timeline' if b.get('events') is not None else 'flow' \
+            if b.get('edges') is not None else _infer_studio(b) or _infer({'nodes': b.get('nodes')}) or 'flow'
     if kind == 'heading':
         text = _text(_first(b, 'text', 'content', 'title', 'heading', 'value', 'label')[1])
         level = {'h1': 1, 'h2': 2, 'h3': 3, 'h4': 3}.get(t)
@@ -1304,7 +1558,7 @@ def _coerce(b, ctx: _Ctx) -> list[dict]:
     if kind == 'chart':
         return [_chart(b, t if t in CHART_KINDS or t in CHART_ALIASES else
                        t.replace('_chart', '') if t.endswith('_chart') else None, ctx)]
-    if kind in diagram.KINDS:
+    if kind in diagram.ALL_KINDS:
         return [_diagram(b, kind, ctx)]
     if kind == 'page_break':
         return [{'type': 'page_break'}]

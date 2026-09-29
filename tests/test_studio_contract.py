@@ -261,19 +261,30 @@ def test_dataclass_fields(path):
     assert got[:len(FIELDS[path])] == FIELDS[path], f'{path}: fields are append-only (got {got})'
 
 
-def test_stubs_are_honest_not_silent():
-    """An unbuilt function raises NotImplementedError naming its builder; nothing pretends to work."""
+def test_every_contracted_function_is_built():
+    """Phase 0's stubs raised NotImplementedError naming a builder; every one is built now, so no studio module
+    raises or mentions it any more, and a few calls that used to raise now return real values."""
+    import ast
+    import pathlib
     from jevrouter.studio import direct, fonts, layout, workspace
-    with pytest.raises(NotImplementedError, match='builder'):
-        tokens.build_system()
-    with pytest.raises(NotImplementedError, match='builder'):
-        fonts.alternative('Helvetica Neue')
-    with pytest.raises(NotImplementedError, match='builder'):
-        direct.outline_of({}, 'pptx')
-    with pytest.raises(NotImplementedError, match='builder'):
-        layout.grid_rect((0, 0, 1, 1), (960, 540), None)
-    with pytest.raises(NotImplementedError, match='builder'):
-        workspace.Workspace('0123456789ab').load_plan()
+    root = pathlib.Path(tokens.__file__).parent
+    for path in sorted(root.glob('*.py')):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Raise) and node.exc is not None:
+                target = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                assert getattr(target, 'id', None) != 'NotImplementedError', f'{path.name}:{node.lineno} is a stub'
+            if isinstance(node, ast.ExceptHandler) and node.type is not None:
+                names = [getattr(t, 'id', None) for t in getattr(node.type, 'elts', [node.type])]
+                assert 'NotImplementedError' not in names, f'{path.name}:{node.lineno} still expects a stub'
+    assert isinstance(tokens.build_system(), tokens.DesignSystem)
+    alt = fonts.alternative('Helvetica Neue')
+    assert alt is None or (isinstance(alt, tuple) and len(alt) == 2)
+    assert direct.outline_of({'title': 'T', 'sections': []}, 'pptx') is not None
+    x, y, w, h = layout.grid_rect((0, 0, 1, 1), (960, 540), tokens.build_system())
+    assert w > 0 and h > 0
+    for path in SIGNATURES:
+        assert callable(_resolve(path)), path
 
 
 # ---------- design tokens and presets ----------
@@ -448,7 +459,11 @@ def test_new_diagram_block_schemas():
 # ---------- the feature flag and today's output ----------
 
 
-@pytest.mark.parametrize('raw,want', [(None, frozenset()), ('', frozenset()), ('0', frozenset()), ('off', frozenset()),
+ON = frozenset({'pptx', 'pdf'})
+
+
+@pytest.mark.parametrize('raw,want', [(None, ON), ('', ON), ('  ', ON), ('0', frozenset()), ('off', frozenset()),
+                                      ('false', frozenset()), ('no', frozenset()),
                                       ('1', frozenset({'pptx', 'pdf'})), ('on', frozenset({'pptx', 'pdf'})),
                                       ('pptx', frozenset({'pptx'})), ('pdf, docx,bogus', frozenset({'pdf', 'docx'}))])
 def test_tg_studio_flag(monkeypatch, raw, want):
@@ -460,8 +475,11 @@ def test_tg_studio_flag(monkeypatch, raw, want):
     assert agent.enabled('pptx') == ('pptx' in want)
 
 
-def test_phase0_default_is_off(monkeypatch):
+def test_studio_is_on_by_default_for_slides_and_pdfs(monkeypatch):
     monkeypatch.delenv('TG_STUDIO', raising=False)
+    assert config.STUDIO_DEFAULT == 'pptx,pdf'
+    assert {f for f in cf.FORMATS if agent.enabled(f)} == {'pptx', 'pdf'}
+    monkeypatch.setenv('TG_STUDIO', 'off')
     assert not any(agent.enabled(f) for f in cf.FORMATS)
 
 
@@ -499,7 +517,7 @@ class _FrozenDatetime(datetime.datetime):
 
 
 @pytest.mark.parametrize('fmt', ['pptx', 'pdf'])
-@pytest.mark.parametrize('flag', [None, '0', 'off'])
+@pytest.mark.parametrize('flag', ['0', 'off'])
 def test_studio_off_keeps_todays_bytes(monkeypatch, fmt, flag):
     """With TG_STUDIO off, render() and the create agent's build() give exactly the legacy renderer's bytes."""
     from reportlab import rl_config

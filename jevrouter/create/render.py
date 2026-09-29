@@ -108,6 +108,26 @@ def _draw(spec: dict, fmt: str, name: str) -> bytes:
     return data
 
 
+def render_designed(plan, spec: dict, fmt: str, ws) -> bytes:
+    """The file Studio painted from a finished DesignPlan (studio.agent.paint), with the same V1/L4 handling as _draw:
+    a painter failure is an honest V1 (the create agent then falls back to the legacy renderer), a file over the size
+    limit an L4. docs/PLAN-designer.md 9.10."""
+    if getattr(plan, 'format', None) != fmt:
+        raise SpecError('V1', f'The design plan is for {str(getattr(plan, "format", None))[:12]}, not {fmt}.')
+    try:
+        from ..studio import agent as studio_agent
+        data = studio_agent.paint(plan, spec, ws)
+    except SpecError:
+        raise
+    except Exception as e:  # a painter or library failure is an honest V1, never a crash or a 500
+        raise SpecError('V1', f'The {fmt.upper()} file could not be painted ({type(e).__name__}: {str(e)[:160]}).')
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        raise SpecError('V1', f'The {fmt.upper()} file could not be painted (nothing was drawn).')
+    if len(data) > MAX_BYTES:
+        raise SpecError('L4', f'The file would be {len(data) / 1e6:.1f} MB; the limit is {MAX_BYTES // (1024 * 1024)} MB.')
+    return bytes(data)
+
+
 # ---------- shared helpers ----------
 
 
@@ -1336,8 +1356,9 @@ def _pptx(spec: dict, name: str) -> bytes:
         else:
             vbox = (margin, top, body_w, body_h)
         for b in visuals[:1]:
-            {'table': table_shape, 'chart': chart_shape, 'code': code_box, 'image': image_shape, 'timeline': diagram_shape,
-             'tree': diagram_shape, 'flow': diagram_shape}[b['type']](slide, b, vbox)
+            draw = diagram_shape if b['type'] in DIAGRAMS else {
+                'table': table_shape, 'chart': chart_shape, 'code': code_box, 'image': image_shape}[b['type']]
+            draw(slide, b, vbox)
         if sec.get('notes'):
             slide.notes_slide.notes_text_frame.text = sec['notes']  # overflow text lives in the notes (L3, F3)
     buf = io.BytesIO()

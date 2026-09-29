@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState, type ReactNode } from 'react'
-import type { Estimate } from '../../protocol'
+import type { Estimate, EstimateCall, EstimatePhase } from '../../protocol'
 import { Button } from '../../ui'
 import { Icon } from '../../icons'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -39,7 +39,34 @@ const dollars = (v: number) => (v < 0.01 ? 'under $0.01' : '$' + v.toLocaleStrin
 /** Mid tokens of an estimate (in plus out). */
 export const estTokens = (e: Pick<Estimate, 'tokens_in' | 'tokens_out'>) => (e.tokens_in || 0) + (e.tokens_out || 0)
 
-const FILE_PHASES: ReadonlyArray<string> = ['outline', 'sections', 'topup', 'repair']
+const FILE_PHASES: ReadonlyArray<string> = ['outline', 'sections', 'topup', 'repair', 'critic']
+
+/** What each estimated step is, in plain words (every EstimatePhase has one). */
+export const PHASE_LABEL: Record<EstimatePhase, string> = {
+  planner: 'Planning the steps', research: 'Research', answer: 'Answer', outline: 'File outline',
+  sections: 'Writing sections', topup: 'Top-up if short', repair: 'Repair if a section fails', merge: 'Combining answers',
+  critic: 'Design critic',
+}
+
+/** The breakdown lines, one per phase and engine, in the order the server sent them. */
+function Steps({ calls }: { calls: EstimateCall[] }) {
+  if (calls.length < 1) return null
+  return (
+    <div className="flex flex-col gap-1.5">
+      <h3 className="m-0 text-[13px] font-semibold text-foreground">Steps</h3>
+      <ul className="m-0 flex flex-col gap-1 pl-0 text-[13px] leading-relaxed text-muted-foreground">
+        {calls.map((c, i) => (
+          <li key={c.phase + c.engine + i} className="flex flex-wrap items-baseline justify-between gap-x-3">
+            <span className="text-foreground">
+              {PHASE_LABEL[c.phase] ?? c.phase}{c.calls > 1 ? ` (${c.calls} calls)` : ''}{c.optional ? ', only if needed' : ''}
+            </span>
+            <Sub>about {aboutTokens((c.tokens_in || 0) + (c.tokens_out || 0))} tokens</Sub>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
 
 /** Mid tokens of the file's own calls (outline, sections, top-up, repair): what a file card compares with the tokens
  *  the file used. The planner, research and merge calls belong to the run, not the file. */
@@ -143,6 +170,8 @@ export function CostDialog({ estimate: e, onContinue, onCancel, onSwitch, rememb
             </ul>
           </div>
         )}
+
+        <Steps calls={e.breakdown ?? []} />
 
         {cheaper && (
           <div className="flex flex-col gap-2 rounded-md border border-border p-3 sm:flex-row sm:items-center sm:justify-between">

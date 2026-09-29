@@ -7,3 +7,4 @@ web/dist/
 data/
 evals/cases.local.jsonl
 evals/*.local*
+!jevrouter/studio/data/

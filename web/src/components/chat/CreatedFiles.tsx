@@ -14,6 +14,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { aboutTokens, costRemembered, fileTokens, rememberCost, useCostConfirm } from './CostDialog'
+import { DesignPanel } from './DesignPanel'
 
 // Files the `create` agent made (docs/PLAN-files.md): one card per file with its format, size and shape, the tokens
 // its content cost, a download link, "Convert to…" (re-rendered from the stored spec, 0 tokens), an inline preview and
@@ -269,6 +270,7 @@ export function CreatedFileCard({ file: f, onConverted, onDelete, origin, now, c
   const toast = useToast()
   const info = infoOf(f.format)
   const [open, setOpen] = useState(false)
+  const [designOpen, setDesignOpen] = useState(false)
   const [converting, setConverting] = useState<FileFormat | null>(null)
   const shape = shapeText(f)
   const asked = askedText(f)
@@ -277,6 +279,7 @@ export function CreatedFileCard({ file: f, onConverted, onDelete, origin, now, c
   const warns = f.rules?.filter(r => r.severity === 'warn' && !r.ok && !brief.includes(r)) ?? []
   const fixes = f.rules?.filter(r => r.severity === 'fix' && !r.ok) ?? []
   const previewId = `cf-preview-${f.id}`
+  const designId = `cf-design-${f.id}`
 
   const convert = async (to: FileFormat) => {
     setConverting(to)
@@ -324,6 +327,10 @@ export function CreatedFileCard({ file: f, onConverted, onDelete, origin, now, c
           <Button variant="ghost" size="sm" icon="eye" aria-expanded={open} aria-controls={previewId} onClick={() => setOpen(o => !o)}>
             {open ? 'Hide preview' : 'Preview'}
           </Button>
+          <Button variant="ghost" size="sm" icon="palette" aria-expanded={designOpen} aria-controls={designOpen ? designId : undefined} onClick={() => setDesignOpen(o => !o)}
+            title="Thumbnails, the design score, and restyling at no token cost">
+            {designOpen ? 'Hide design' : 'Design'}
+          </Button>
           {!f.sandbox && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -357,6 +364,8 @@ export function CreatedFileCard({ file: f, onConverted, onDelete, origin, now, c
           {!!f.phases?.length && <Phases phases={f.phases} />}
         </div>
       )}
+
+      {designOpen && <DesignPanel id={designId} file={f} onMade={onConverted} />}
 
       {open && (
         <div id={previewId} className="border-t border-border p-3">
@@ -448,6 +457,8 @@ const hex = (c: string) => '#' + c.replace(/^#/, '').toUpperCase()
 /** "Design: DESIGN-lovable.md", opening the colours (with their hex text), the fonts used and the notes. */
 function DesignChip({ design: d }: { design: DesignApplied }) {
   const roles = (Object.entries(d.colors ?? {}) as Array<[DesignRole, string]>).filter(([, c]) => !!c)
+  // A Studio file without a design file is named 'preset:<id>'.
+  const label = d.name?.startsWith('preset:') ? `${d.name.slice(7).replace(/-/g, ' ').replace(/^./, c => c.toUpperCase())} preset` : d.name
   const extra = (d.palette ?? []).filter(c => !roles.some(([, r]) => r.toUpperCase() === c.replace(/^#/, '').toUpperCase()))
   const font = (label: string, used: string | null, asked: string | null) => (
     <li className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
@@ -461,17 +472,18 @@ function DesignChip({ design: d }: { design: DesignApplied }) {
     <Popover>
       <PopoverTrigger asChild>
         <button type="button" data-slot="button" className={cn(CHIP, 'cursor-pointer text-foreground outline-none hover:bg-subtle focus-visible:ring-[3px] focus-visible:ring-ring/35')}
-          aria-label={`Design: ${d.name}. Show the colours and fonts it applied`}>
+          aria-label={`Design: ${label}. Show the colours and fonts it applied`}>
           <Icon name="palette" size={12} className="shrink-0" />
-          <span className="truncate">Design: {d.name}</span>
+          <span className="truncate">Design: {label}</span>
+          {d.score != null && <span className={cn('tabular-nums', d.score >= 80 ? 'text-ok' : 'text-warn')} title="Design score out of 100">{d.score}</span>}
           <Icon name="chevron-down" size={11} className="shrink-0 text-muted-foreground" />
         </button>
       </PopoverTrigger>
       <PopoverContent align="start" className="w-[min(340px,calc(100vw-32px))] p-0">
         <div className="flex flex-col gap-3 p-3 text-xs">
           <div className="flex flex-col gap-0.5">
-            <h4 className="m-0 text-[13px] font-semibold text-foreground [overflow-wrap:anywhere]">{d.name}</h4>
-            <p className="m-0 text-muted-foreground">Applied by code from the design file. It costs no model tokens.</p>
+            <h4 className="m-0 text-[13px] font-semibold text-foreground [overflow-wrap:anywhere]">{label}</h4>
+            <p className="m-0 text-muted-foreground">{d.name?.startsWith('preset:') ? 'Laid out by the design stage. Open Design on the file to restyle it at no token cost.' : 'Applied by code from the design file. It costs no model tokens.'}</p>
           </div>
           {roles.length > 0 && (
             <ul className="m-0 grid list-none grid-cols-1 gap-1.5 p-0 sm:grid-cols-2" aria-label="Colours">

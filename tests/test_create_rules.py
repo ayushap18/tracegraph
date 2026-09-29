@@ -40,7 +40,7 @@ def rewrite_zip(data: bytes, change) -> bytes:
 
 def test_rules_match_the_ruleset_document():
     doc = (Path(__file__).resolve().parent.parent / 'docs' / 'RULES-files.md').read_text()
-    rows = re.findall(r'^\| ([SLFXVA]\d+) \|.*\| (block|fix|warn|—) \| (yes|no) \|$', doc, re.M)
+    rows = re.findall(r'^\| ([SLFXVAD]\d+) \|.*\| (block|fix|warn|—) \| (yes|no) \|$', doc, re.M)
     assert rows and [r['id'] for r in RULES] == [r[0] for r in rows]
     for rule, (rid, sev, enforced) in zip(RULES, rows):
         assert rule['severity'] == (None if sev == '—' else sev), rid
@@ -48,7 +48,8 @@ def test_rules_match_the_ruleset_document():
 
 
 def test_rules_shape_and_copy():
-    groups = {'Content spec', 'Size limits', 'Structure and style', 'Safety', 'Verification', 'Accessibility'}
+    groups = {'Content spec', 'Size limits', 'Structure and style', 'Safety', 'Verification', 'Accessibility',
+              'Design'}
     assert len({r['id'] for r in RULES}) == len(RULES)
     for r in RULES:
         assert set(r) == {'id', 'group', 'text', 'severity', 'enforced'}

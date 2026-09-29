@@ -223,7 +223,18 @@ def for_format(fmt: str) -> tuple[str, ...]:
 def next_best(layout_id: str, avoid: set[str] | frozenset = frozenset(), *, needs: tuple[str, ...] = ()) -> str | None:
     """The next layout in the same family (then the text family) not in `avoid` whose slots accept every kind in
     `needs`; None when none fits. Deterministic (library order)."""
-    raise NotImplementedError('studio.library.next_best: builder L')
+    cur = get(layout_id)
+    pool = _SLIDES if cur.target == 'slide' else _PAGES
+    avoid = set(avoid) | {layout_id}
+
+    def ok(d: LayoutDef) -> bool:
+        kinds = {k for s in d.slots for k in (s.kind, *s.accepts)}
+        return d.id not in avoid and all(n in kinds for n in needs)
+    for fam in (cur.family, 'text'):
+        for d in pool:
+            if d.family == fam and ok(d):
+                return d.id
+    return None
 
 
 def slot_kinds(layout_id: str) -> dict[str, tuple[str, ...]]:

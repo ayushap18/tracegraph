@@ -35,6 +35,13 @@ SPEC = {'title': 'Solar power', 'subtitle': '',
 FORMAT_WORDS = ('pdf', 'slides', 'deck', 'spreadsheet', 'excel', 'word document', 'markdown', 'docx', 'as ')
 
 
+@pytest.fixture(autouse=True)
+def legacy_renderer(monkeypatch):
+    """These tests pin the standard renderer's behaviour (page and slide counts, calls to stub engines), so Studio is
+    off here; tests/test_studio_api.py covers the same paths with Studio on."""
+    monkeypatch.setenv('TG_STUDIO', 'off')
+
+
 def route(text):
     t = text.lower()
     if any(w in t for w in FORMAT_WORDS) and ('put' in t or 'make' in t or 'turn' in t or 'now' in t or 'write' in t):

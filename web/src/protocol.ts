@@ -328,6 +328,8 @@ export interface HelloEvent { limits?: Limits; fonts?: FontsInfo }
 // Created files: the request's brief and how the file met it.
 export type ThemeName = 'clean' | 'dark' | 'warm' | 'mono'
 export type DiagramKind = 'timeline' | 'tree' | 'flow'
+  // Studio kinds the writer can be asked for (create/brief.WRITABLE_KINDS; 'labelled' is made by code only)
+  | 'cycle' | 'venn' | 'pyramid' | 'matrix' | 'mindmap' | 'process' | 'comparison' | 'stat-cards' | 'scatter'
 export interface FileBrief {
   format: FileFormat | null
   pages: [number, number] | null
@@ -420,6 +422,7 @@ export interface RunEvalBody { mode?: EvalMode; jev?: JevSource }
 
 /** A2: the stage one estimated model call belongs to. */
 export type EstimatePhase = 'planner' | 'research' | 'answer' | 'outline' | 'sections' | 'topup' | 'repair' | 'merge'
+  | 'critic'   // Studio: one design critic call on the contact sheets (Polish, docs/PLAN-designer.md 9.9)
 /** One line of the estimate's breakdown: `calls` calls of one phase on one engine (mid values). */
 export interface EstimateCall {
   phase: EstimatePhase
@@ -674,4 +677,9 @@ export interface DesignApplied {
   fonts?: DesignFontUse[]
   score?: number | null
   thumbs?: number              // how many thumbnails GET /api/created/{id}/thumbs serves
+}
+/** Studio (builder W): whether the engine can read images (Python `Engine.supports_vision`), so the Design panel can
+ *  disable Polish with a reason. Absent on older servers; the client then assumes claude-code and anthropic can. */
+export interface EngineInfo {
+  vision?: boolean
 }

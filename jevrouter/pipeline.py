@@ -152,6 +152,21 @@ CHECKPOINT_PHASES = ('outline', 'sections', 'topup', 'render', 'done')
 CHECKPOINT_SAVE_S = 3.0  # a running file step's checkpoint is saved with the run at most this often (and per phase)
 
 
+def engine_info(e) -> dict:
+    """EngineInfo for hello and config: the engine's own info plus `vision`, whether it can read images (Studio's
+    Polish and design critic, docs/PLAN-designer.md 9.7); False when the engine does not say."""
+    return {**e.info(), 'vision': bool(getattr(e, 'supports_vision', False))}
+
+
+def drop_design_workspaces(sid: str):
+    """A forgotten sandbox takes its Studio design workspaces with it (docs/PLAN-designer.md 3.6). Never raises."""
+    try:
+        from .studio import workspace
+        workspace.drop_sandbox(sid)
+    except Exception:
+        pass
+
+
 def checkpoint_info(state: dict, qid: int, tid: str) -> dict:
     """The CheckpointInfo summary of a create step's saved state (web/src/protocol.ts): longdoc.info when the long writer
     provides it, else the same summary read from the state's documented shape (docs/PLAN-files-robust.md 3.3)."""
@@ -437,7 +452,8 @@ class Router:
                     'exec': bool(getattr(e, 'supports_exec', False)), 'cassette': CASSETTE.exists()}
         return {'agents': {**self.agents, **FILE_AGENTS, **SQL_AGENT}, 'guards': GUARDS, 'claude': e is not None, 'state': self.state,
                 'stats': self.stats, 'samples': SAMPLES, 'prices': prices,
-                'engine': e.info() if e is not None else None, 'engines': [x.info() for x in self.engines.values()],
+                'engine': engine_info(e) if e is not None else None,
+                'engines': [engine_info(x) for x in self.engines.values()],
                 'features': features, 'route_examples': self.route_examples,
                 'limits': {'query_chars': MAX_QUERY_CHARS}, 'fonts': {'body': body_font()}}
 
@@ -692,11 +708,15 @@ class Router:
             if owner == sid and self.cancel(qid) == 'ok':
                 n += 1
         self.sandboxes.drop(sid)
+        drop_design_workspaces(sid)
         return n
 
     def sweep_sandboxes(self, now: float | None = None) -> list[str]:
         """Forgets sandboxes idle longer than the TTL that have no running queries. Returns the ids forgotten."""
-        return self.sandboxes.sweep(time.time() if now is None else now, self.sandbox_ttl, set(self.sandbox.values()))
+        gone = self.sandboxes.sweep(time.time() if now is None else now, self.sandbox_ttl, set(self.sandbox.values()))
+        for sid in gone:
+            drop_design_workspaces(sid)
+        return gone
 
     async def sweeper(self, every: float = 60.0):
         while True:
@@ -1342,7 +1362,8 @@ class Router:
 
             wanted = {'checkpoint': sink, 'deadline': extras.get('deadline_at'),
                       'resume': resume,  # {qid, tid, state}: the new file's resumed_from names the source run and step
-                      'design_docs': self.design_history(rec, sandbox, attached, texts, query, qid) if primary else []}
+                      'design_docs': self.design_history(rec, sandbox, attached, texts, query, qid) if primary else [],
+                      'sandbox': sandbox}  # a sandbox file's design workspace lives in the sandbox's temp dir
             fields = getattr(create_agent.Job, '__dataclass_fields__', {})
             if 'tally' in fields:
                 try:

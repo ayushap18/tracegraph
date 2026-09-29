@@ -180,6 +180,24 @@ class DesignTokens:
     radius: int | None
     confidence: float
     notes: list[str] = field(default_factory=list)
+    # design.md v2 (docs/PLAN-designer.md 9.2): optional, None/empty when the file doesn't say
+    scale_ratio: float | None = None     # modular type scale ("Type scale: 1.25", "major third")
+    spacing_unit: float | None = None    # base spacing unit in px/pt ("8px grid", "spacing unit: 4px")
+    image: str | None = None             # full-bleed | rounded | framed | duotone
+    do: list[str] = field(default_factory=list)      # "Do" lines
+    dont: list[str] = field(default_factory=list)    # "Don't" lines
+
+    def system(self) -> dict | None:
+        """The v2 part of spec['design'] ({scale_ratio, spacing_unit, radius, image, do, dont}), or None."""
+        out = {k: v for k, v in (('scale_ratio', self.scale_ratio), ('spacing_unit', self.spacing_unit),
+                                 ('image', self.image)) if v is not None}
+        if self.do:
+            out['do'] = list(self.do)
+        if self.dont:
+            out['dont'] = list(self.dont)
+        if out and self.radius is not None:
+            out['radius'] = self.radius
+        return out or None
 
 
 # role -> phrases, tried in this order; a matched span is consumed so "secondary text" never also votes text
@@ -510,9 +528,106 @@ def parse_design(text: str, name: str = 'design.md') -> DesignTokens | None:
     confidence = round(found / 3 * 0.8 + (0.2 if body or heading else 0.0), 3)
     if confidence < 0.34 or not ('bg' in colors or 'text' in colors):
         return None
+    v2 = parse_system(lines)
     return DesignTokens(name=str(name or 'design.md')[:120], colors=colors, palette=palette, hatch=hatch,
                         heading_font=heading, body_font=body, mono_font=mono, radius=radius, confidence=confidence,
-                        notes=notes)
+                        notes=notes, **v2)
+
+
+# ---------- design.md v2: type scale, spacing, imagery, do and don't (docs/PLAN-designer.md 9.2) ----------
+
+SCALE_NAMES = {'minor second': 1.067, 'major second': 1.125, 'minor third': 1.2, 'major third': 1.25,
+               'perfect fourth': 1.333, 'augmented fourth': 1.414, 'perfect fifth': 1.5, 'golden ratio': 1.618,
+               'golden': 1.618}
+SCALE_LINE = re.compile(r'\b(?:type|typographic|font|modular)[\s_-]*scale\b|\bscale[\s_-]*ratio\b|\bratio\b', re.I)
+SCALE_NUM = re.compile(r'(?<![\d.])(1\.\d{1,3})(?![\d.])')
+SPACING_LINE = re.compile(r'\b(?:spacing|space|grid|gap)\b', re.I)
+SPACING_NUM = re.compile(r'(?<![\d.])(\d{1,2}(?:\.\d+)?)\s*(px|pt|rem|points?)\b'
+                         r'|(?<![\d.])(\d{1,2})[\s-]*(?:point|pt|px)[\s-]+grid\b', re.I)
+SPACING_BASE = re.compile(r'\b(?:unit|base|grid|scale|step|baseline)\b', re.I)
+IMAGE_HEAD = re.compile(r'\b(?:imagery|images?|photos?|photography|pictures?|illustrations?)\b', re.I)
+IMAGE_WORDS = (('duotone', re.compile(r'\bduo[\s-]?tone\b', re.I)),
+               ('full-bleed', re.compile(r'\bfull[\s-]?bleed\b|\bedge[\s-]to[\s-]edge\b', re.I)),
+               ('framed', re.compile(r'\bframed?\b|\bborder(?:ed)?\b|\bpolaroid\b', re.I)),
+               ('rounded', re.compile(r'\brounded\b', re.I)))
+DONT_HEAD = re.compile(r"\bdon'?t'?s?\b|\bdo\s+not\b|\bavoid\b|\bnever\b", re.I)
+DO_HEAD = re.compile(r"^(?:\W*\d*[.)]?\s*)?do'?s?\b(?!\s*not)|\bbest\s+practices\b|\bguidelines\b", re.I)
+DO_LINE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\s*(?:do|use|prefer|always|keep)\b(?!\s*not)"
+                     r"\s*(?:\*\*|__)?\s*:?\s*(.+)$", re.I)
+DONT_LINE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\s*(?:don'?t|do\s+not|avoid|never)\b"
+                       r"\s*(?:\*\*|__)?\s*:?\s*(.+)$", re.I)
+BULLET = re.compile(r'^\s*(?:[-*+]|\d+[.)])\s+(.+)$')
+
+
+def _plain(s: str) -> str:
+    s = re.sub(r'[`*_]+', '', s)
+    s = re.sub(r'[\x00-\x1f]', ' ', s)
+    return ' '.join(s.split()).strip(' .;:-')[:160]
+
+
+def parse_system(lines: list[str]) -> dict:
+    """The design.md v2 fields a design file states: scale_ratio, spacing_unit, image, do, dont. Only what a line says
+    plainly is taken; everything else stays at its default."""
+    out: dict = {'scale_ratio': None, 'spacing_unit': None, 'image': None, 'do': [], 'dont': []}
+    heads: list[tuple[int, str]] = []
+    for raw in lines[:20000]:
+        line = raw.strip()
+        if not line:
+            continue
+        h = MD_HEAD.match(line)
+        if h:
+            level = len(h.group(1))
+            heads = [x for x in heads if x[0] < level] + [(level, h.group(2))]
+            continue
+        head = heads[-1][1] if heads else ''
+        low = line.lower()
+        if out['scale_ratio'] is None and (SCALE_LINE.search(line) or re.search(r'\bscale\b', head, re.I)):
+            named = next((v for k, v in SCALE_NAMES.items() if k in low), None)
+            m = SCALE_NUM.search(COLOR.sub(' ', line))
+            val = named or (float(m.group(1)) if m else None)
+            if val is not None and 1.05 <= val <= 1.8:
+                out['scale_ratio'] = round(val, 3)
+        in_spacing = bool(re.search(r'\b(?:spacing|space|grid|layout)\b', head, re.I))
+        if out['spacing_unit'] is None and SPACING_BASE.search(line) and (SPACING_LINE.search(line) or in_spacing):
+            m = SPACING_NUM.search(COLOR.sub(' ', line))
+            if m:
+                if m.group(3):
+                    val = float(m.group(3))
+                else:
+                    val = float(m.group(1)) * (16 if m.group(2).lower() == 'rem' else 1)
+                if 2 <= val <= 16:
+                    out['spacing_unit'] = val
+        if out['image'] is None and (IMAGE_HEAD.search(head) or IMAGE_HEAD.search(line.split(':')[0])):
+            for kind, rx in IMAGE_WORDS:
+                if rx.search(line) and not DONT_LINE.match(line):
+                    out['image'] = kind
+                    break
+        # do and don't: explicit "Do:"/"Don't:" lines anywhere, bullets under a Do or Don't heading
+        dm = DONT_LINE.match(line)
+        if dm and not COLOR.search(line):
+            text = _plain(dm.group(1))
+            if text and len(out['dont']) < 12:
+                out['dont'].append(text)
+            continue
+        bm = BULLET.match(line)
+        if bm and head and DONT_HEAD.search(head) and not DO_HEAD.search(head):
+            text = _plain(bm.group(1))
+            if text and len(out['dont']) < 12:
+                out['dont'].append(text)
+            continue
+        m = DO_LINE.match(line)
+        if m and re.match(r'^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\s*do\b', line, re.I):
+            text = _plain(m.group(1))
+            if text and len(out['do']) < 12:
+                out['do'].append(text)
+            continue
+        if bm and head and DO_HEAD.search(head):
+            text = _plain(bm.group(1))
+            if text and len(out['do']) < 12:
+                out['do'].append(text)
+    out['do'] = list(dict.fromkeys(out['do']))
+    out['dont'] = list(dict.fromkeys(out['dont']))
+    return out
 
 
 def to_spec(tokens: DesignTokens) -> dict:
@@ -521,7 +636,8 @@ def to_spec(tokens: DesignTokens) -> dict:
             'heading_font': tokens.heading_font.to_dict() if tokens.heading_font else None,
             'body_font': tokens.body_font.to_dict() if tokens.body_font else None,
             'mono_font': tokens.mono_font.to_dict() if tokens.mono_font else None,
-            'radius': tokens.radius, 'notes': list(tokens.notes), 'confidence': tokens.confidence}
+            'radius': tokens.radius, 'notes': list(tokens.notes), 'confidence': tokens.confidence,
+            **({'system': sysd} if (sysd := tokens.system()) else {})}
 
 
 _HEX6 = re.compile(r'^[0-9A-F]{6}$')
@@ -564,10 +680,44 @@ def clean_design(d) -> dict | None:
         conf = 1.0
     notes = [re.sub(r'[\x00-\x1f]', ' ', str(n))[:300] for n in (d.get('notes') or []) if isinstance(n, str)][:10] \
         if isinstance(d.get('notes'), list) else []
-    return {'name': re.sub(r'[\x00-\x1f<>]', '', str(d.get('name') or 'design.md'))[:120] or 'design.md',
-            'colors': colors, 'palette': palette, 'hatch': bool(d.get('hatch', len(palette) < 3)),
-            'heading_font': _clean_font(d.get('heading_font')), 'body_font': _clean_font(d.get('body_font')),
-            'mono_font': _clean_font(d.get('mono_font')), 'radius': radius, 'notes': notes, 'confidence': conf}
+    out = {'name': re.sub(r'[\x00-\x1f<>]', '', str(d.get('name') or 'design.md'))[:120] or 'design.md',
+           'colors': colors, 'palette': palette, 'hatch': bool(d.get('hatch', len(palette) < 3)),
+           'heading_font': _clean_font(d.get('heading_font')), 'body_font': _clean_font(d.get('body_font')),
+           'mono_font': _clean_font(d.get('mono_font')), 'radius': radius, 'notes': notes, 'confidence': conf}
+    system = clean_system(d.get('system'))
+    if system:
+        out['system'] = system
+    return out
+
+
+IMAGE_TREATMENTS = ('full-bleed', 'rounded', 'framed', 'duotone')
+
+
+def clean_system(s) -> dict | None:
+    """spec['design']['system'] made safe: {scale_ratio 1.05..1.8, spacing_unit 2..16, radius 0..48, image, do[], dont[]}
+    with only the valid keys, or None."""
+    if not isinstance(s, dict):
+        return None
+    out: dict = {}
+    for k, lo, hi in (('scale_ratio', 1.05, 1.8), ('spacing_unit', 2.0, 16.0), ('radius', 0.0, 48.0)):
+        v = s.get(k)
+        if isinstance(v, bool) or v is None:
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if f == f and lo <= f <= hi:
+            out[k] = round(f, 3)
+    if s.get('image') in IMAGE_TREATMENTS:
+        out['image'] = s['image']
+    for k in ('do', 'dont'):
+        if isinstance(s.get(k), list):
+            lines = [' '.join(re.sub(r'[\x00-\x1f<>]', ' ', str(x)).split())[:200] for x in s[k] if isinstance(x, str)]
+            lines = [x for x in lines if x][:12]
+            if lines:
+                out[k] = lines
+    return out or None
 
 
 # ---------- detection ----------

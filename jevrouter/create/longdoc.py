@@ -75,10 +75,30 @@ LONG_SHAPES = {
                '60 to 150 words, with bullets, tables and charts where the content calls for them.',
 }
 KIND_TEXT = {'timeline': 'a timeline block (4 to 12 dated events)', 'tree': 'a tree block (one root, 5 to 20 nodes)',
-             'flow': 'a flow block (3 to 8 steps joined by edges)', 'any': 'a timeline, tree or flow block or a chart'}
+             'flow': 'a flow block (3 to 8 steps joined by edges)',
+             # the Studio kinds (create/diagram.NEW_KINDS), written as a diagram block with this kind
+             'cycle': 'a diagram block of kind cycle (3 to 8 steps that repeat)',
+             'venn': 'a diagram block of kind venn (2 or 3 sets with items, and what they share)',
+             'pyramid': 'a diagram block of kind pyramid (3 to 6 levels, top first)',
+             'matrix': 'a diagram block of kind matrix (4 labelled quadrants with items, and the two axes)',
+             'mindmap': 'a diagram block of kind mindmap (one centre idea, 2 to 30 nodes)',
+             'process': 'a diagram block of kind process (2 to 7 steps, each a label and a short detail)',
+             'comparison': 'a diagram block of kind comparison (2 or 3 columns with items)',
+             'stat-cards': 'a diagram block of kind stat-cards (2 to 4 short numbers, each with a label)',
+             'scatter': 'a diagram block of kind scatter (2 to 200 points with x and y, and the axis labels)',
+             'any': 'a timeline, tree or flow block, a diagram block or a chart'}
 KIND_WORDS = {'timeline': re.compile(r'histor|origin|timeline|milestone|evolution|begin|began|era|develop', re.I),
               'tree': re.compile(r'type|kind|field|branch|categor|taxonom|structure|subfield|famil|class', re.I),
-              'flow': re.compile(r'how|process|work|step|pipeline|cycle|method|train|lifecycle', re.I)}
+              'flow': re.compile(r'how|process|work|step|pipeline|cycle|method|train|lifecycle', re.I),
+              'cycle': re.compile(r'cycle|loop|repeat|circular|lifecycle', re.I),
+              'venn': re.compile(r'compar|similar|differ|overlap|versus|\bvs\b|both', re.I),
+              'pyramid': re.compile(r'hierarch|level|pyramid|needs|priorit|food chain|tier', re.I),
+              'matrix': re.compile(r'swot|strength|weakness|priorit|quadrant|matrix|risk|trade', re.I),
+              'mindmap': re.compile(r'overview|concept|idea|theme|topic|introduc|summary', re.I),
+              'process': re.compile(r'how|process|step|method|procedure|stage|guide', re.I),
+              'comparison': re.compile(r'compar|versus|\bvs\b|pros|cons|differ|advantage|option', re.I),
+              'stat-cards': re.compile(r'fact|figure|number|statistic|key|impact|scale|data|result', re.I),
+              'scatter': re.compile(r'correlat|relationship|data|trend|measure|result|experiment', re.I)}
 
 
 @dataclasses.dataclass
@@ -237,7 +257,7 @@ def batches(parts: list[Part], n: int) -> list[list[Part]]:
 def asks(p: Part, slides: bool) -> str:
     what = [f'- "{p.heading}" (level {p.level}): ' + ('one slide' if slides else f'about {p.words} words')]
     for kind in p.diagrams:
-        what.append(f'Include {KIND_TEXT[kind]}.')
+        what.append(f'Include {KIND_TEXT.get(kind, KIND_TEXT["any"])}.')
     if p.figures:
         what.append(f'Include {p.figures} figure block{"s" if p.figures > 1 else ""} (a Wikimedia Commons search query '
                     f'and a caption).')
@@ -624,16 +644,21 @@ class Writer:
                               caveats=self.caveats, extra=self.results, design=getattr(self.job, 'design', None),
                               design_notes=getattr(self.job, 'design_notes', None))
         out.engine = self.tally.engine or self.engine.name
-        out.llm_in, out.llm_out, out.effort = tin, tout, 'low'
+        # finish()'s own calls (Studio's art direction, critic and freeform pages) add to the writer's, never replace
+        studio_in, studio_out = out.llm_in, out.llm_out
+        out.llm_in, out.llm_out, out.effort = tin + studio_in, tout + studio_out, 'low'
         final = next((p for p in out.phases if p['phase'] == 'render'), None)
-        self.tally.add('render', None, render_ms + (final['ms'] if final else 0), calls=0)
+        self.tally.add('render', None, render_ms + (final['ms'] if final else 0), calls=final['calls'] if final else 0)
+        if final:
+            self.tally.phases['render']['llm_in'] += final['llm_in']
+            self.tally.phases['render']['llm_out'] += final['llm_out']
         out.phases = [self.tally.phases[k] for k in ('outline', 'sections', 'topup', 'assets', 'render')
                       if k in self.tally.phases]
         out.repairs = dict(self.repairs) if self.repairs['calls'] else None
         out.partial = partial if out.file is not None else None
         if out.file is not None:
             out.file['phases'] = out.phases
-            out.file['tokens'] = tin + tout
+            out.file['tokens'] = tin + tout + studio_in + studio_out
             if out.repairs:
                 out.file['repairs'] = out.repairs
             if partial:
@@ -658,7 +683,8 @@ class Writer:
         for _ in range(MAX_FIT_RENDERS):
             t0 = time.perf_counter()
             try:
-                count, per_page = await asyncio.to_thread(measure, spec, fmt)
+                count, per_page = await asyncio.to_thread(measure, spec, fmt, brief=brief, request=self.req,
+                                                          design=getattr(self.job, 'design', None))
             except cf.SpecError as e:
                 self.caveats.append(f'The length could not be checked before the final build ({e.rule_id}: '
                                     f'{e.message}), so the file is as written.')
@@ -771,20 +797,46 @@ def _fill(parts: list[str], room: int) -> str:
     return '\n\n'.join(out)
 
 
-def measure(spec: dict, fmt: str) -> tuple[int, float]:
-    """(pages or slides the spec makes, words per text page). PDF renders; slides come from normalize; Word and
-    Markdown are estimated from words. Blocking."""
+def studio_count(spec: dict, fmt: str, *, brief=None, request: str = '', design: dict | None = None) -> int | None:
+    """The slides or pages Studio will make of this spec when TG_STUDIO designs the format (studio.agent.count_pages,
+    keyless, 0 tokens), or None when it doesn't or can't say (the standard renderer's count is used then)."""
+    from ..agents.create import studio_on
+    if fmt not in ('pptx', 'pdf') or not studio_on(fmt):
+        return None
     from .. import create as cf
+    from . import design as design_mod
+    try:
+        from ..studio import agent as studio_agent
+        norm, _ = cf.normalize(spec, fmt)
+        return studio_agent.count_pages(norm, fmt, brief=brief, request=request or '',
+                                        tokens_src=design_mod.clean_design(design) or None)
+    except cf.SpecError:
+        raise
+    except Exception:
+        return None
+
+
+def measure(spec: dict, fmt: str, *, brief=None, request: str = '', design: dict | None = None) -> tuple[int, float]:
+    """(pages or slides the spec makes, words per text page). PDF renders; slides come from normalize; Word and
+    Markdown are estimated from words. With Studio designing the format, the count is Studio's layout (its pages
+    start sections on a new page and set type larger, so the standard renderer's count would be wrong). Blocking."""
+    from .. import create as cf
+    designed = studio_count(spec, fmt, brief=brief, request=request, design=design)
     if fmt == 'pptx':
+        if designed is not None:
+            return designed, float(SLIDE_WORDS)
         norm, _ = cf.normalize(spec, fmt)
         return 1 + len(norm['sections']), float(SLIDE_WORDS)
     words = spec_words(spec)
     if fmt != 'pdf':
         return max(1, round(words / WORDS_PER_PAGE)), float(WORDS_PER_PAGE)
-    from io import BytesIO
+    if designed is not None:
+        pages = designed
+    else:
+        from io import BytesIO
 
-    from pypdf import PdfReader
-    pages = len(PdfReader(BytesIO(cf.render(spec, fmt))).pages)
+        from pypdf import PdfReader
+        pages = len(PdfReader(BytesIO(cf.render(spec, fmt))).pages)
     blocks = [b for s in spec.get('sections') or [] for b in s.get('blocks') or [] if isinstance(b, dict)]
     visual = DIAGRAM_PAGE * sum(b.get('type') in cf.DIAGRAMS for b in blocks) + \
         IMAGE_PAGE * sum(b.get('type') == 'image' for b in blocks) + \

@@ -17,6 +17,13 @@ MEETING = (FIXTURES / 'meeting_notes.txt').read_text()
 DOC = ({'name': 'design_system.md', 'kind': 'text'}, DESIGN)
 
 
+@pytest.fixture(autouse=True)
+def legacy_renderer(monkeypatch):
+    """These tests pin the standard renderer's behaviour (page and slide counts, calls to stub engines), so Studio is
+    off here; tests/test_studio_api.py covers the same paths with Studio on."""
+    monkeypatch.setenv('TG_STUDIO', 'off')
+
+
 def tokens(text=DESIGN, name='design_system.md') -> dm.DesignTokens:
     t = dm.parse_design(text, name)
     assert t is not None

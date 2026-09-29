@@ -80,6 +80,15 @@ class SandboxMemory:
             self.created.popitem(last=False)
 
 
+def forget_design(sid: str):
+    """A sandbox dropped off the LRU end takes its Studio design workspaces with it. Never raises."""
+    try:
+        from .studio import workspace
+        workspace.drop_sandbox(sid)
+    except Exception:
+        pass
+
+
 class Sandboxes:
     """Sandbox id -> SandboxMemory, least recently used first."""
 
@@ -100,7 +109,8 @@ class Sandboxes:
         m.touch(now)
         self.mem[sid] = m  # most recently used last
         while len(self.mem) > self.cap:
-            self.mem.popitem(last=False)
+            old, _ = self.mem.popitem(last=False)
+            forget_design(old)
         return m
 
     def peek(self, sid: str) -> SandboxMemory | None:

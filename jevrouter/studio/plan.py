@@ -30,7 +30,13 @@ PHASES = ('direct', 'assets', 'layout', 'thumbs', 'qa', 'fix', 'critic', 'freefo
 #   text:<literal, at most 120 chars, only for generated labels like "(continued)" or a slide number>
 #   asset:<sha256>  (create/assets.py cache)  ws:<kind>/<name>  (workspace)  icon:<lucide name>  art:<kind>:<seed>
 #   none
+# Amendment (builder L, additive): a spec ref may also slice and pick a field, resolved by layout.box_text:
+#   spec:<s>/<b>/rows[<i>:<j>]   table rows (the header row is always drawn)
+#   .../words[<i>:<j>]           a word range of a paragraph, quote or item (text split across slides/pages)
+#   ...#<field>                  REF_FIELDS: caption, credit, by, title, summary (chart), stat, rest (a statistic and
+#                                the words after it), continued ("<heading> (continued)"), footer (the running title)
 REF_PREFIXES = ('spec:', 'text:', 'asset:', 'ws:', 'icon:', 'art:', 'none')
+REF_FIELDS = ('caption', 'credit', 'by', 'title', 'summary', 'stat', 'rest', 'continued', 'footer')
 
 
 # ---------- the DesignPlan ----------
@@ -98,6 +104,7 @@ class PagePlan:
     continued: bool = False          # a split page ("(continued)")
     notes: str = ''                  # speaker notes (pptx) text
     boxes: list[Box] = field(default_factory=list)
+    direction: int | None = None     # amendment (L): index into the plan's direction pages this page came from
 
     @classmethod
     def from_dict(cls, d: dict) -> 'PagePlan':
@@ -316,7 +323,7 @@ def design_plan_schema() -> dict:
         'index': _INT, 'layout': {'type': 'string', 'enum': [*_layout_ids(), 'freeform']},
         'w': _NUM, 'h': _NUM, 'section': _NULL_INT, 'variant': {'type': 'string', 'enum': ['default', 'compact']},
         'freeform': _BOOL, 'background': _STR, 'continued': _BOOL, 'notes': _STR,
-        'boxes': {'type': 'array', 'items': BOX_SCHEMA},
+        'boxes': {'type': 'array', 'items': BOX_SCHEMA}, 'direction': _NULL_INT,
     }, ('index', 'layout', 'w', 'h', 'boxes'))
     font = _o({'family': _STR, 'role': {'type': 'string', 'enum': ['display', 'heading', 'body', 'caption', 'mono']},
                'source': _STR, 'licence': _STR, 'embedded': _BOOL, 'fallback': _NULL_STR, 'requested': _NULL_STR,

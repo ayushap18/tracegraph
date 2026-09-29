@@ -32,8 +32,10 @@ def result(results, rid):
 
 def test_schema_is_strict_small_and_ref_free():
     text = json.dumps(DOCSPEC_SCHEMA)
-    # diagrams, figures and page breaks (docs/PLAN-accuracy-v2.md C4) made it a little longer than the first 4,000
-    assert '$ref' not in text and '$defs' not in text and len(text) < 5000
+    # diagrams, figures and page breaks (docs/PLAN-accuracy-v2.md C4) made it a little longer than the first 4,000;
+    # Studio's nine writable diagram kinds (docs/PLAN-designer.md 3.4) share one generic diagram block of under 1,000
+    # characters instead of nine blocks of their own (about 3,500 more), so the cap moves from 5,000 to 5,500
+    assert '$ref' not in text and '$defs' not in text and len(text) < 5500
 
     def walk(node):
         if isinstance(node, dict):
@@ -49,8 +51,12 @@ def test_schema_is_strict_small_and_ref_free():
     kinds = [b['properties']['type']['enum'][0] for b in
              DOCSPEC_SCHEMA['properties']['sections']['items']['properties']['blocks']['items']['anyOf']]
     # the model writes every block type but `image`, which only code makes from a resolved figure
-    assert kinds == ['paragraph', 'bullets', 'table', 'chart', 'quote', 'code', 'timeline', 'tree', 'flow', 'figure',
-                     'page_break']
+    assert kinds == ['paragraph', 'bullets', 'table', 'chart', 'quote', 'code', 'timeline', 'tree', 'flow', 'diagram',
+                     'figure', 'page_break']
+    generic = DOCSPEC_SCHEMA['properties']['sections']['items']['properties']['blocks']['items']['anyOf'][9]
+    assert len(json.dumps(generic)) < 1000
+    from jevrouter.create import diagram
+    assert generic['properties']['kind']['enum'] == [k for k in diagram.NEW_KINDS if k != 'labelled']
 
 
 # ---------- block rules ----------

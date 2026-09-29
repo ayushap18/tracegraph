@@ -283,9 +283,9 @@ every builder; the contract test fails on removals, renames, reordering or chang
 | `workspace.py` | F | `DESIGN_DIR=data/cache/design, CAP_BYTES=1 GB, TTL_DAYS=14`; `class Workspace(file_id, root=None)` with `exists()`, `save_plan(plan)` (old one → `plan.prev.json`), `load_plan(previous=False)`, `save_report(report)`, `load_report()`, `put(kind, name, data) -> 'ws:<kind>/<name>'`, `get(ref) -> bytes \| None`, `path_of(ref) -> Path`, `save_thumb(page0, png) -> ref`, `thumbs() -> list[Path]`, `log(event)`, `events()`, `manifest()`, `copy_to(file_id) -> Workspace`, `delete()`; `open_workspace(file_id, *, sandbox=None)`; `drop(file_id)`; `drop_sandbox(sandbox_id)`; `prune(cap_bytes, ttl_days) -> int`. On disk: `plan.json report.json manifest.json events.jsonl images/ diagrams/ art/ thumbs/<001>.png text/measure.json` |
 | `direct.py` | L | dataclasses `PageOutline, Outline`; `outline_of(spec, fmt) -> Outline`; `direct_keyless(outline, ds, *, dark=None) -> ArtDirection` (rules of 3.1 + D7 variety); `async direct_llm(outline, ds, engine, *, mood=(), max_tokens=2000, effort='low') -> (ArtDirection, usage)` (falls back to keyless on any failure); `validate_direction(raw, outline, fmt) -> (ArtDirection, notes)` |
 | `library.py` | L | data `SLIDE_GRID=(12,12), PAGE_GRID=(12,16)`, dataclasses `Slot, LayoutDef`, `SLIDE_LAYOUTS` (16), `PAGE_TEMPLATES` (8) — 9.5; `get(id) -> LayoutDef`; `slide_layouts()`; `page_templates()`; `for_format(fmt) -> tuple[str, ...]`; `slot_kinds(id) -> {slot: kinds}` (built); `next_best(id, avoid=frozenset(), *, needs=()) -> str \| None` |
-| `layout.py` | L | `SLIDE=(960,540)`, `PAPER{a4,letter,a3,a2}`, `FIX_ACTIONS=('shrink','rebalance','compact','split','recrop','swap_layout','snap')`, dataclass `FitResult`; `page_size(fmt, paper=None)` (built); `grid_rect(area, size, ds, *, bleed=False, fmt='pptx') -> (x,y,w,h)`; `fit_text(text, family, step, ds, w, h, fmt, *, bold=False, line_height=None) -> FitResult`; `lay_out(spec, fmt, ds, direction, ws, *, file_id, paper=None) -> DesignPlan`; `lay_out_page(i, spec, fmt, ds, direction, ws, size) -> list[PagePlan]`; `refit(plan, spec, page, action, ds, ws, *, box=None, arg=None) -> bool`; `relayout(plan, spec, ds, ws, *, layouts=None) -> DesignPlan`; `flow_styles(spec, fmt, ds) -> dict` (docx/md/xlsx, `FLOW_SCHEMA`); `box_text(box, spec) -> str` |
+| `layout.py` | L | `SLIDE=(960,540)`, `PAPER{a4,letter,a3,a2}`, `FIX_ACTIONS=('shrink','rebalance','compact','split','recrop','swap_layout','snap','enlarge')`, dataclass `FitResult`; `page_size(fmt, paper=None)` (built); `grid_rect(area, size, ds, *, bleed=False, fmt='pptx') -> (x,y,w,h)`; `fit_text(text, family, step, ds, w, h, fmt, *, bold=False, line_height=None) -> FitResult`; `lay_out(spec, fmt, ds, direction, ws, *, file_id, paper=None) -> DesignPlan`; `lay_out_page(i, spec, fmt, ds, direction, ws, size) -> list[PagePlan]`; `refit(plan, spec, page, action, ds, ws, *, box=None, arg=None) -> bool`; `relayout(plan, spec, ds, ws, *, layouts=None) -> DesignPlan`; `flow_styles(spec, fmt, ds) -> dict` (docx/md/xlsx, `FLOW_SCHEMA`); `box_text(box, spec) -> str` |
 | `paint_pptx.py`, `paint_pdf.py` | L | `paint(plan, spec, ws) -> bytes` each. No layout decisions; F/A/X rules hold as in `create/render.py`; PDF subsets and embeds fonts |
-| `qa.py` | Q | data `CHECKS, THRESHOLDS, WEIGHTS, PASS_SCORE=80, FIXES` (9.8); `check(plan, ws=None, *, thumbs=None) -> list[QaResult]`; `run_check(id, plan, ws=None, *, thumbs=None)`; `score(results) -> int` (built); `report(plan, results, *, critic=None, fallbacks=None, notes=None, thumbs=0) -> dict`; `contrast(fg, bg) -> float` (built) |
+| `qa.py` | Q | data `CHECKS, THRESHOLDS, WEIGHTS, PASS_SCORE=80, FIXES, EMPTY_FIXES` (9.8); `check(plan, ws=None, *, thumbs=None) -> list[QaResult]`; `run_check(id, plan, ws=None, *, thumbs=None)`; `score(results) -> int` (built); `report(plan, results, *, critic=None, fallbacks=None, notes=None, thumbs=0) -> dict`; `contrast(fg, bg) -> float` (built) |
 | `thumbs.py` | Q | `THUMB_PX=480, SHEET_PX=1200, 3×2 per sheet`; `render_page(plan, page, ws, *, width_px=480, spec=None) -> png`; `render_all(plan, ws, *, width_px=480, spec=None) -> list[ref]`; `contact_sheet(pngs, *, cols=3, rows=2, width_px=1200, first_page=1) -> png`; `sample(png, box, page_size) -> list[hex]`; `preset_thumb(preset_id, *, width_px=320) -> png` |
 | `critic.py` | Q | dataclass `CriticReply`; `can_see(engine) -> bool` (built: `engine.supports_vision`); `async critique(plan, report, sheets, engine, *, budget_tokens=6000, effort='medium') -> CriticReply` (never raises); `validate_edits(raw, plan, ds) -> (edits, dropped)`; `apply_edit(plan, edit, spec, ds, ws) -> bool` |
 | `freeform.py` | Q | `async compose(page, section, ds, engine, ws, *, fmt, refs=(), budget_tokens=2000) -> (ShapeProgram \| None, usage)`; `validate(raw, ds, ws, *, page, fmt, refs=()) -> (ShapeProgram \| None, problems)`; `to_boxes(program, size, ds, spec, *, fmt, ws) -> list[Box]` |
@@ -481,7 +481,7 @@ edit that lowers the score or adds a D1–D3 failure is rolled back; a freeform 
 | D1 | Overflow | 20 | measured text height ≤ box h + 0.5 pt; no line wider than the box | shrink, rebalance, compact, split |
 | D2 | Overlap | 15 | no intersection > 1 pt² unless the upper box is `overlay_ok` | snap, compact, swap_layout |
 | D3 | Readability | 20 | size ≥ minimum (slides 18/12 caption, print 10/8); contrast ≥ 4.5:1, ≥ 3:1 at ≥ 24 pt or ≥ 18.66 pt bold; over photos against the worst sampled thumbnail pixel | shrink, recrop |
-| D4 | Density | 10 | slides ≤ 40 words with bullets, ≤ 60 prose; white space 25–60 % (print 15–60 %) | rebalance, split, compact |
+| D4 | Density | 10 | slides ≤ 40 words with bullets, ≤ 60 prose; white space 25–60 % (print 15–60 %) | rebalance, split, compact (crowded); enlarge (looks empty: `qa.EMPTY_FIXES`, the page's table, chart or diagram grows toward the bottom of its slot) |
 | D5 | Balance | 5 | visual-weight centre in the middle third both ways (skipped: asymmetric layouts, covers, freeform) | swap_layout |
 | D6 | Consistency | 10 | sizes on the scale ± 0.5 pt; text left edges on grid columns ± 2 pt; one image treatment | snap |
 | D7 | Variety | 10 | no layout > 3 consecutive slides; 8+ slides use ≥ 4 layouts (pptx) | swap_layout |
@@ -520,8 +520,9 @@ preset's roles and `confidence` is 1. The per-phase breakdown is `DesignReport.p
 ### 9.10 Integration and the feature flag
 
 - **Flag**: `TG_STUDIO` read on every file by `config.studio_formats()`: unset/empty → `STUDIO_DEFAULT`; `0/off/
-  false/no` → none; `1/on/true/yes` → `STUDIO_ON = ('pptx', 'pdf')`; otherwise a comma list of formats. **Phase 0:
-  `STUDIO_DEFAULT = ''` (off)**; it becomes `'on'` when L and Q land. `studio.enabled(fmt)` is the only check.
+  false/no` → none; `1/on/true/yes` → `STUDIO_ON = ('pptx', 'pdf')`; otherwise a comma list of formats. Phase 0 shipped
+  `STUDIO_DEFAULT = ''` (off); with L and Q built it is now **`STUDIO_DEFAULT = 'pptx,pdf'`** (on for slides and
+  PDFs). `studio.enabled(fmt)` is the only check.
 - **agents/create.py** (builder I): `finish()` pre-generates the file id (`uuid4().hex[:12]`) and, when
   `studio.enabled(fmt)`, after X4 calls `await studio.agent.design(norm_spec, fmt, file_id=…, brief=brief,
   request=job.request, tokens_src=spec.get('design'), engine=engine, http=job.http, mode=mode, sandbox=…,
@@ -553,3 +554,33 @@ preset's roles and `confidence` is 1. The per-phase breakdown is `DesignReport.p
 Shared files: `studio/plan.py` and `tests/test_studio_contract.py` change only by contract amendment. Nobody edits a
 file they don't own; a needed change goes to the owner. Every builder keeps `.venv/bin/pytest -q` green and the flag-off
 byte-identity test passing.
+
+### 9.12 Amendments (additive, made while building)
+
+All of these add to the contract; nothing was removed, renamed or reordered, and `tests/test_studio_contract.py` still
+checks the original signatures and fields.
+
+- **`PagePlan.direction`** (L): a new last field, `int | None = None`, the index of the art-direction page a page plan
+  came from (a split slide or page keeps its source's index). `design_plan_schema()` accepts it as an optional
+  nullable integer.
+- **Ref grammar** (L): a `spec:` ref may slice and pick a field, resolved by `layout.box_text`:
+  `spec:<s>/<b>/rows[<i>:<j>]` (table rows, header always drawn), `.../words[<i>:<j>]` (a word range of a paragraph,
+  quote or item), and `...#<field>` with `plan.REF_FIELDS = caption, credit, by, title, summary, stat, rest,
+  continued, footer`.
+- **`PageOutline` fields** (L): three new last fields, `parallel: bool = False` (two headed bullet lists, a
+  comparison), `texts: int = 0` (paragraphs, bullet items and quotes) and `table_cols: int = 0` (columns of the widest
+  table).
+- **`fonts.prune(cap_bytes=CACHE_BYTES, keep=())`** (F): `keep` names families that are never evicted (the ones the
+  current file uses).
+- **`freeform.compose(..., budget_tokens=2000, feedback=())`** (Q): `feedback` is the list of problems from the last
+  invalid program, sent back to the model on its one retry.
+- **Engines** (Q): `Engine.supports_vision` and the `images=` keyword on `stream()`; `AutoEngine.supports_vision` is
+  true only while its chain has a healthy engine that can read images, and Auto routes an image call to that engine.
+- **Keyless at 0 tokens** (I): a file made with no writer call (an earlier answer, an attached table, a conversion,
+  a checkpoint rebuild) is designed keyless too, so "put that in a PDF" still costs 0 tokens.
+- **Slide and page counts** (I): `agent.count_pages(spec, fmt, *, brief=None, request='', tokens_src=None,
+  preset=None) -> int` lays a spec out keyless in a throwaway workspace; the long writer's fit loop measures with it
+  when Studio designs the format. A deck held to a slide count gets no Studio-made closing slide when that slide
+  would go over the count (`agent._hold_count`; the layout engine keeps a direction without one on a restyle).
+- **Flag**: `STUDIO_DEFAULT = 'pptx,pdf'`, so Studio is on for slides and PDFs; `TG_STUDIO=off` turns it off and
+  still gives the legacy renderers' exact bytes.
