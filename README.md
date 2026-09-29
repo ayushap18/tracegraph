@@ -15,7 +15,7 @@ Routing is the part of an agent system that is hardest to see. TraceGraph makes 
 - **One router call per subtask.** Jev's `system_one` answers four questions at once: *which agent*, *how urgent*, *is it unsafe*, and *is it clear enough*. Guard rules turn those answers into `blocked` or `clarify` outcomes.
 - **Multi-agent chains.** "Weather in Paris **and** convert 100 EUR to INR" becomes two subtasks, routed and run in parallel, then merged into one answer.
 - **Keyless by default.** The built-in agents call free public APIs: math (a safe evaluator), weather (Open-Meteo), time zones, currency (Frankfurter), knowledge (DuckDuckGo/Wikipedia abstracts), code (Stack Overflow), and chat.
-- **Bring your own LLM subscription.** The planner, the code/knowledge/chat agents, a web-search `research` agent and the merger can run on **Claude Code**, **Codex**, **Antigravity** or **OpenCode** (your existing login, no API key), or on any OpenAI-compatible **API key** (OpenAI, OpenRouter, Gemini, Groq, DeepSeek, Mistral, xAI, or your own endpoint). You can switch engines live from the header. The default, **Auto**, tries Claude Code → Codex → Antigravity → OpenCode → your API keys in the order you set (header menu or `TG_ENGINE_ORDER`), moves on to the next when one is out of quota, logged out or timing out, and skips a failed engine for 10 minutes. CLI processes are started ahead of time, so a call only waits for the model. If every engine fails, the agent falls back to its keyless version.
+- **Bring your own LLM: a subscription or any API key.** The planner, the code/knowledge/chat agents, a web-search `research` agent and the merger can run on **Claude Code**, **Codex**, **Antigravity** or **OpenCode** (your existing login, no API key), or on any OpenAI-compatible **API key** (OpenAI, OpenRouter, Gemini, Groq, DeepSeek, Mistral, xAI, or your own endpoint). You can switch engines live from the header. The default, **Auto**, tries Claude Code → Codex → Antigravity → OpenCode → your API keys in the order you set (header menu or `TG_ENGINE_ORDER`), moves on to the next when one is out of quota, logged out or timing out, and skips a failed engine for 10 minutes. CLI processes are started ahead of time, so a call only waits for the model. If every engine fails, the agent falls back to its keyless version.
 - **Live trace graph.** A fixed five-column layout (Query → Subtasks → Route → Agents → Response) with:
   - node cards showing live metrics and status
   - edges whose width follows Jev's probability
@@ -32,7 +32,7 @@ Routing is the part of an agent system that is hardest to see. TraceGraph makes 
 - **Files.** Attach TXT, MD, CSV, JSON or PDF. The `document` agent searches passages and the `data` agent computes table statistics.
 - **Heavy agents.** `report` writes sourced long-form reports. `run` writes and executes code inside Codex's OS sandbox, and only appears when Codex is the engine.
 - **Custom agents.** Describe a specialist and give it a prompt; Jev starts routing to it immediately.
-- **Compare engines.** One question sent to Claude Code, Codex, Antigravity or the API, with the answers side by side.
+- **Compare engines.** One question sent to Claude Code, Codex, Antigravity, OpenCode or any of your API keys, with the answers side by side.
 - **Evals.** A 40-case suite built from real failure modes, run through the actual pipeline, with accuracy, silent-wrong answers and a history trend.
 - **Saved history.** Runs, chats, files, agents and eval results are stored in SQLite and survive restarts. Every run has a shareable `#/runs/:id` page with Answer, Trace, Timeline, Subtasks and Raw tabs.
 - **Run control.** A Stop button, per-run deadlines, and a CLI child process that is killed on cancel.
@@ -74,10 +74,10 @@ flowchart LR
     A1 & A2 --> M[Merger] --> R[Response]
 ```
 
-1. **Plan.** The keyless planner splits on conjunctions only when Jev's `multi` check agrees (≥ 0.5). With an LLM key, the model plans the split instead.
+1. **Plan.** The keyless planner splits on conjunctions only when Jev's `multi` check agrees (≥ 0.5). With an LLM engine, the model plans the split instead.
 2. **Route.** Each subtask gets one Jev call. If `unsafe ≥ 0.7`, the outcome is **blocked**. If confidence is below 0.45 or the query isn't clear, the outcome is **clarify**. Otherwise the subtask goes to the top-scoring agent.
 3. **Run.** Agents run concurrently and stream partial output.
-4. **Merge.** A single subtask passes straight through. Several are joined, or summarized by the LLM when a key is set.
+4. **Merge.** A single subtask passes straight through. Several are joined, or summarized by the LLM when an engine is available.
 
 The server streams every step to the browser over Server-Sent Events. The full event protocol is specified in [`PLAN.md`](PLAN.md).
 
@@ -92,7 +92,7 @@ cd tracegraph
 # backend
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-cp .env.example .env          # then set TYPESAFE_API_KEY
+cp .env.example .env          # then set TYPESAFE_API_KEY (and, optionally, an LLM API key)
 
 # frontend
 cd web && npm install && npm run build && cd ..
@@ -119,11 +119,11 @@ Hot-reload frontend development: run the server, then `cd web && npm run dev`. V
 
 Keys are read from the environment or a `.env` file next to `server.py`. `.env` is git-ignored.
 
-### LLM engines: use your subscription
+### LLM engines: your login or any API key
 
-![Engine picker: Claude Code and Codex available on your plan, Antigravity and the API shown with what's missing](docs/screenshots/engine-picker.jpg)
+![Engine picker: Claude Code and Codex available on your plan, other engines shown with what's missing](docs/screenshots/engine-picker.jpg)
 
-TraceGraph runs the official CLI of each tool as a headless child process on **your own login**. Usage counts against that plan, just as if you ran the CLI yourself. TraceGraph never reads or copies their credentials.
+There are two kinds of engine. **CLI engines** run the official CLI of each tool as a headless child process on **your own login**: usage counts against that plan, just as if you ran the CLI yourself, and TraceGraph never reads or copies their credentials. **API-key engines** call any OpenAI-compatible `/chat/completions` endpoint and bill per token; every provider whose key is set shows up as its own engine in the picker.
 
 | Engine | Plan | Setup | Headless call |
 |---|---|---|---|
@@ -133,10 +133,33 @@ TraceGraph runs the official CLI of each tool as a headless child process on **y
 | **OpenCode** | any provider you signed in to, or OpenCode's free models | install [OpenCode](https://opencode.ai), optionally `opencode auth login` | `opencode run --format json` |
 | **API key** | pay per token | set a provider's key (table above) | OpenAI-compatible `/chat/completions`, streamed |
 
-With `TG_ENGINE=auto`, the first installed CLI wins, in the order Claude Code → Codex → Antigravity → OpenCode → API keys. With none of them, TraceGraph runs keyless. The server prints what it found at startup.
+With `TG_ENGINE=auto`, the first installed CLI wins, in the order Claude Code → Codex → Antigravity → OpenCode → API keys. With none of them, TraceGraph runs keyless. The server prints what it found at startup, and the picker shows each API engine's model.
+
+Built-in API providers (set the key, optionally `TG_<NAME>_MODEL`):
+
+| Engine | Key | Default model |
+|---|---|---|
+| `openai` | `OPENAI_API_KEY` | `gpt-5` |
+| `openrouter` | `OPENROUTER_API_KEY` | `openrouter/auto` |
+| `gemini` | `GEMINI_API_KEY` | `gemini-2.5-flash` |
+| `groq` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
+| `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` |
+| `mistral` | `MISTRAL_API_KEY` | `mistral-large-latest` |
+| `xai` | `XAI_API_KEY` | `grok-4` |
+| `api` | `TG_API_KEY` (optional) | `TG_API_MODEL` at `TG_API_BASE_URL` |
+
+What each engine can do (the app only offers a feature where the engine supports it):
+
+| Engine | Web search (`research`) | Runs code (`run`) | Reads images (Studio critic, Polish) |
+|---|---|---|---|
+| Claude Code | yes | no | yes |
+| Codex | yes | yes, in its OS sandbox | no |
+| Antigravity | no | no | no |
+| OpenCode | no | no | no |
+| API key | OpenRouter only | no | yes, except Groq and DeepSeek |
 
 Each call is isolated:
-- It runs in an empty scratch directory with a scrubbed environment: the Jev key is never passed on, and API keys are removed so the CLI stays on your plan.
+- It runs in an empty scratch directory with a scrubbed environment: the Jev key is never passed on, and Claude Code, Codex and Antigravity get no API keys, so they stay on your plan.
 - It has a deadline and is killed with its whole process group if it overruns or you cancel.
 - Calls per engine are capped to respect plan rate limits.
 - Claude Code runs without tools, MCP servers or settings unless a call needs web search. That keeps each call to a few hundred tokens instead of about 100K.
@@ -170,7 +193,10 @@ jevrouter/
   merger.py               single / concat / LLM merge
   agents/tools.py         keyless agents
   agents/llm.py           LLM agents (engine-agnostic) with streaming and fallback
-  engines/                claude-code, codex, agy, opencode (CLI subprocess runner) and API-key engines
+  engines/cli.py          headless CLI runner: scratch dirs, warm pool, timeouts, process-group kill
+  engines/claude_code.py, codex.py, agy.py, opencode.py   one small class per CLI
+  engines/api.py          OpenAI-compatible API-key engines and the provider list
+  engines/auto.py         Auto: health-aware order and fall-through between engines
   app.py                  aiohttp routes, SSE, static files
 tests/                    pytest suite (parsers, planner, pipeline, LLM paths with fakes, HTTP)
 web/                      React + TypeScript + D3 dashboard (Vite)
@@ -181,12 +207,12 @@ PLAN.md                   design notes and the SSE protocol
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/pytest -q           # 155 tests
+.venv/bin/pytest -q           # about 2,500 tests
 .venv/bin/python -m jevrouter.evals --engine none   # routing/answer eval suite
 cd web && npm run build       # strict TypeScript check + production build
 ```
 
-The LLM code paths are tested against a fake API client and fake `claude`/`codex`/`agy` binaries that emit each CLI's real event format, so the suite needs no logins, keys or network.
+The LLM code paths are tested against a fake API client, a local OpenAI-compatible SSE server, and fake `claude`/`codex`/`agy`/`opencode` binaries that emit each CLI's real event format, so the suite needs no logins, keys or network.
 
 CI (`.github/workflows/ci.yml`) runs the tests and the web build on every push and pull request to `main`. The eval suite also runs there once a `TYPESAFE_API_KEY` repo secret is added, since Jev routing calls the TypeSafe API.
 
