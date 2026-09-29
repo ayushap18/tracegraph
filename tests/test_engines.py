@@ -1,4 +1,4 @@
-"""CLI engines against fake `claude` / `codex` / `agy` binaries that speak each tool's NDJSON format.
+"""CLI engines against fake `claude` / `codex` / `agy` / `opencode` binaries that speak each tool's NDJSON format.
 
 No logins, no network: each fake is a tiny Python script, so these tests pin the exact flags we pass, how events become
 deltas, error handling, timeouts, process cleanup and the environment the child sees.
@@ -15,6 +15,7 @@ from jevrouter.engines import EngineError, catalog, choose, parse_json
 from jevrouter.engines.agy import AgyEngine
 from jevrouter.engines.claude_code import ClaudeCodeEngine
 from jevrouter.engines.codex import CodexEngine
+from jevrouter.engines.opencode import OpenCodeEngine
 
 SCHEMA = {'type': 'object', 'properties': {'subtasks': {'type': 'array', 'items': {'type': 'string'}}}}
 
@@ -26,7 +27,7 @@ def fake(tmp_path, name, body):
         import json, os, sys, time
         argv = sys.argv[1:]
         stdin = sys.stdin.read()
-        seen = {k: os.environ.get(k) for k in ('TYPESAFE_API_KEY', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'NO_COLOR')}
+        seen = {k: os.environ.get(k) for k in ('TYPESAFE_API_KEY', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'NO_COLOR', 'PWD')}
         json.dump({'argv': argv, 'stdin': stdin, 'env': seen, 'pid': os.getpid(), 'cwd': os.getcwd()},
                   open(__file__ + '.call.json', 'w'))
         out = lambda e: print(json.dumps(e), flush=True)
@@ -137,6 +138,50 @@ async def test_codex_turn_failed(tmp_path):
         await CodexEngine(path).stream(system='s', prompt='p')
 
 
+OPENCODE_OK = '''
+    sid = {'sessionID': 'ses_1'}
+    out({'type': 'step_start', **sid, 'part': {'type': 'step-start'}})
+    out({'type': 'tool_use', **sid, 'part': {'type': 'tool', 'tool': 'shell', 'state': {'status': 'error'}}})
+    out({'type': 'text', **sid, 'part': {'type': 'text', 'text': 'Paris.'}})
+    out({'type': 'text', **sid, 'part': {'type': 'text', 'text': 'Source: https://en.wikipedia.org/wiki/Paris'}})
+    out({'type': 'step_finish', **sid, 'part': {'type': 'step-finish', 'tokens': {'input': 4868, 'output': 20,
+         'reasoning': 31, 'cache': {'read': 5632, 'write': 0}}}})
+'''
+
+
+async def test_opencode_reads_stdin_prompt_and_locks_tools_down(tmp_path, monkeypatch):
+    monkeypatch.setenv('TG_OPENCODE_MODEL', 'anthropic/some-model')
+    path = fake(tmp_path, 'opencode', OPENCODE_OK)
+    chunks = []
+    e = OpenCodeEngine(path)
+    r = await e.stream(system='Be brief.', prompt='capital?', emit_delta=chunks.append, schema=SCHEMA)
+    assert r.text == 'Paris.\n\nSource: https://en.wikipedia.org/wiki/Paris' and chunks == ['Paris.', '\n\nSource: https://en.wikipedia.org/wiki/Paris']
+    assert (r.input_tokens, r.output_tokens) == (4868 + 5632, 51) and r.source == 'https://en.wikipedia.org/wiki/Paris'
+    c = call(path)
+    assert c['argv'] == ['run', '--format', 'json', '-m', 'anthropic/some-model']
+    assert c['stdin'].startswith('Be brief.') and c['stdin'].endswith('---\n\ncapital?') and '"subtasks"' in c['stdin']
+    assert c['env']['TYPESAFE_API_KEY'] is None
+    # PWD names the scratch dir: OpenCode takes its directory (and so opencode.json) from PWD, not the real cwd
+    assert os.path.realpath(c['env']['PWD']) == os.path.realpath(c['cwd'])
+    # every tool that acts on the machine is behind "ask", which a headless run can't grant
+    cfg = json.loads(open(os.path.join(c['cwd'], 'opencode.json')).read())
+    assert {cfg['permission'][t] for t in ('edit', 'bash', 'shell', 'webfetch', 'external_directory')} == {'ask'}
+    assert not e.supports_web and not e.supports_exec and e.billing == 'subscription'
+    await e.aclose()
+
+
+@pytest.mark.parametrize('error, why', [
+    ({'type': 'provider.auth', 'message': 'Unauthorized: missing API key', 'status': 401}, 'opencode auth login'),
+    ({'type': 'provider.no-route', 'message': 'Model unavailable: nope/nothing'}, 'Model unavailable: nope/nothing'),
+    ({'name': 'ProviderAuthError', 'data': {'message': "OpenCode's free tier can only be used from within OpenCode"}},
+     'free tier'),
+])
+async def test_opencode_error_event(tmp_path, error, why):
+    path = fake(tmp_path, 'opencode', f"out({{'type': 'error', 'error': {error!r}}}); sys.exit(1)\n")
+    with pytest.raises(EngineError, match=why):
+        await OpenCodeEngine(path).stream(system='s', prompt='p')
+
+
 async def test_agy_stream_json(tmp_path):
     path = fake(tmp_path, 'agy', '''
         out({'type': 'init', 'cwd': '.', 'tools': [], 'permission_mode': 'default'})
@@ -219,19 +264,20 @@ async def test_missing_binary(monkeypatch):
 def test_choose_prefers_subscriptions(monkeypatch, tmp_path):
     installed = {'claude': None, 'codex': '/x/codex', 'agy': '/x/agy'}
     monkeypatch.setattr('shutil.which', lambda name: installed.get(name))
-    for var in ('TG_CLAUDE_BIN', 'TG_CODEX_BIN', 'TG_AGY_BIN'):
+    for var in ('TG_CLAUDE_BIN', 'TG_CODEX_BIN', 'TG_AGY_BIN', 'TG_OPENCODE_BIN'):
         monkeypatch.delenv(var, raising=False)
     engines = catalog()
     monkeypatch.setenv('TG_ENGINE', 'auto')
     auto = choose(engines)
     assert auto.name == 'auto' and auto.lead().name == 'codex'  # claude missing, so the next subscription CLI
-    assert [e.name for e in auto.chain()] == ['codex', 'agy', 'anthropic']  # the API key is the last resort
+    assert [e.name for e in auto.chain()] == ['codex', 'agy', 'openai']  # the API key is the last resort
+    assert 'anthropic' not in engines and 'gemini' not in engines  # no Anthropic engine; unset keys add nothing
     assert choose(engines, 'agy').name == 'agy'
     assert choose(engines, 'claude-code').name == 'auto'  # unavailable explicit choice falls back to auto
-    assert choose(engines, 'anthropic').name == 'anthropic'  # ANTHROPIC_API_KEY is set by the fixture
+    assert choose(engines, 'openai').name == 'openai'  # OPENAI_API_KEY is set by the fixture
     assert choose(engines, 'none') is None
     installed.clear()
-    monkeypatch.delenv('ANTHROPIC_API_KEY')
+    monkeypatch.delenv('OPENAI_API_KEY')
     assert choose(catalog()) is None  # nothing installed, no key: keyless mode
 
 
@@ -333,16 +379,16 @@ class Stub:
 
 async def test_auto_falls_through_and_cools_down_a_used_up_plan():
     from jevrouter.engines import AutoEngine
-    claude, codex, api = Stub('claude-code'), Stub('codex', fail="You've hit your usage limit"), Stub('anthropic')
-    auto = AutoEngine({'codex': codex, 'claude-code': claude, 'anthropic': api}, order=['codex', 'claude-code', 'anthropic'])
+    claude, codex, api = Stub('claude-code'), Stub('codex', fail="You've hit your usage limit"), Stub('openai')
+    auto = AutoEngine({'codex': codex, 'claude-code': claude, 'openai': api}, order=['codex', 'claude-code', 'openai'])
     chunks = []
     r = await auto.stream(system='s', prompt='p', emit_delta=chunks.append)
     assert r.text == 'claude-code ok' and r.engine == 'claude-code' and 'switching to Claude-Code' in ''.join(chunks)
     await auto.stream(system='s', prompt='p')
     assert codex.calls == 1  # skipped while cooling down, not retried on every call
     assert 'usage limit' in auto.info()['cooling']['codex'] and auto.lead().name == 'claude-code'
-    auto.set_order(['anthropic'])
-    assert auto.order == ['anthropic', 'codex', 'claude-code'] and auto.info()['cooling'] == {}
+    auto.set_order(['openai'])
+    assert auto.order == ['openai', 'codex', 'claude-code'] and auto.info()['cooling'] == {}
 
 
 async def test_auto_picks_an_engine_that_can_do_the_call():

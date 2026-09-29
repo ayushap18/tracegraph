@@ -3,10 +3,13 @@
 Run: .venv/bin/python server.py   then open http://localhost:8777 (PORT env var overrides)
 Config comes from the environment or a .env file next to this script:
   TYPESAFE_API_KEY  required (Jev routing)
-  TG_ENGINE         auto (default) | claude-code | codex | agy | anthropic | none
-                    auto tries every installed subscription CLI, then ANTHROPIC_API_KEY, moving on when one fails;
+  TG_ENGINE         auto (default) | none | an engine: claude-code, codex, agy, opencode, or an API provider
+                    (openai, openrouter, gemini, groq, deepseek, mistral, xai, api, or one in data/providers.json)
+                    auto tries every installed CLI, then every API key that is set, moving on when one fails;
                     with none of them it runs the keyless agents only.
-  TG_ENGINE_ORDER   the order auto tries engines in, e.g. codex,claude-code,agy,anthropic (also settable in the UI)
+  TG_ENGINE_ORDER   the order auto tries engines in, e.g. codex,claude-code,opencode,openai (also settable in the UI)
+  OPENAI_API_KEY    (or OPENROUTER_, GEMINI_, GROQ_, DEEPSEEK_, MISTRAL_, XAI_API_KEY) adds that API as an engine;
+                    TG_API_BASE_URL + TG_API_MODEL (+ TG_API_KEY) add any OpenAI-compatible endpoint as `api`
   TG_WARM_POOL      pre-started CLI processes kept per engine so calls skip start-up (default 3, 0 turns it off)
   TG_DB             SQLite file for runs, sessions, agents, files and evals (default data/tracegraph.db)
   TG_RUN_TIMEOUT    per-run deadline in seconds (default 300)

@@ -4,8 +4,8 @@ Contact sheets (6 pages each) plus the design report go to the model; it returns
 Budget: <= STUDIO_CRITIC_ROUNDS rounds and <= STUDIO_CRITIC_TOKENS tokens in all.
 
 Vision: an engine can see when `getattr(engine, 'supports_vision', False)` is true; such engines accept
-`images=[png bytes, ...]` in Engine.stream (additive keyword, builder Q adds it to engines/base.py, anthropic_api.py
-and claude_code.py). Other engines skip the critic with a note.
+`images=[png bytes, ...]` in Engine.stream (additive keyword: engines/base.py, api.py and
+claude_code.py). Other engines skip the critic with a note.
 
 Owner: builder Q.
 """

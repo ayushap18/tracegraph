@@ -168,6 +168,9 @@ def kill_group(proc):
 
 
 async def start(path, args, *, env, cwd):
+    # PWD must name the scratch directory too: an inherited one points at the server's own directory, and some CLIs
+    # (OpenCode) take their working directory, and so their project config, from PWD rather than the real cwd.
+    env = {**env, 'PWD': cwd}
     try:
         return await asyncio.create_subprocess_exec(
             path, *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,

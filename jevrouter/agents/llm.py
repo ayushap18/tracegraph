@@ -1,5 +1,5 @@
-"""LLM agents (code, knowledge, chat, research). They run on whichever engine is active: an Anthropic API key or a
-subscription CLI (Claude Code, Codex, Antigravity). Every call streams so the browser can show text as it arrives."""
+"""LLM agents (code, knowledge, chat, research). They run on whichever engine is active: a subscription CLI (Claude
+Code, Codex, Antigravity, OpenCode) or an API key. Every call streams so the browser can show text as it arrives."""
 import re
 
 from ..engines import Engine, Reply, parse_json

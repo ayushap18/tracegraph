@@ -803,28 +803,31 @@ async def test_paint_failure_propagates_for_the_legacy_fallback(stage, monkeypat
 
 
 def test_engine_vision_flags():
-    from jevrouter.engines.anthropic_api import AnthropicEngine
+    from jevrouter.engines.api import ApiEngine, Provider
     from jevrouter.engines.base import Engine
     from jevrouter.engines.claude_code import ClaudeCodeEngine
     from jevrouter.engines.codex import CodexEngine
-    assert AnthropicEngine(client=object()).supports_vision and ClaudeCodeEngine('/bin/false').supports_vision
+    seeing = ApiEngine(Provider('p', 'P', 'https://p.test/v1', 'm'), client=object())
+    blind = ApiEngine(Provider('q', 'Q', 'https://q.test/v1', 'm', vision=False), client=object())
+    assert seeing.supports_vision and ClaudeCodeEngine('/bin/false').supports_vision and not blind.supports_vision
     assert not Engine().supports_vision and not CodexEngine('/bin/false').supports_vision
-    assert AnthropicEngine(client=object()).info()['vision'] is True
-    assert critic.can_see(AnthropicEngine(client=object())) and not critic.can_see(CodexEngine('/bin/false'))
+    assert seeing.info()['vision'] is True and blind.info()['vision'] is False
+    assert critic.can_see(seeing) and not critic.can_see(CodexEngine('/bin/false')) and not critic.can_see(blind)
 
 
-async def test_anthropic_engine_sends_images_as_blocks():
-    from tests.fakes import FakeAnthropic, eng
-    fake = FakeAnthropic(['{"edits": []}'], ['plain'])
+async def test_api_engine_sends_images_as_data_urls():
+    from tests.fakes import FakeLLM, eng
+    fake = FakeLLM(['{"edits": []}'], ['plain'])
     e = eng(fake)
     png = png_of('red')
     await e.stream(system='s', prompt='look', images=[png])
-    content = fake.calls[0]['messages'][0]['content']
-    assert content[0]['type'] == 'image' and content[0]['source']['media_type'] == 'image/png'
+    content = fake.calls[0]['messages'][1]['content']
+    url = content[0]['image_url']['url']
+    assert content[0]['type'] == 'image_url' and url.startswith('data:image/png;base64,')
     import base64
-    assert base64.b64decode(content[0]['source']['data']) == png and content[1] == {'type': 'text', 'text': 'look'}
+    assert base64.b64decode(url.split(',', 1)[1]) == png and content[1] == {'type': 'text', 'text': 'look'}
     await e.stream(system='s', prompt='no pictures')
-    assert fake.calls[1]['messages'][0]['content'] == 'no pictures'
+    assert fake.calls[1]['messages'][1]['content'] == 'no pictures'
 
 
 CLAUDE_OK = '''

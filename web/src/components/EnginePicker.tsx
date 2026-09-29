@@ -6,9 +6,10 @@ import { EngineIcon, Icon } from '../icons'
 import { setEngine, setEngineOrder, errorText } from '../api'
 import { iconButtonClass, useToast } from '../ui'
 
-// Which LLM backend writes plans, answers and merges. Subscription CLIs (Claude Code, Codex, Antigravity) run on the
-// user's own plan; the Anthropic API bills per token; "Keyless" uses only the built-in agents. "Auto" tries them in
-// the user's order and moves on to the next one when a call fails (out of quota, logged out, timed out).
+// Which LLM backend writes plans, answers and merges. Subscription CLIs (Claude Code, Codex, Antigravity, OpenCode) run
+// on the user's own login; each configured API key (OpenAI, OpenRouter, Gemini, a custom endpoint...) bills per token;
+// "Keyless" uses only the built-in agents. "Auto" tries them in the user's order and moves on to the next one when a
+// call fails (out of quota, logged out, timed out).
 export function EnginePicker({ engine, engines, placement = 'down', compact = false }: {
   engine: EngineInfo | null; engines: EngineInfo[]; placement?: 'down' | 'up'; compact?: boolean
 }) {
@@ -61,7 +62,7 @@ export function EnginePicker({ engine, engines, placement = 'down', compact = fa
             'outline-none transition-colors hover:border-edge focus-visible:ring-[3px] focus-visible:ring-ring/35 disabled:opacity-60',
             compact ? 'size-9 justify-center p-0' : 'w-full px-2.5',
           )}>
-          <EngineIcon name={current} size={15} />
+          <EngineIcon name={current} api={engine?.billing === 'api'} size={15} />
           {!compact && <span className="min-w-0 flex-1 truncate text-left">{label}</span>}
           {!compact && engine?.billing === 'subscription' && <span className="rounded-sm bg-ok/10 px-1 text-[11px] font-medium text-ok">plan</span>}
           {!compact && <Icon name="chevron-down" size={14} className="text-muted-foreground" />}
@@ -85,14 +86,14 @@ export function EnginePicker({ engine, engines, placement = 'down', compact = fa
                   'hover:bg-subtle focus-visible:bg-subtle disabled:cursor-not-allowed disabled:opacity-50',
                   o.name === current && 'bg-subtle',
                 )}>
-                <span className="mt-0.5 text-muted-foreground"><EngineIcon name={o.name} size={15} /></span>
+                <span className="mt-0.5 text-muted-foreground"><EngineIcon name={o.name} api={o.billing === 'api'} size={15} /></span>
                 <span className="flex min-w-0 flex-1 flex-col">
                   <span className="text-[13px] font-medium text-foreground">{o.label}</span>
                   <span className="text-xs text-muted-foreground">
                     {!o.available ? o.why
                       : o.name === 'auto' ? `tries ${chain || 'each engine'} in order`
                       : o.billing === 'subscription' ? `your subscription${o.web ? ', web search' : ''}`
-                      : o.billing === 'api' ? `API key, pay per token${o.web ? ', web search' : ''}`
+                      : o.billing === 'api' ? `API key${'model' in o && o.model ? ` · ${o.model}` : ', pay per token'}${o.web ? ', web search' : ''}`
                       : 'built-in agents only, no LLM'}
                   </span>
                 </span>
@@ -109,7 +110,7 @@ export function EnginePicker({ engine, engines, placement = 'down', compact = fa
                   const note = !e?.available ? e?.why : auto.cooling?.[n] ? `skipped for now: ${auto.cooling[n]}` : n === auto.lead ? 'used first' : ''
                   return (
                     <li key={n} title={note} className={cn('flex items-center gap-2 py-1', !e?.available && 'opacity-50')}>
-                      <EngineIcon name={n} size={14} />
+                      <EngineIcon name={n} api={e?.billing === 'api'} size={14} />
                       <span className="flex min-w-0 flex-1 flex-col">
                         <span className="truncate text-[13px] text-foreground">{e?.label ?? n}</span>
                         {note && <span className="truncate text-xs text-muted-foreground">{note}</span>}

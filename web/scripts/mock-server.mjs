@@ -53,7 +53,8 @@ const ENGINES = [
   { name: 'claude-code', label: 'Claude Code', billing: 'subscription', web: true, available: true, why: '', vision: true },
   { name: 'codex', label: 'Codex', billing: 'subscription', web: true, available: true, why: '', vision: false },
   { name: 'agy', label: 'Antigravity', billing: 'subscription', web: false, available: false, why: 'agy CLI not found on PATH', vision: false },
-  { name: 'anthropic', label: 'Anthropic API', billing: 'api', web: true, available: true, why: '', vision: true },
+  { name: 'opencode', label: 'OpenCode', billing: 'subscription', web: false, available: true, why: '', vision: false },
+  { name: 'openai', label: 'OpenAI API', billing: 'api', web: false, available: true, why: '', vision: true, model: 'gpt-5' },
 ]
 let activeEngine = null // null = keyless
 

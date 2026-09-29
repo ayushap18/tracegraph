@@ -998,7 +998,7 @@ async def preview_sandbox_created(request):
 RESTYLE_KEYS = ('preset', 'fonts', 'dark', 'template', 'layouts', 'print')
 FONT_ROLES = ('display', 'heading', 'body')
 NOT_DESIGNED = 'This file was made without the design stage, so it has no thumbnails.'
-NO_VISION = ("Polish needs an engine that can read images (Claude Code or the Anthropic API); {what} can't, so the "
+NO_VISION = ("Polish needs an engine that can read images (Claude Code or an API key with a vision model); {what} can't, so the "
              "design was not changed.")
 
 

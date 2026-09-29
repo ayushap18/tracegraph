@@ -54,13 +54,14 @@ export const UI_ICONS = {
 
 export type UiIconName = keyof typeof UI_ICONS
 
-// LLM engines: subscription CLIs and the pay-per-token API, plus keyless mode.
+// LLM engines: subscription CLIs, plus keyless mode. Every API-key engine (openai, openrouter, a custom provider...)
+// gets the key glyph.
 export const ENGINE_ICONS: Record<string, LucideIcon> = {
-  auto: Zap, 'claude-code': SquareTerminal, codex: Braces, agy: Rocket, anthropic: KeyRound, none: PlugZap,
+  auto: Zap, 'claude-code': SquareTerminal, codex: Braces, agy: Rocket, opencode: CodeXml, api: KeyRound, none: PlugZap,
 }
 
-export function EngineIcon({ name, size = 15, strokeWidth = 1.9, className }: { name: string; size?: number; strokeWidth?: number; className?: string }) {
-  const C = ENGINE_ICONS[name] ?? Cpu
+export function EngineIcon({ name, api = false, size = 15, strokeWidth = 1.9, className }: { name: string; api?: boolean; size?: number; strokeWidth?: number; className?: string }) {
+  const C = ENGINE_ICONS[name] ?? (api ? KeyRound : Cpu)
   return <C size={size} strokeWidth={strokeWidth} aria-hidden="true" focusable="false" className={className} />
 }
 

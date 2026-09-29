@@ -73,19 +73,19 @@ function usePresets() {
   return { ...state, loading: !state, retry: () => setNonce(n => n + 1) }
 }
 
-/** Whether an engine can read images: the server says so (`vision`), else Claude Code and the Anthropic API can. */
+/** Whether an engine can read images: the server says so (`vision`), else Claude Code and most API-key engines can. */
 function vision(e: EngineInfo | null | undefined) {
   if (!e) return false
-  return e.vision ?? (e.name === 'claude-code' || e.name === 'anthropic')
+  return e.vision ?? (e.name === 'claude-code' || e.billing === 'api')
 }
 /** The engine Polish would use and, when it can't, why. Auto resolves to the engine it tries first. */
 function usePolishEngine(): { engine: EngineInfo | null; reason: string | null } {
   const { store } = useStore()
   let e = store.engine
   if (e?.name === 'auto') e = store.engines.find(x => x.name === e?.lead) ?? null
-  if (!e) return { engine: null, reason: 'Polish needs an engine that can look at images. You are in keyless mode; pick Claude Code or the Anthropic API in Settings.' }
+  if (!e) return { engine: null, reason: 'Polish needs an engine that can look at images. You are in keyless mode; pick Claude Code or an API key with a vision model in Settings.' }
   if (!e.available) return { engine: e, reason: `${e.label} is not available right now${e.why ? `: ${e.why}` : ''}.` }
-  if (!vision(e)) return { engine: e, reason: `${e.label} can't look at images, so it can't polish a design. Switch to Claude Code or the Anthropic API to use Polish.` }
+  if (!vision(e)) return { engine: e, reason: `${e.label} can't look at images, so it can't polish a design. Switch to Claude Code or an API key with a vision model to use Polish.` }
   return { engine: e, reason: null }
 }
 

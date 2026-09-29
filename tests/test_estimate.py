@@ -14,7 +14,7 @@ VIEWS = {
     'agy': est.EngineView('agy', 'Antigravity', 'subscription', True),
     'claude-code': est.EngineView('claude-code', 'Claude Code', 'subscription', True),
     'codex': est.EngineView('codex', 'Codex', 'subscription', True),
-    'anthropic': est.EngineView('anthropic', 'Anthropic API', 'api', True),
+    'openai': est.EngineView('openai', 'OpenAI API', 'api', True),
 }
 Q2750 = ('create the ppt on the how mobile phone is being evolved history past present everything a ppt of 12 slides '
          'using the multiple pictured diagrams and also use the design.md for the design')
@@ -99,14 +99,14 @@ def test_zero_token_paths_cost_no_create_call():
 
 
 def test_api_billing_gives_dollars_and_a_lower_threshold():
-    api = VIEWS['anthropic']
+    api = VIEWS['openai']  # any API-key engine prices as 'api'
     e = est.estimate(est.Draft('make a 20 page pdf about the history of tea'), api, None, deadline_s=900)
     assert e.billing == 'api' and e.dollars and 0 < e.dollars[0] < e.dollars[1]
     assert e.long_file and e.breakdown[0]['phase'] == 'outline'
     # an API engine writes two batches side by side
     sections = next(b for b in e.breakdown if b['phase'] == 'sections' and not b['optional'])
     assert sections['calls'] >= 2
-    assert COST_CONFIRM_TOKENS['anthropic'] < COST_CONFIRM_TOKENS['agy']
+    assert COST_CONFIRM_TOKENS['api'] < COST_CONFIRM_TOKENS['agy']
 
 
 def test_thresholds():

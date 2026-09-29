@@ -3,7 +3,7 @@ import json
 import pytest
 
 from jevrouter.planner import candidate_split, plan
-from tests.fakes import FakeAnthropic, FakeJev, api_errors, eng
+from tests.fakes import FakeLLM, FakeJev, api_errors, eng
 
 
 @pytest.mark.parametrize('q,parts', [
@@ -79,21 +79,20 @@ async def test_heuristic_survives_jev_failure():
 
 
 async def test_claude_planner():
-    claude = FakeAnthropic(['{"subtasks": ["weather in Paris", ', '"convert 100 EUR to INR"]}'])
+    claude = FakeLLM(['{"subtasks": ["weather in Paris", ', '"convert 100 EUR to INR"]}'])
     jev = FakeJev()
     # deep mode: the LLM plans even a split the heuristic is sure of (balanced lets that one stand, see test_speed.py)
     p = await plan('weather in Paris and convert 100 EUR to INR', jev, eng(claude), mode='deep')
-    assert p['planner'] == 'anthropic' and p['subtasks'] == ['weather in Paris', 'convert 100 EUR to INR'] and p['multi'] is None
+    assert p['planner'] == 'api' and p['subtasks'] == ['weather in Paris', 'convert 100 EUR to INR'] and p['multi'] is None
     # Jev's only call is the safety check on the whole query (it runs alongside the planner); a safe query ends there
     assert p['claude_in'] == 10 and [c[1] for c in jev.calls] == [['unsafe']] and p['jev_tokens'] == 100
     kw = claude.calls[0]
-    assert kw['model'] == 'claude-opus-5' and kw['output_config']['effort'] == 'low'
-    assert kw['output_config']['format']['type'] == 'json_schema' and kw['thinking'] == {'type': 'adaptive'}
-    assert kw['betas'] == ['server-side-fallback-2026-07-01'] and kw['fallbacks'] == 'default'
+    assert kw['model'] == 'test-model' and kw['reasoning_effort'] == 'low'
+    assert kw['response_format']['type'] == 'json_schema' and 'JSON schema' in kw['messages'][0]['content']
 
 
 async def test_claude_planner_caps_at_four():
-    claude = FakeAnthropic([json.dumps({'subtasks': [f'task {i}' for i in range(6)] + ['  ']})])
+    claude = FakeLLM([json.dumps({'subtasks': [f'task {i}' for i in range(6)] + ['  ']})])
     p = await plan('do a, b, c, d, e and f', FakeJev(), eng(claude))
     assert p['subtasks'] == ['task 0', 'task 1', 'task 2', 'task 3']
 
@@ -101,7 +100,7 @@ async def test_claude_planner_caps_at_four():
 @pytest.mark.parametrize('bad', ['rate', 'status', 'conn', 'json', 'refusal', 'empty'])
 async def test_claude_planner_falls_back(bad):
     item = {'json': ['not json'], 'refusal': ('refusal', ['no']), 'empty': ['{"subtasks": []}']}.get(bad) or api_errors()[bad]
-    p = await plan('weather in Paris and convert 100 EUR to INR', FakeJev(multi=0.9), eng(FakeAnthropic(item)))
+    p = await plan('weather in Paris and convert 100 EUR to INR', FakeJev(multi=0.9), eng(FakeLLM(item)))
     assert p['planner'] == 'heuristic' and len(p['subtasks']) == 2
 
 

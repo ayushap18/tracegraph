@@ -13,6 +13,15 @@ def local_cases(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_api_keys(tmp_path, monkeypatch):
+    """The developer's own API keys and data/providers.json never add engines to a test's catalog."""
+    from jevrouter.engines.api import BUILTIN
+    for var in {p.key_env for p in BUILTIN} | {'TG_API_BASE_URL', 'TG_API_MODEL', 'TG_API_KEY'}:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv('TG_PROVIDERS', str(tmp_path / 'providers.json'))
+
+
+@pytest.fixture(autouse=True)
 def no_meanings_lookup(monkeypatch):
     """The lone-term check (jevrouter/gate.py) asks DuckDuckGo for a term's meanings; tests never touch the network, so
     by default no term is ambiguous. Tests of that check patch gate.meanings themselves."""

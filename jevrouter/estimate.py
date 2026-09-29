@@ -61,7 +61,8 @@ ENGINES = {
     'agy': EngineCost(12_400, 3, 4.0, 20, 3, 2, 1),
     'codex': EngineCost(15_200, 2, 2.0, 15, 6, 2, 1),
     'claude-code': EngineCost(1_500, 1, 1.5, 8, 10, 1, 0),
-    'anthropic': EngineCost(300, 1, 1.0, 3, 12, 1, 0),
+    'opencode': EngineCost(10_500, 1, 1.5, 10, 10, 1, 0),
+    'api': EngineCost(300, 1, 1.0, 3, 12, 1, 0),  # every API-key engine: a bare chat completion
     'default': EngineCost(2_000, 1, 1.5, 10, 10, 1, 0),
 }
 RESEARCH = {'claude-code': (50_000, 3_000, 90), 'default': (40_000, 3_000, 90)}   # (in, out, seconds) of a web search
@@ -142,7 +143,9 @@ class Estimate:
 
 
 def cost_of(engine: EngineView | None) -> EngineCost:
-    return ENGINES.get(engine.name if engine else '', ENGINES['default'])
+    if engine is None:
+        return ENGINES['default']
+    return ENGINES.get(engine.name) or ENGINES['api' if engine.billing == 'api' else 'default']
 
 
 def per_call_s(engine: EngineView) -> float:
@@ -473,7 +476,7 @@ def needs_confirmation(est: Estimate) -> bool:
     deadline."""
     if est.keyless or not est.calls:
         return False
-    limit = COST_CONFIRM_TOKENS.get(est.engine or 'default', COST_CONFIRM_TOKENS['default'])
+    limit = COST_CONFIRM_TOKENS.get(est.engine or '') or COST_CONFIRM_TOKENS['api' if est.billing == 'api' else 'default']
     high_tokens = est.range['tokens_in'][1] + est.range['tokens_out'][1]
     return (high_tokens >= limit or est.calls >= COST_CONFIRM_CALLS or est.seconds >= COST_CONFIRM_SECONDS or
             bool(est.deadline_s and est.range['seconds'][1] >= COST_DEADLINE_SHARE * est.deadline_s))

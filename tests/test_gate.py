@@ -310,11 +310,11 @@ async def test_engine_rewrite_that_keeps_there_falls_back_to_the_keyless_resolve
 
 
 async def test_llm_plan_step_that_points_back_waits_for_the_one_before():
-    from tests.fakes import FakeAnthropic, eng
-    claude = FakeAnthropic(['{"subtasks": [{"text": "Convert 50 EUR to INR", "depends_on": []}, '
+    from tests.fakes import FakeLLM, eng
+    claude = FakeLLM(['{"subtasks": [{"text": "Convert 50 EUR to INR", "depends_on": []}, '
                             '{"text": "What time is it there?", "depends_on": []}]}'])
     p = await plan('Convert 50 EUR to INR and then what time is it there', FakeJev(), eng(claude))
-    assert p['planner'] == 'anthropic' and p['deps'] == [[], [0]]
+    assert p['planner'] == 'api' and p['deps'] == [[], [0]]
 
 
 # ---------- s21: a harmful part is never dropped ----------

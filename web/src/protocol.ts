@@ -1,13 +1,14 @@
 // Mirrors the SSE protocol table in PLAN.md. Server -> browser, `data: <json>\n\n` on GET /events.
 
 export type Source = 'you' | 'autopilot' | 'chat' | 'compare' | 'eval' | 'sandbox'
-// Planner, answer and merge engines carry the LLM engine's name (claude-code, codex, agy, anthropic) or a built-in mode.
+// Planner, answer and merge engines carry the LLM engine's name (claude-code, codex, agy, opencode, an API provider such as openai) or a built-in mode.
 export type Planner = string // engine name | 'heuristic'
 export type Engine = string // engine name | 'keyless'
 export type MergeEngine = string // engine name | 'concat' | 'single'
 
 export interface EngineInfo {
   name: string; label: string; billing: 'api' | 'subscription'; web: boolean; available: boolean; why: string
+  model?: string  // API-key engines: the model each call asks for
   // Auto only: the order it tries engines in, the one it will try first, and engines skipped after a recent failure.
   order?: string[]; lead?: string | null; cooling?: Record<string, string>
 }
@@ -679,7 +680,7 @@ export interface DesignApplied {
   thumbs?: number              // how many thumbnails GET /api/created/{id}/thumbs serves
 }
 /** Studio (builder W): whether the engine can read images (Python `Engine.supports_vision`), so the Design panel can
- *  disable Polish with a reason. Absent on older servers; the client then assumes claude-code and anthropic can. */
+ *  disable Polish with a reason. Absent on older servers; the client then assumes claude-code and API-key engines can. */
 export interface EngineInfo {
   vision?: boolean
 }

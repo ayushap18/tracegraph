@@ -1,7 +1,7 @@
 """Auto engine: the user's own order of backends, falling through to the next one when a call fails.
 
-The default order puts the subscription CLIs first (Claude Code, Codex, Antigravity) and the pay-per-token Anthropic
-API last, so a plan that is out of quota, logged out or timing out never fails a run while another backend works.
+The default order puts the subscription CLIs first (Claude Code, Codex, Antigravity, OpenCode) and the pay-per-token
+API keys last, so a plan that is out of quota, logged out or timing out never fails a run while another backend works.
 TG_ENGINE_ORDER (comma separated) or the UI sets the order. An engine that just failed is skipped for a while, so a
 used-up plan costs one failed call, not one per request. Each move to the next engine is counted in engines/health.py.
 

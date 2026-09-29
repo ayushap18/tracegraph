@@ -71,7 +71,7 @@ MODES = ('quick', 'balanced', 'deep', 'research')
 STYLES = ('default', 'concise', 'detailed', 'bullets', 'steps', 'simple', 'table')
 # Deep mode with no engine named: the strongest healthy engine, in this order. An engine that is cooling down after a
 # failure, or whose recent calls succeeded less often than DEEP_MIN_OK, is passed over.
-STRONGEST = ('claude-code', 'anthropic', 'codex', 'agy')
+STRONGEST = ('claude-code', 'codex', 'agy', 'opencode')  # then the API-key engines, in the user's order
 DEEP_MIN_OK = 0.5
 GROUP_MAX = 3  # several answers: at most this many engines in one group from one ask
 
@@ -122,7 +122,8 @@ PRICES = {'jev_in': 0.042, 'claude_in': 5.0, 'claude_out': 25.0}
 # Cost preflight (docs/PLAN-files-robust.md 5.3). A run whose estimate crosses any of these asks the user to confirm
 # first (/ask returns 409 without starting). TG_COST_CONFIRM=0 turns the guard off; it is read on every request.
 COST_CONFIRM = True
-COST_CONFIRM_TOKENS = {'agy': 120_000, 'codex': 120_000, 'claude-code': 150_000, 'anthropic': 60_000,
+COST_CONFIRM_TOKENS = {'agy': 120_000, 'codex': 120_000, 'claude-code': 150_000, 'opencode': 120_000,
+                       'api': 60_000,        # every pay-per-token API-key engine
                        'default': 100_000}   # high end of tokens_in + tokens_out
 COST_CONFIRM_CALLS = 5                   # mid model calls, planner and merge included
 COST_CONFIRM_SECONDS = 180               # mid seconds

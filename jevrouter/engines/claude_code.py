@@ -5,6 +5,7 @@ one-word reply. These flags cut that to a few hundred: no tools unless the call 
 no setting sources, no slash commands, and our own short system prompt. `--bare` is not used because it also
 disables the subscription login.
 """
+import base64
 import json
 import os
 from pathlib import Path
@@ -45,6 +46,15 @@ class ClaudeCodeParser(Parser):
         if r.get('stop_reason') == 'refusal':
             raise EngineRefusal(reply)
         return reply
+
+
+def user_content(prompt: str, images=None):
+    """The user turn in the CLI's (Messages API) shape: the plain prompt, or base64 PNG image blocks then the prompt."""
+    if not images:
+        return prompt
+    blocks = [{'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png',
+                                           'data': base64.b64encode(png).decode('ascii')}} for png in images]
+    return [*blocks, {'type': 'text', 'text': prompt}]
 
 
 def normalize_error(msg: str) -> str:
@@ -96,7 +106,6 @@ class ClaudeCodeEngine(CliEngine):
 
     def with_images(self, *, system, prompt, effort, web, schema, images):
         """(argv, one stream-json stdin line) for a prompt with PNG images before it."""
-        from .anthropic_api import user_content
         message = {'role': 'user', 'content': user_content(prompt, images)}
         line = json.dumps({'type': 'user', 'message': message}) + '\n'
         return self.flags(system, effort, web, schema) + ['--input-format', 'stream-json'], line

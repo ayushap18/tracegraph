@@ -1,4 +1,4 @@
-"""Stand-ins for the Jev and Anthropic clients so tests never touch the network."""
+"""Stand-ins for the Jev client and an API-key engine's HTTP client so tests never touch the network."""
 import asyncio
 from types import SimpleNamespace as NS
 
@@ -41,64 +41,44 @@ class FakeJev:
                            'clear': NS(noul=self.clear), 'hard': NS(score=hard)}, usage=usage, model='jev-test')
 
 
-class FakeStream:
-    def __init__(self, chunks, stop_reason, error):
-        self.chunks, self.stop_reason, self.error = chunks, stop_reason, error
-
-    async def __aenter__(self):
-        if self.error:
-            raise self.error
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-    @property
-    def text_stream(self):
-        async def gen():
-            for c in self.chunks:
-                await asyncio.sleep(0)
-                yield c
-        return gen()
-
-    async def get_final_message(self):
-        return NS(stop_reason=self.stop_reason, usage=NS(input_tokens=10, output_tokens=len(self.chunks)),
-                  content=[NS(type='text', text=''.join(self.chunks), citations=None)])
-
-
-class FakeAnthropic:
-    """Each stream() call pops the next script entry: a list of text chunks, ('refusal', chunks), or an Exception."""
+class FakeLLM:
+    """Stands in for the HTTP client of an API-key engine. Each stream() call pops the next script entry: a list of
+    text chunks (an Exception among them is raised at that point, after the chunks before it), ('refusal', chunks), or
+    an Exception raised before any chunk. `calls` keeps (url, headers, body) bodies as dicts, with url and headers
+    folded in under '_url' and '_headers'."""
 
     def __init__(self, *script):
         self.script = list(script)
         self.calls = []
-        self.beta = NS(messages=NS(stream=self.stream))
 
-    def stream(self, **kwargs):
-        self.calls.append(kwargs)
+    async def stream(self, url, headers, body):
+        self.calls.append({**body, '_url': url, '_headers': headers})
         item = self.script.pop(0) if self.script else ['ok']
         if isinstance(item, Exception):
-            return FakeStream([], 'end_turn', item)
-        if isinstance(item, tuple):
-            return FakeStream(item[1], item[0], None)
-        return FakeStream(item, 'end_turn', None)
+            raise item
+        refusal = isinstance(item, tuple)
+        chunks = item[1] if refusal else item
+        for c in chunks:
+            await asyncio.sleep(0)
+            if isinstance(c, Exception):
+                raise c
+            yield {'choices': [{'index': 0, 'delta': {'content': c}, 'finish_reason': None}]}
+        yield {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'content_filter' if refusal else 'stop'}]}
+        yield {'choices': [], 'usage': {'prompt_tokens': 10, 'completion_tokens': len(chunks)}}
 
 
 def api_errors():
-    import anthropic
-    import httpx2 as httpx
-    req = httpx.Request('POST', 'https://api.anthropic.com/v1/messages')
-    return {
-        'rate': anthropic.RateLimitError('slow down', response=httpx.Response(429, request=req), body=None),
-        'status': anthropic.InternalServerError('boom', response=httpx.Response(500, request=req), body=None),
-        'conn': anthropic.APIConnectionError(request=req),
-    }
+    from jevrouter.engines.api import HttpError
+    return {'rate': HttpError(429, 'slow down'), 'status': HttpError(500, 'boom'), 'conn': ConnectionError('refused')}
 
 
-def eng(fake):
-    """Wraps a FakeAnthropic client in the real Anthropic engine, so tests exercise the engine code too."""
-    from jevrouter.engines.anthropic_api import AnthropicEngine
-    return AnthropicEngine(client=fake)
+def eng(fake, web=True):
+    """Wraps a FakeLLM in the real API-key engine (named `api`, with web search on unless web=False), so tests
+    exercise the engine code too."""
+    from jevrouter.engines.api import ApiEngine, Provider
+    provider = Provider('api', 'Test API', 'https://llm.test/v1', 'test-model', 'TEST_API_KEY', json_schema=True,
+                        effort=True, web={'plugins': [{'id': 'web'}]} if web else {})
+    return ApiEngine(provider, client=fake)
 
 
 class FakeEngine:

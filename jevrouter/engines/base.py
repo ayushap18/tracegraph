@@ -1,7 +1,7 @@
 """The engine contract: anything that can turn (system, prompt) into streamed text.
 
-Planner, merger and the LLM agents only talk to this interface, so an Anthropic API key, a Claude Code subscription,
-a Codex (ChatGPT) subscription or an Antigravity (Google) subscription are interchangeable backends.
+Planner, merger and the LLM agents only talk to this interface, so a Claude Code, Codex (ChatGPT), Antigravity
+(Google) or OpenCode login and any OpenAI-compatible API key are interchangeable backends.
 """
 import json
 import os
@@ -70,6 +70,9 @@ class Engine:
     async def aclose(self):
         pass
 
+
+# For engines without a structured-output option: the schema goes into the instructions and parse_json reads the reply.
+SCHEMA_NOTE = '\n\nReply with only a JSON value (no prose, no Markdown fence) that matches this JSON schema:\n'
 
 FENCE = re.compile(r'^```(?:json)?\s*|\s*```$')
 

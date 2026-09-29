@@ -34,7 +34,8 @@ export const ENGINES = {
     { name: 'claude-code', label: 'Claude Code' },
     { name: 'codex', label: 'Codex' },
     { name: 'agy', label: 'Antigravity' },
-    { name: 'anthropic', label: 'Anthropic API' },
+    { name: 'opencode', label: 'OpenCode' },
+    { name: 'api', label: 'Any API key' },
     { name: 'none', label: 'Built-in tools' },
   ],
 }
@@ -82,8 +83,8 @@ export const QUICKSTART = {
 export const FAQ = {
   title: 'Common questions',
   items: [
-    { q: 'Do I need an API key?', a: 'Jev routing needs a TypeSafe API key. Answers can come from Claude Code, Codex or Antigravity on the plan you already have, from the Anthropic API, or from built-in tools that need no LLM key at all.' },
-    { q: 'Which engine answers my questions?', a: 'With TG_ENGINE=auto the first installed CLI wins, in the order Claude Code, Codex, Antigravity, then an Anthropic API key. With none of them, TraceGraph runs keyless. You can switch engines from the app at any time.' },
+    { q: 'Do I need an API key?', a: 'Jev routing needs a TypeSafe API key. Answers can come from Claude Code, Codex, Antigravity or OpenCode on the login you already have, from any OpenAI-compatible API key (OpenAI, OpenRouter, Gemini, Groq, DeepSeek, Mistral, xAI or your own endpoint), or from built-in tools that need no LLM key at all.' },
+    { q: 'Which engine answers my questions?', a: 'With TG_ENGINE=auto the first installed CLI wins, in the order Claude Code, Codex, Antigravity, OpenCode, then each API key you have set. With none of them, TraceGraph runs keyless. You can switch engines from the app at any time.' },
     { q: 'Are my keys passed on to the CLIs?', a: 'No. Each call runs in an empty scratch directory with a scrubbed environment. The Jev key is never passed on, and API keys are removed so the CLI stays on your plan.' },
     { q: 'Where are runs and chats stored?', a: 'Locally, in SQLite: runs, chat sessions, custom agents, uploaded files and eval results. Only the routing calls to Jev and the calls to the engine you pick leave your machine.' },
     { q: 'Can I work on the UI without a backend?', a: 'Yes. Run npm run mock in the web folder to replay a scripted event stream, then point the dev server at it.' },
